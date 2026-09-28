@@ -58,8 +58,8 @@ function QuietButton({
  * Deliberately available before *and* after the asset is saved. Saving files it to the Context
  * Store for the next stage to read, which is a different job from getting it out to a client — and
  * an operator who wants the file is just as likely to want it from an approved asset as a draft. */
-export function AssetExportButtons({ text, label, stageNumber }: AssetExportTarget) {
-  const { download, share, downloadFlash, shareFlash } = useAssetExport({ text, label, stageNumber });
+export function AssetExportButtons({ text, label, stageNumber, preamble, assetId }: AssetExportTarget) {
+  const { download, share, downloadFlash, shareFlash } = useAssetExport({ text, label, stageNumber, preamble, assetId });
 
   return (
     <>
@@ -85,9 +85,11 @@ export function AssetExportMenuItems({
   text,
   label,
   stageNumber,
+  preamble,
+  assetId,
   onDone,
 }: AssetExportTarget & { onDone?: () => void }) {
-  const { download, share, downloadFlash, shareFlash } = useAssetExport({ text, label, stageNumber });
+  const { download, share, downloadFlash, shareFlash } = useAssetExport({ text, label, stageNumber, preamble, assetId });
 
   return (
     <>

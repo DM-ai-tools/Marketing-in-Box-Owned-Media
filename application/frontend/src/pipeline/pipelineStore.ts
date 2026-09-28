@@ -451,7 +451,9 @@ interface PipelineState {
    * transient failure; a merely disappointing asset usually needs a different input — another
    * target service, another headline, another lead-magnet concept. */
   rerunStage: (messageId: string) => void;
-  saveCompetitorStep: (messageId: string) => Promise<void>;
+  /** Save the reviewed listing. `approved` is what the operator chose on the card — a subset of the
+   * search result, or their own list; omitted, the whole search result is saved. */
+  saveCompetitorStep: (messageId: string, approved?: CompetitorAnalysisResult) => Promise<void>;
   retryCompetitorStep: (messageId: string) => Promise<void>;
   /** Re-read the page for a scrape that failed, while its field is still the one being asked. */
   retryPageScrape: (messageId: string) => Promise<void>;
@@ -3558,17 +3560,22 @@ chooseHeadlines: async (messageId, ids) => {
     });
   },
 
-  saveCompetitorStep: async (messageId) => {
+  saveCompetitorStep: async (messageId, approved) => {
     const message = liveMessage(get(), messageId);
-    const result = message?.competitor;
+    const found = message?.competitor;
+    // What the operator approved: all of the search's result (the default), a ticked subset of it,
+    // or their own list — the last one also reachable from a failed search, where `found` is empty.
+    const result = approved ?? found;
     if (!message?.assetId || !result) return;
     const assetId = message.assetId;
 
     patchMessage(get, set, messageId, { savePhase: "saving", saveError: undefined });
     try {
       const runId = await ensureRun(get, set);
-      const saved = await saveCompetitorAnalysis(runId, assetId, result);
-      patchMessage(get, set, messageId, { savePhase: "saved" });
+      const saved = await saveCompetitorAnalysis(runId, assetId, { ...result, asset_id: assetId });
+      // The card then shows the listing that was actually saved, not the one that was offered — and
+      // so does the transcript on reload, which persists this message rather than the card's state.
+      patchMessage(get, set, messageId, { savePhase: "saved", competitor: result, competitorError: undefined });
 
       // File the approved analysis under its own asset id so the paired main asset's
       // `competitor_analysis` field auto-resolves from context instead of asking the operator.
@@ -3602,7 +3609,11 @@ chooseHeadlines: async (messageId, ids) => {
       // between the approved listing and the first question, which is the only place it is any use.
       const mainAssetId = stageAt(get().phase, get().currentIndex).asset.asset_id;
       if (COMPETITOR_BRIEFING_STAGES[mainAssetId]) {
-        await runCompetitorBriefing(get, set, mainAssetId, result.raw_output ?? saved.context_text);
+        // The raw JSON holds every competitor the search found. Once the operator has narrowed or
+        // replaced that list it would brief on competitors they excluded, so the saved text goes.
+        const narrowed = result !== found;
+        const source = !narrowed && result.raw_output ? result.raw_output : saved.context_text;
+        await runCompetitorBriefing(get, set, mainAssetId, source);
         return;
       }
       beginMainIntake(get, set, get().currentIndex);

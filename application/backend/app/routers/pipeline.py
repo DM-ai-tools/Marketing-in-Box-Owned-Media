@@ -82,6 +82,7 @@ from app.services.competitor import (
     CompetitorParseError,
     generate_competitor_analysis,
     parse_analysis,
+    parse_competitor_listing,
     resolve_inputs,
     to_prompt_text,
 )
@@ -3514,7 +3515,10 @@ async def _fetch_competitor_social_blocks(
         )
 
     try:
-        analysis = parse_analysis(_SOCIAL_COMPETITOR_ANALYSIS_ASSET_ID, competitor_list_raw)
+        # Not `parse_analysis`: that reads the search model's raw JSON, and this field never holds
+        # it — an approved listing reaches it as `to_prompt_text`'s prose, and a hand-answered one as
+        # whatever the operator typed. Reading only JSON here left every competitor N/D.
+        analysis = parse_competitor_listing(_SOCIAL_COMPETITOR_ANALYSIS_ASSET_ID, competitor_list_raw)
     except CompetitorParseError as exc:
         logger.info("Social data prepass: competitor list could not be parsed for domains: %s", exc)
         return (

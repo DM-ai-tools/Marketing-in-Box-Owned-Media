@@ -1,4 +1,5 @@
 import { splitHtmlBlocks } from "./htmlBlocks";
+import { withTopicSuggestions } from "./topicSuggestions";
 
 /** Taking a generated asset out of the app — as a file on disk, or through the OS share sheet.
  *
@@ -31,6 +32,12 @@ export function buildAssetExport(opts: {
   label: string;
   /** Prefixed to the filename so a folder of exports sorts into pipeline order. */
   stageNumber?: number;
+  /** Markdown put ahead of the asset in a `.md` export — the topic suggestions it was built on (see
+   * `lib/topicSuggestions.ts`). Never added to an `.html` export: a standalone page with Markdown in
+   * front of its doctype is a file no browser will open. */
+  preamble?: string;
+  /** Decides where the preamble goes — see `withTopicSuggestions`. */
+  assetId?: string;
 }): AssetExport {
   const text = opts.text;
   const segments = splitHtmlBlocks(text);
@@ -41,7 +48,7 @@ export function buildAssetExport(opts: {
 
   return only?.kind === "html"
     ? { filename: `${base}.html`, mime: "text/html", content: only.html }
-    : { filename: `${base}.md`, mime: "text/markdown", content: text };
+    : { filename: `${base}.md`, mime: "text/markdown", content: withTopicSuggestions(text, opts.preamble ?? "", opts.assetId) };
 }
 
 export function downloadExport(exported: AssetExport): void {

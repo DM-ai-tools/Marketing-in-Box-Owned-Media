@@ -631,6 +631,16 @@ covers a 6th, 7th, ... competitor by hand. Competitor SociaVault fetches also us
 size than the client's own (`_COMPETITOR_LIMIT_PER_PLATFORM`, 15 vs. 40) for the same reason: this
 cost is now multiplied by up to five accounts on up to three platforms each.
 
+**`competitor_list` is prose, not JSON — read it with `parse_competitor_listing`.** This has broken
+once. The field resolves from the approved listing's context entry, which `save_competitor_stage`
+writes as `to_prompt_text`'s prose; the search's raw JSON never reaches it. The prepass used to call
+`parse_analysis` (JSON only), so on every real run the list failed to parse and every competitor was
+`N/D` — while the tests, which fed it JSON, passed. `parse_competitor_listing` (beside
+`to_prompt_text` in `competitor.py`) reads JSON, then that prose, then any line naming a website (a
+hand-typed list), and skips the benchmark header, whose URL is the client's own site.
+`test_competitors_are_fetched_from_the_listing_as_the_stage_actually_receives_it` feeds it the real
+writer's output.
+
 **Still legitimately `N/D` when it is.** A competitor whose site links to no discoverable social
 profile, or whose `competitor_list` entry could not be parsed for a domain at all, gets a stated
 "could not be resolved" line rather than a silently-omitted section — the stage still correctly

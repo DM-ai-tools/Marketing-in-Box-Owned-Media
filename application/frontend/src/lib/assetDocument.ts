@@ -37,6 +37,7 @@
  */
 
 import { splitHtmlBlocks } from "./htmlBlocks";
+import { isTopicSuggestionsHeading, TOPIC_SUGGESTIONS_LABEL } from "./topicSuggestions";
 
 export type SectionKind = "prose" | "table" | "html";
 
@@ -286,6 +287,12 @@ export function parseAssetDocument(text: string | undefined | null): AssetDocume
     }
   }
   if (!chosen) return empty;
+
+  // The topic-suggestions section the reader inserts (see `lib/topicSuggestions.ts`) is a boundary
+  // under whichever rule won. Added only after the rule was chosen on the document's own headings,
+  // so inserting it can never change how the stage's output is split.
+  const rule = RULES.find((r) => r.name === chosen.name)!;
+  chosen.boundaries = scan(lines, (line) => (isTopicSuggestionsHeading(line) ? TOPIC_SUGGESTIONS_LABEL : rule.match(line)));
 
   const sections: DocSection[] = [];
 

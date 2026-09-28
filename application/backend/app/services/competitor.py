@@ -728,6 +728,103 @@ def to_prompt_text(analysis: ParsedAnalysis, target_url: str) -> str:
     return "\n".join(lines).strip()
 
 
+# The header and entry lines `to_prompt_text` writes, read back. Kept beside it so a change to one is
+# made with the other in view: the social audit reads this format off `competitor_list` to decide
+# whose posts to fetch, and a drift between the two costs every competitor's data silently.
+_PROSE_HEADER = re.compile(r"^\s*Competitor analysis\s*[—-]\s*benchmarked against\b", re.IGNORECASE)
+_PROSE_ENTRY = re.compile(r"^\s*\d+\.\s+(?P<name>.+?)\s+\((?P<domain>[^()\s]+)\)\s+[—-]\s+(?P<confidence>.+?)\s*$")
+_PROSE_PAGE = re.compile(r"^\s+Page:\s*(?P<url>\S+)\s*$")
+# A website anywhere on a free-typed line: a URL, or a bare host with a dot and a 2+ letter TLD. Not
+# inside an email address — `sales@acme.com` names a contact, not a competitor.
+_TYPED_SITE = re.compile(
+    r"(?:https?://)?(?<![@\w.-])(?P<host>(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,})(?P<path>/[^\s,;)]*)?",
+    re.IGNORECASE,
+)
+
+
+def _bare_domain(host: str) -> str:
+    host = host.strip().lower()
+    return host[4:] if host.startswith("www.") else host
+
+
+def parse_competitor_listing(asset_id: str, text: str) -> ParsedAnalysis:
+    """Read a competitor listing in whichever form a main stage's field actually holds it.
+
+    `parse_analysis` reads the search model's raw JSON, and nothing downstream of approval ever sees
+    that: `save_competitor_stage` files `to_prompt_text`'s prose under the context key, and that
+    prose is what a `context_reference` field resolves to. An operator can also answer the field by
+    hand — a list they typed, or the card's own-list option, which saves through the same route.
+    So three readings, in order:
+
+    1. the raw JSON, for a caller that still has it;
+    2. `to_prompt_text`'s prose, the normal case;
+    3. any line naming a website, for a list typed by hand.
+
+    The benchmark header is skipped in every reading — its URL is the client's own site, and reading
+    it as a competitor would audit the client against itself. Raises `CompetitorParseError` when no
+    reading finds a single domain.
+    """
+    try:
+        return parse_analysis(asset_id, text)
+    except CompetitorParseError:
+        pass
+
+    lines = [line for line in text.splitlines() if not _PROSE_HEADER.match(line)]
+
+    competitors: list[ParsedCompetitor] = []
+    seen: set[str] = set()
+
+    def _add(domain: str, name: str, confidence: str, page_url: str | None) -> None:
+        if not domain or domain in seen:
+            return
+        seen.add(domain)
+        competitors.append(
+            ParsedCompetitor(
+                rank=len(competitors) + 1,
+                domain=domain,
+                name=name or domain,
+                page_url=page_url,
+                verification_confidence=confidence if confidence in _VALID_CONFIDENCE else "Unverified",
+                offering_summary=None,
+                starting_price=None,
+                category=None,
+                similarity_score=None,
+                avg_position=None,
+                intersections=None,
+            )
+        )
+
+    for i, line in enumerate(lines):
+        entry = _PROSE_ENTRY.match(line)
+        if not entry:
+            continue
+        page = next(
+            (m.group("url") for m in (_PROSE_PAGE.match(nxt) for nxt in lines[i + 1 : i + 3]) if m),
+            None,
+        )
+        _add(_bare_domain(entry.group("domain")), entry.group("name").strip(), entry.group("confidence"), page)
+
+    if not competitors:
+        for line in lines:
+            if re.match(r"^\s*Notes:", line):
+                continue
+            stripped = _LIST_MARKER.sub("", line).strip()
+            site = _TYPED_SITE.search(stripped)
+            if not site:
+                continue
+            typed = site.group(0)
+            page_url = typed if re.match(r"https?://", typed, re.IGNORECASE) else None
+            name = (stripped[: site.start()] + " " + stripped[site.end() :]).replace("(", " ").replace(")", " ")
+            name = re.sub(r"\s+", " ", name).strip(" ,;:|—–-")
+            _add(_bare_domain(site.group("host")), name, "Unverified", page_url)
+
+    if not competitors:
+        raise CompetitorParseError("No competitor domains found in the listing.")
+
+    logger.info("Read competitor listing stage=%s competitors=%s (from text)", asset_id, len(competitors))
+    return ParsedAnalysis(competitors=competitors, notes=None, raw_output=text)
+
+
 def _config(asset_id: str, phase: str = DEFAULT_PHASE) -> CompetitorConfig:
     try:
         configs = CONFIGS_BY_PHASE[phase]

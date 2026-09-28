@@ -1,0 +1,332 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "Marketing-in-a-Box runtime",
+    "locale": "en",
+    "quality_profile": "showcase",
+    "repository": {
+      "url": "https://github.com/DM-ai-tools/Marketing-in-Box-Owned-Media-",
+      "revision": "fe20baf60fbb03a9d219a2850fc87930fc58f6eb"
+    },
+    "views": [
+      {
+        "id": "stage-run",
+        "label": "Stage generation",
+        "focus": ["operator", "pipeline-ui", "api", "stage-services", "anthropic"],
+        "note": "One stage run: the UI streams a draft from FastAPI through the Messages API."
+      },
+      {
+        "id": "trust",
+        "label": "Trust boundaries",
+        "focus": ["pipeline-ui", "api", "sessions", "postgres"],
+        "note": "Vendor keys and the session token stay on the server side of the proxy."
+      },
+      {
+        "id": "vendors",
+        "label": "External data",
+        "focus": ["stage-services", "contextdev", "openai", "anthropic"],
+        "note": "Claude writes the draft; Context.dev and OpenAI supply measured inputs."
+      }
+    ]
+  },
+  "components": [
+    {
+      "id": "operator",
+      "type": "external",
+      "label": "Operator",
+      "sublabel": "Signed-in browser",
+      "pos": [72, 276],
+      "size": [150, 68]
+    },
+    {
+      "id": "pipeline-ui",
+      "type": "frontend",
+      "label": "Pipeline UI",
+      "sublabel": "React + Vite",
+      "brand": "react",
+      "pos": [284, 276],
+      "size": [168, 68],
+      "sources": [
+        {
+          "path": "application/frontend/vite.config.ts",
+          "line": 16,
+          "end_line": 20,
+          "label": "same-origin /api proxy"
+        },
+        {
+          "path": "application/frontend/src/pipeline/pipelineApi.ts",
+          "line": 230,
+          "end_line": 247,
+          "label": "streamGenerateStage"
+        }
+      ]
+    },
+    {
+      "id": "sessions",
+      "type": "security",
+      "label": "Session gate",
+      "sublabel": "httpOnly cookie",
+      "pos": [604, 72],
+      "size": [168, 64],
+      "sources": [
+        {
+          "path": "application/backend/app/routers/auth.py",
+          "line": 16,
+          "end_line": 20,
+          "label": "httpOnly session cookie"
+        },
+        {
+          "path": "application/backend/app/routers/auth.py",
+          "line": 238,
+          "label": "login"
+        }
+      ]
+    },
+    {
+      "id": "api",
+      "type": "backend",
+      "label": "FastAPI",
+      "sublabel": "Orchestrator",
+      "brand": "fastapi",
+      "tag": "SSE",
+      "pos": [604, 276],
+      "size": [168, 68],
+      "sources": [
+        {
+          "path": "application/backend/app/main.py",
+          "line": 119,
+          "end_line": 127,
+          "label": "FastAPI app"
+        },
+        {
+          "path": "application/backend/app/main.py",
+          "line": 176,
+          "label": "pipeline router"
+        },
+        {
+          "path": "application/backend/app/routers/pipeline.py",
+          "line": 3830,
+          "label": "generate stream"
+        }
+      ]
+    },
+    {
+      "id": "postgres",
+      "type": "database",
+      "label": "PostgreSQL",
+      "sublabel": "Runs and context",
+      "brand": "postgresql",
+      "pos": [604, 468],
+      "size": [168, 68],
+      "sources": [
+        {
+          "path": "application/backend/app/db/models.py",
+          "line": 237,
+          "label": "Run"
+        },
+        {
+          "path": "application/backend/app/db/models.py",
+          "line": 331,
+          "label": "ContextEntry"
+        },
+        {
+          "path": "application/backend/app/db/models.py",
+          "line": 931,
+          "label": "MediaAsset"
+        }
+      ]
+    },
+    {
+      "id": "stage-services",
+      "type": "backend",
+      "label": "Stage services",
+      "sublabel": "Prompts and prepass",
+      "pos": [860, 276],
+      "size": [176, 68],
+      "sources": [
+        {
+          "path": "application/backend/app/services/generation.py",
+          "line": 965,
+          "end_line": 975,
+          "label": "generate_stage_stream"
+        },
+        {
+          "path": "application/backend/app/services/context_dev.py",
+          "line": 1,
+          "end_line": 11,
+          "label": "Context.dev gateway"
+        },
+        {
+          "path": "application/backend/app/services/openai_image_client.py",
+          "line": 154,
+          "label": "generate_image"
+        }
+      ]
+    },
+    {
+      "id": "contextdev",
+      "type": "external",
+      "label": "Context.dev",
+      "sublabel": "Scrape and brand",
+      "pos": [1124, 72],
+      "size": [168, 64],
+      "sources": [
+        {
+          "path": "application/backend/app/services/context_dev.py",
+          "line": 1,
+          "end_line": 11,
+          "label": "sole Context.dev client"
+        }
+      ]
+    },
+    {
+      "id": "anthropic",
+      "type": "external",
+      "label": "Anthropic",
+      "sublabel": "Messages API",
+      "brand": "anthropic",
+      "pos": [1124, 276],
+      "size": [168, 68],
+      "sources": [
+        {
+          "path": "application/backend/app/services/claude_client.py",
+          "line": 36,
+          "end_line": 42,
+          "label": "pooled Messages client"
+        }
+      ]
+    },
+    {
+      "id": "openai",
+      "type": "external",
+      "label": "OpenAI",
+      "sublabel": "gpt-image-2",
+      "brand": "openai",
+      "pos": [1124, 468],
+      "size": [168, 64],
+      "sources": [
+        {
+          "path": "application/backend/app/services/openai_image_client.py",
+          "line": 154,
+          "label": "generate_image"
+        }
+      ]
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "region",
+      "label": "Operator-owned browser",
+      "wraps": ["operator", "pipeline-ui"],
+      "pad": 28
+    },
+    {
+      "kind": "security-group",
+      "label": "Server trust boundary",
+      "wraps": ["sessions", "api", "stage-services", "postgres"],
+      "pad": 32
+    },
+    {
+      "kind": "region",
+      "label": "Vendor-owned APIs",
+      "wraps": ["contextdev", "anthropic", "openai"],
+      "pad": 28
+    }
+  ],
+  "connections": [
+    {
+      "id": "run-stage",
+      "from": "operator",
+      "to": "pipeline-ui",
+      "label": "Run stage",
+      "variant": "emphasis"
+    },
+    {
+      "id": "sse-generate",
+      "from": "pipeline-ui",
+      "to": "api",
+      "label": "POST /generate/stream",
+      "variant": "emphasis"
+    },
+    {
+      "id": "stage-prompt",
+      "from": "api",
+      "to": "stage-services",
+      "label": "Stage prompt",
+      "variant": "emphasis"
+    },
+    {
+      "id": "messages-api",
+      "from": "stage-services",
+      "to": "anthropic",
+      "label": "Messages API",
+      "variant": "emphasis"
+    },
+    {
+      "id": "session-cookie",
+      "from": "api",
+      "to": "sessions",
+      "label": "Session cookie",
+      "variant": "security"
+    },
+    {
+      "id": "save-context",
+      "from": "api",
+      "to": "postgres",
+      "label": "Approved context",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "labelDy": 24
+    },
+    {
+      "id": "web-data",
+      "from": "stage-services",
+      "to": "contextdev",
+      "label": "Web data",
+      "variant": "dashed",
+      "fromSide": "top",
+      "toSide": "bottom"
+    },
+    {
+      "id": "image-bytes",
+      "from": "stage-services",
+      "to": "openai",
+      "label": "Image bytes",
+      "variant": "dashed",
+      "fromSide": "bottom",
+      "toSide": "top"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Stage run",
+      "items": [
+        "The operator starts one asset stage in the Pipeline UI.",
+        "Vite proxies same-origin /api calls to the FastAPI process.",
+        "POST /pipeline/generate/{asset_id}/stream returns Markdown deltas over SSE.",
+        "Approving the draft appends a new ContextEntry version on the run."
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "Trust boundary",
+      "items": [
+        "Email and password sessions travel in an httpOnly cookie.",
+        "ANTHROPIC_API_KEY, CONTEXT_DEV_API_KEY, and OPENAI_API_KEY are read only on the server.",
+        "The browser receives vendor results through FastAPI routes."
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "Vendors and store",
+      "items": [
+        "Context.dev supplies scrape, search, brand, styleguide, fonts, and screenshots.",
+        "OpenAI gpt-image-2 bytes are stored in MediaAsset and served at GET /media/{id}.",
+        "Firecrawl and Brandfetch fill brand gaps; SociaVault supplies social-audit posts.",
+        "PostgreSQL holds runs, approved context, chat sessions, and those image bytes."
+      ]
+    }
+  ]
+}

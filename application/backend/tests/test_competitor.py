@@ -24,6 +24,7 @@ from app.services.competitor import (
     _effort,
     config_for,
     parse_analysis,
+    parse_competitor_listing,
     resolve_inputs,
     resolve_model,
     to_prompt_text,
@@ -286,3 +287,69 @@ def test_an_unrecognised_effort_level_falls_back_rather_than_reaching_the_api(
     monkeypatch.delenv("COMPETITOR_MODEL", raising=False)
     monkeypatch.setenv("COMPETITOR_EFFORT", "meduim")
     assert _effort(resolve_model()) == "medium"
+
+
+# --- parse_competitor_listing: reading a listing back out of a main stage's field ----------------
+#
+# A `context_reference` field holds `to_prompt_text`'s prose, never the search's JSON. The social
+# audit reads that field to decide whose posts to fetch, and while it could only read JSON every
+# competitor came back N/D — so the round trip from the real writer is what is pinned here.
+
+_APPROVED_JSON = json.dumps(
+    {
+        "competitors": [
+            {"domain": "entourage.com.au", "name": "Entourage", "page_url": "https://www.entourage.com.au/social",
+             "verification_confidence": "Verified", "offering_summary": "Social media for trades (and more)."},
+            {"domain": "axtonfinance.com.au", "name": "Axton Finance", "verification_confidence": "Partially verified"},
+        ],
+        "notes": "Two qualified — benchmarked against https://client.example as well.",
+    }
+)
+
+
+def test_listing_round_trips_through_the_prose_the_field_actually_holds():
+    prose = to_prompt_text(parse_analysis("competitor_analysis_social_content_strategy", _APPROVED_JSON), "https://client.example")
+    listing = parse_competitor_listing("competitor_analysis_social_content_strategy", prose)
+
+    assert [c.domain for c in listing.competitors] == ["entourage.com.au", "axtonfinance.com.au"]
+    assert [c.name for c in listing.competitors] == ["Entourage", "Axton Finance"]
+    assert [c.verification_confidence for c in listing.competitors] == ["Verified", "Partially verified"]
+    assert listing.competitors[0].page_url == "https://www.entourage.com.au/social"
+
+
+def test_listing_never_reads_the_benchmark_header_as_a_competitor():
+    """The header's URL is the client's own site; auditing it as a competitor compares the client to
+    itself. Checked on the typed-list reading too, which is the one that would pick it up."""
+    prose = "Competitor analysis — benchmarked against https://client.example\n\nWe mostly lose to rival.com.au"
+    listing = parse_competitor_listing("x", prose)
+    assert [c.domain for c in listing.competitors] == ["rival.com.au"]
+
+
+def test_listing_still_reads_raw_json():
+    listing = parse_competitor_listing("x", _APPROVED_JSON)
+    assert [c.domain for c in listing.competitors] == ["entourage.com.au", "axtonfinance.com.au"]
+
+
+def test_listing_reads_a_hand_typed_list():
+    typed = "\n".join(
+        [
+            "1. Entourage — www.entourage.com.au",
+            "- https://axtonfinance.com.au/about",
+            "Bright (bright.co)",
+            "email sales@notarival.com",
+            "Entourage again: entourage.com.au",
+        ]
+    )
+    listing = parse_competitor_listing("x", typed)
+
+    assert [c.domain for c in listing.competitors] == ["entourage.com.au", "axtonfinance.com.au", "bright.co"]
+    assert listing.competitors[0].name == "Entourage"
+    assert listing.competitors[1].page_url == "https://axtonfinance.com.au/about"
+    assert listing.competitors[2].name == "Bright"
+    # Typed by the operator, so never claimed as researched.
+    assert {c.verification_confidence for c in listing.competitors} == {"Unverified"}
+
+
+def test_listing_with_no_domain_is_still_a_parse_error():
+    with pytest.raises(CompetitorParseError):
+        parse_competitor_listing("x", "Entourage and Axton Finance are the two main competitors.")

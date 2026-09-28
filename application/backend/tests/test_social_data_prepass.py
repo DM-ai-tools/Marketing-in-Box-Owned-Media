@@ -163,6 +163,49 @@ async def test_competitor_accounts_are_resolved_and_fetched_automatically(monkey
 
 
 @pytest.mark.asyncio
+async def test_competitors_are_fetched_from_the_listing_as_the_stage_actually_receives_it(monkeypatch):
+    """The field is filled from the approved listing's context entry, which is `to_prompt_text`'s
+    prose — not the search JSON the test above feeds it. That is the only shape a real run sends, and
+    while this prepass could read only JSON, every competitor was N/D on every real run."""
+    from app.routers.pipeline import _run_social_data_prepass
+    from app.services.competitor import parse_analysis, to_prompt_text
+
+    prose = to_prompt_text(
+        parse_analysis("competitor_analysis_social_content_strategy", _COMPETITOR_LIST_JSON),
+        "https://argfinance.com.au",
+    )
+    resolved_domains = []
+
+    async def fake_resolve(domain):
+        resolved_domains.append(domain)
+        return (social_audit.SocialAccount(platform="instagram", handle=f"https://instagram.com/{domain}"),)
+
+    async def fake_snapshot(accounts, *, limit_per_platform=40):
+        return (
+            SocialFetchResult(
+                platform=accounts[0].platform, handle=accounts[0].handle, posts=(), more_available=False, credits_used=1
+            ),
+        ), ()
+
+    monkeypatch.setattr(social_audit, "fetch_account_snapshot", fake_snapshot)
+    monkeypatch.setattr(social_audit, "resolve_competitor_handles", fake_resolve)
+
+    answers = {
+        "client_name": "ARG Finance",
+        "raw_post_data_source": "",
+        "client_s_own_social_pages_handles": "Instagram: @acme",
+        "competitor_list": prose,
+        "number_of_competitors_to_audit": "5",
+    }
+    resolved, event = await _run_social_data_prepass("social_content_strategy_audit", answers)
+
+    assert sorted(resolved_domains) == ["axtonfinance.com.au", "entourage.com.au"]
+    assert "argfinance.com.au" not in resolved_domains  # the benchmark header is the client itself
+    assert "could not be parsed" not in resolved["raw_post_data_source"]
+    assert "instagram.com/entourage.com.au" in resolved["raw_post_data_source"]
+
+
+@pytest.mark.asyncio
 async def test_competitor_count_is_capped_regardless_of_what_was_requested(monkeypatch):
     from app.routers.pipeline import _run_social_data_prepass, _MAX_AUTO_COMPETITORS
 

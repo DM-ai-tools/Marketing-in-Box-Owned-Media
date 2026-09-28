@@ -17,6 +17,12 @@ superseded, interrupted, failed, refining — without a browser or a new depende
 - `clear.tsx` — "Clear chat" and the delete warning. Mostly about scope: clearing Phase 2 must
   leave Phase 1's cards, its parked slot and its run exactly where they are, and the button has to
   name the leg it would clear rather than claiming the chat.
+- `competitors.tsx` — the competitor review card's choice of which competitors a stage uses (all,
+  a ticked subset, or the operator's own list), the parser for a pasted list, and the listing each
+  choice actually saves.
+- `topics.tsx` — the "Topic suggestions" section at the top of an exported `.md`: which headline
+  gate a document is paired with, what each topic says (why, funnel stage, content type, keyword
+  basis), and that it is never put in front of an `.html` export.
 - `plan.tsx` — the Plan of Action tree, its layout, the diagram and the standalone HTML export.
   The losslessness check there is word-multiset containment rather than line matching, and the
   comment above it records why: two weaker versions of that check each let a real data-loss bug

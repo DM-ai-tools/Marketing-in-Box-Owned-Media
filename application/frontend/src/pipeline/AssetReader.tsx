@@ -5,6 +5,7 @@ import { SectionBody } from "../components/AssetDocumentView";
 import { Markdown } from "../components/Markdown";
 import { OverflowItem, OverflowMenu } from "../components/OverflowMenu";
 import { parseAssetDocument } from "../lib/assetDocument";
+import { topicPreambleFor, withTopicSuggestions } from "../lib/topicSuggestions";
 import { useUiStore } from "../store/uiStore";
 import { stagesFor } from "./pipelineData";
 import { usePipelineStore } from "./pipelineStore";
@@ -79,6 +80,9 @@ export function AssetReader() {
               text={message.text ?? ""}
               assetId={message.assetId}
               phase={phase}
+              // The topics this asset was built on and the ones passed over — shown in the reader
+              // (and so from Deliverables) and carried into the exported file.
+              preamble={topicPreambleFor(messages, message)}
               onClose={closeReader}
             />
           </motion.div>
@@ -92,16 +96,22 @@ function ReaderContents({
   text,
   assetId,
   phase,
+  preamble,
   onClose,
 }: {
   text: string;
   assetId?: string;
   phase: ReturnType<typeof usePipelineStore.getState>["phase"];
+  preamble: string;
   onClose: () => void;
 }) {
   const stage = stagesFor(phase).find((s) => s.asset.asset_id === assetId);
   const label = stage?.asset.label ?? "Generated asset";
-  const doc = useMemo(() => parseAssetDocument(text), [text]);
+  // What the reader shows: the stage's own text with the topic suggestions placed in it (before the
+  // lead magnet's PART 2 scorecard, at the top elsewhere). Display only — the saved text, which the
+  // next stage reads, is untouched, and the export places the section the same way.
+  const shown = useMemo(() => withTopicSuggestions(text, preamble, assetId), [text, preamble, assetId]);
+  const doc = useMemo(() => parseAssetDocument(shown), [shown]);
 
   const [query, setQuery] = useState("");
   const [activeId, setActiveId] = useState<string | null>(doc.sections[0]?.id ?? null);
@@ -267,10 +277,10 @@ function ReaderContents({
               ))
             ) : (
               /* No usable structure — the document renders exactly as the card always rendered it. */
-              <Markdown text={text} />
+              <Markdown text={shown} />
             )}
             <div className="mt-8 border-t border-[var(--border)] pt-4">
-              <AssetExportButtons text={text} label={label} stageNumber={stage?.stageNumber} />
+              <AssetExportButtons text={text} label={label} stageNumber={stage?.stageNumber} preamble={preamble} assetId={assetId} />
             </div>
           </div>
         </div>

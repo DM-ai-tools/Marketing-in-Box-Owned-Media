@@ -14,6 +14,7 @@ import { countWords, parseAssetDocument, type AssetDocument } from "../lib/asset
 import { summariseAsset } from "../lib/assetSummary";
 import { buildPlanMindMapHtml } from "../lib/planMindMapHtml";
 import { splitHtmlBlocks } from "../lib/htmlBlocks";
+import { topicPreambleFor } from "../lib/topicSuggestions";
 import { QuestionWidget } from "../components/QuestionWidget";
 import { TypingIndicator } from "../components/TypingIndicator";
 import { DeliverablesGrid } from "./DeliverablesGrid";
@@ -303,6 +304,10 @@ function ActionRow({ message, label, stageNumber }: { message: PipelineMessage; 
                 text={message.text}
                 label={label}
                 stageNumber={stageNumber}
+                // The topics this asset was built on, and the ones passed over, at the top of the
+                // file. Read at click time from the store rather than subscribed to here.
+                preamble={() => topicPreambleFor(usePipelineStore.getState().messages, message)}
+                assetId={message.assetId}
                 onDone={close}
               />
             </>
