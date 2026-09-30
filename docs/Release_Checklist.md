@@ -14,7 +14,7 @@ Where this document disagrees with code, the code is right.
 - **Phase 1:** 15 sequential stages (`icp` through `plan_of_action`). Competitor research is a **gated prepass** inside the consuming stage, not a 16th step ([pipelineData.ts](../application/frontend/src/pipeline/pipelineData.ts)).
 - **Phase 2:** 8 stages as a delta over Phase 1, always NEW PAGE for CRO, copy scoped to `sub_service`.
 - Human-in-the-loop: approve / refine / stop a stage / skip ahead with seeded context / clear **this phase only**.
-- Auth: email + password against Postgres. No OAuth. Password reset is log-only (no mail transport).
+- Auth: email + password against Postgres. No OAuth. Password reset is emailed when Resend or SMTP is configured; otherwise the link is logged for local development.
 
 **Runtime must-haves**
 
@@ -33,11 +33,10 @@ Where this document disagrees with code, the code is right.
 - `.env.example` (referenced, file missing).
 - GitHub Actions (no workflow in repo).
 - SharePoint / Drive / Graph API.
-- Outbound email.
 
 **Vendor keys that are optional (pipeline still runs)**
 
-Context.dev, Firecrawl, Brandfetch, SociaVault, OpenAI images, Runway fallback, DataForSEO credentials. Missing keys **skip or stub**; they do not block a signed-in run except where the operator explicitly hits a vendor-only route (see §3).
+Context.dev, Firecrawl, Brandfetch, SociaVault, OpenAI images, Runway fallback, DataForSEO credentials, Resend/SMTP (`MAIL_FROM` plus a transport). Missing keys **skip or stub**; they do not block a signed-in run except where the operator explicitly hits a vendor-only route (see §3).
 
 ---
 
@@ -82,6 +81,7 @@ flowchart LR
 | Firecrawl | `FIRECRAWL_API_KEY` | Skip brand-gap extract + competitor social-link resolve |
 | Brandfetch | `BRANDFETCH_API_KEY` | Skip last-resort brand fill |
 | SociaVault | `SOCIO_VAULT` | Stage 10 prepass skipped / notes; `POST /pipeline/social/posts` degrades |
+| Resend or SMTP | `RESEND_API_KEY` or `SMTP_HOST`, plus `MAIL_FROM` | Password-reset link is logged locally instead of emailed |
 | OpenAI images | `OPENAI_API_KEY` | Skip hosted hero/proof/CTA unless Runway set |
 | Runway images | `RUNWAYML_API_SECRET` | Fallback only |
 | DataForSEO | `DataForTopicClusttering_LOGIN` / `_PASSWORD` | **Stub keywords**, not a hard fail |
@@ -89,7 +89,7 @@ flowchart LR
 
 **Rule:** vendor secrets stay server-side; the only Context.dev constructor is [context_dev.py](../application/backend/app/services/context_dev.py). Credits are money—no URL loops.
 
-**Explicitly not integrations:** Auth0/Clerk, Microsoft Graph, SMTP, Celery/Redis.
+**Explicitly not integrations:** Auth0/Clerk, Microsoft Graph, Celery/Redis.
 
 ---
 
@@ -126,6 +126,5 @@ flowchart LR
 
 - Automated Word/PDF renderer and SharePoint/Drive upload (session context post-MVP Phase 2).
 - Redis draft cache / Celery workers.
-- Mail for password reset.
 - UI download of assembled replica HTML; per-deck PPTX `?index=` (API exists; UI always zips multiples).
 - Refresh [application/backend/README.md](../application/backend/README.md) (“skeleton only”, Redis required) and add `.env.example`.

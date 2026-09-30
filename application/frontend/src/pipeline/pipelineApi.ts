@@ -947,3 +947,130 @@ export async function seedRunContext(
   });
   return unwrap<SeedContextResponse>(res, "Provide document");
 }
+
+// --------------------------------------------------------------------------------------
+// The client's industry — see `app/services/industry_voice.py`
+// --------------------------------------------------------------------------------------
+
+export type IndustrySource = "inferred_confirmed" | "operator_picked" | "operator_typed";
+
+export interface IndustryProfileResult {
+  bucket: string;
+  bucket_label: string;
+  label: string;
+  source: IndustrySource;
+  confidence?: number | null;
+  rationale?: string;
+}
+
+/** Guess the client's own industry from intake answers, or map one the operator typed. Stores
+ * nothing. Null means "no confident guess" — ask the operator outright. */
+export async function inferIndustry(
+  answers: Record<string, string>,
+  typed?: string,
+): Promise<IndustryProfileResult | null> {
+  const res = await fetch("/api/pipeline/industry/infer", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ answers, typed: typed ?? null }),
+  });
+  const body = await unwrap<{ profile: IndustryProfileResult | null }>(res, "Work out the client's industry");
+  return body.profile;
+}
+
+/** File the confirmed industry on the run. A correction appends a new version; the latest wins. */
+export async function saveRunIndustry(
+  runId: string,
+  profile: Pick<IndustryProfileResult, "bucket" | "label" | "source" | "confidence" | "rationale">,
+): Promise<IndustryProfileResult> {
+  const res = await fetch(`/api/pipeline/runs/${runId}/industry`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      bucket: profile.bucket,
+      label: profile.label,
+      source: profile.source,
+      confidence: profile.confidence ?? null,
+      rationale: profile.rationale ?? "",
+    }),
+  });
+  const body = await unwrap<{ profile: IndustryProfileResult }>(res, "Save the client's industry");
+  return body.profile;
+}
+
+/** The run's industry, inherited from its source run when it has none of its own; null when neither
+ * has one, which is the cue to ask. */
+export async function fetchRunIndustry(runId: string): Promise<IndustryProfileResult | null> {
+  const res = await fetch(`/api/pipeline/runs/${runId}/industry`);
+  if (res.status === 404) return null;
+  if (!res.ok) {
+    console.warn(`Could not read the run's industry (${res.status})`);
+    return null;
+  }
+  const body = (await res.json()) as { profile: IndustryProfileResult };
+  return body.profile;
+}
+
+// --------------------------------------------------------------------------------------
+// Checking a draft against the client's business — see `app/services/asset_check.py`
+// --------------------------------------------------------------------------------------
+
+export type CheckName = "offer_relevance" | "funnel_relevance" | "business_logic" | "virality";
+export type CheckSeverity = "error" | "warn" | "info";
+
+export interface CheckFinding {
+  check: CheckName;
+  severity: CheckSeverity;
+  /** Verbatim from the draft. Empty for a finding about the whole draft ("names no offer"). */
+  quote: string;
+  why: string;
+  fix: string;
+  source: "rule" | "judge";
+}
+
+export interface CheckResult {
+  check: CheckName;
+  score: number | null;
+  verdict: string;
+  findings: CheckFinding[];
+}
+
+export interface AssetCheckReport {
+  asset_id: string;
+  checks: CheckResult[];
+  facts_used: string[];
+  facts_missing: string[];
+  /** "ok", or "unavailable" when only the rule findings could be produced. */
+  judge: "ok" | "unavailable" | "skipped";
+  dropped_quotes: number;
+  virality_basis: "" | "benchmarked" | "rubric only";
+  duration_ms: number;
+}
+
+/** Check a draft (saved or not) against the client's offers, funnel, business rules and predicted
+ * virality. Stores nothing; one low-effort model call plus free rule checks. */
+export async function checkAsset(
+  assetId: string,
+  text: string,
+  opts: {
+    runId?: string | null;
+    phase?: string;
+    clientProfile?: Record<string, string>;
+    chatSessionId?: string | null;
+    signal?: AbortSignal;
+  } = {},
+): Promise<AssetCheckReport> {
+  const res = await fetch(`/api/pipeline/check/${assetId}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      text,
+      run_id: opts.runId ?? null,
+      phase: opts.phase ?? "phase1",
+      client_profile: opts.clientProfile ?? {},
+      chat_session_id: opts.chatSessionId ?? null,
+    }),
+    signal: opts.signal,
+  });
+  return unwrap<AssetCheckReport>(res, "Check this asset");
+}

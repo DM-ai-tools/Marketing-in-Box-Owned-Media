@@ -253,3 +253,58 @@ def render_social_data_md(label: str, results: tuple[SocialFetchResult, ...], no
         lines += ["### Collection notes", ""] + [f"- {note}" for note in notes] + [""]
 
     return "\n".join(lines)
+
+
+# --------------------------------------------------------------------------------------
+# Engagement benchmarks — the real data the asset check's virality score is anchored on
+# --------------------------------------------------------------------------------------
+
+#: How many of an account's best posts are kept as the benchmark examples.
+_TOP_POSTS = 5
+
+
+def _engagement(post: sociavault_client.SocialPost) -> int | None:
+    """Likes + comments + shares, over whichever of the three this platform publishes.
+
+    None when it publishes none of them (LinkedIn today) — never 0, which would be a claim that the
+    post got no engagement at all.
+    """
+    counts = [c for c in (post.like_count, post.comment_count, post.share_count) if c is not None]
+    return sum(counts) if counts else None
+
+
+def engagement_stats(label: str, results: tuple[SocialFetchResult, ...]) -> list[dict[str, object]]:
+    """Per account and platform: sample size, median engagement, and the top posts' opening lines.
+
+    Still no judgement — this is arithmetic over real counts. What the asset check does with it is
+    compare a draft's hook against the hooks that actually travelled for this client and its
+    competitors. Rows with no measurable engagement keep `median_engagement: None`.
+    """
+    stats: list[dict[str, object]] = []
+    for result in results:
+        scored = [(p, _engagement(p)) for p in result.posts]
+        measured = sorted((e for _, e in scored if e is not None))
+        median: float | None = None
+        if measured:
+            mid = len(measured) // 2
+            median = float(measured[mid]) if len(measured) % 2 else (measured[mid - 1] + measured[mid]) / 2
+        top = sorted((pe for pe in scored if pe[1] is not None), key=lambda pe: pe[1], reverse=True)[:_TOP_POSTS]
+        stats.append(
+            {
+                "account": label,
+                "platform": result.platform,
+                "handle": result.handle,
+                "sample_size": len(result.posts),
+                "measured_posts": len(measured),
+                "median_engagement": median,
+                "top_posts": [
+                    {
+                        "engagement": e,
+                        "is_video": p.is_video,
+                        "opening": _truncate((p.caption or "").strip().splitlines()[0] if p.caption else None, 160),
+                    }
+                    for p, e in top
+                ],
+            }
+        )
+    return stats

@@ -46,6 +46,7 @@ const KIND_LABEL: Record<string, string> = {
   revision: "Refined",
   competitor: "Competitor search",
   briefing: "Briefing",
+  check: "Business check",
 };
 
 /** One headline number. */

@@ -9,11 +9,12 @@ copy it is handed. So the copy this stage writes *is* the subject of every page 
 If it comes back about Social Media Marketing, the whole run is about Social Media Marketing, and
 nothing downstream can correct it — there is no later stage that knows what the page was meant to be.
 
-The inputs alone do not prevent that. Three of the strategy inputs this stage receives are written
-at the parent's scope by construction: the ICP Document is inherited from the parent Phase 1 run,
-and Proof Assets Available and the outcome words in the terminology map come from that run's
-`cro_client_settings`. Handed a parent-scope ICP and a one-line "Target Service or Sub-Service", a
-model writes the page the bulk of its input describes. That is the same unfollowable-instruction
+The inputs alone do not prevent that. Some of the strategy inputs this stage receives are written at
+the parent's scope by construction: Proof Assets Available and the outcome words in the terminology
+map come from the parent run's `cro_client_settings`. (The ICP used to be one of them. Phase 2 now
+builds its own at stage 01, and the lock says so; see `tests/test_phase2_icp.py`.) Handed
+parent-scope material and a one-line "Target Service or Sub-Service", a model writes the page the
+bulk of its input describes. That is the same unfollowable-instruction
 failure the design pipeline documents for colours: the fix is an explicit rule, not a better hope.
 
 So the Phase 2 prompt file carries a **SCOPE LOCK** section that Phase 1's does not, and this file
@@ -127,12 +128,15 @@ def test_the_lock_keeps_the_parent_reachable_as_a_link_and_a_negative_target() -
 
 
 def test_the_lock_says_what_to_do_with_a_parent_scope_input() -> None:
-    """The three inherited inputs are not noise to be discarded wholesale — the client has not
-    changed, so the buyer-level content in them is correct and expensive to re-derive. The lock has
-    to split them rather than reject them, or the stage loses the settings work Phase 1 did."""
+    """The inherited inputs are not noise to be discarded wholesale — the client has not changed,
+    so the buyer-level content in them is correct and expensive to re-derive. The lock has to split
+    them rather than reject them, or the stage loses the settings work Phase 1 did.
+
+    The ICP is no longer one of them: Phase 2 builds its own at stage 01, and the lock has to say
+    so, or it tells the model to narrow a document that is already at the right scope."""
     lock = _section(_phase2_text(), SCOPE_LOCK_HEADING)
-    assert "ICP Document" in lock
     assert "Proof Assets Available" in lock
+    assert "The ICP Document is the exception: it was built in this run for this sub-service" in _flat(lock)
     for verb in ("Keep", "Re-point", "Discard"):
         assert f"**{verb}**" in lock, f"the scope lock does not say when to {verb.lower()} an inherited input"
 
@@ -159,11 +163,13 @@ def test_step_0_makes_the_model_name_the_sub_service_before_it_writes() -> None:
 
 
 def test_the_icp_step_re_reads_the_document_at_sub_service_scope() -> None:
-    """Step 1B is where the ICP is turned into copy decisions. Left unamended it says "every section
-    must speak to this specific person" about a person defined at the parent's level."""
+    """Step 1B is where the ICP is turned into copy decisions. Phase 2's ICP is built in-run for the
+    sub-service, so it is used as written — but the card lets the operator replace it, and a pasted
+    parent-scope ICP must still be re-pointed rather than written up as the sub-service's buyer."""
     text = _phase2_text()
     icp = _flat(text[text.index("### 1B) ICP Document") : text.index("### 1C) Competitor Analysis")])
-    assert "written for the parent service" in icp
+    assert "built in this run for this sub-service" in icp
+    assert "describes the buyer of the parent service" in icp
     assert "Scope Lock" in icp
 
 

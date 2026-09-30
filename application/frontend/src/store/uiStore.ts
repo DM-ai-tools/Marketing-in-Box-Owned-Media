@@ -18,6 +18,10 @@ export type MobilePane = "chat" | "pipeline";
  * away would be replacing one imposed reading mode with another. */
 export type DocView = "outline" | "full";
 
+/** How the reader draws a document: its structure as visuals (scores, timelines, cards, flows), or
+ * the text exactly as exported. A preference, remembered like `docView`. */
+export type ReaderView = "visual" | "text";
+
 /** Which transcript is on screen.
  *
  * `deliverables` is a grid of the assets this chat has approved. It reads the same messages the
@@ -69,6 +73,9 @@ interface UiState {
    * a warning rendered there would be laid out inside a 85vw-wide panel instead of over the app.
    * The sidebar raises the question, `ChatDeleteDialog` at the root asks it. */
   pendingChatDelete: { id: string; title: string } | null;
+  /** The reader's view: visuals by default, the exported text one click away. */
+  readerView: ReaderView;
+  setReaderView: (view: ReaderView) => void;
   openSidebar: () => void;
   closeSidebar: () => void;
   toggleSidebar: () => void;
@@ -99,6 +106,7 @@ export const useUiStore = create<UiState>((set) => ({
   usageOpen: false,
   readerMessageId: null,
   docView: readPref<DocView>("docView", ["outline", "full"], "outline"),
+  readerView: readPref<ReaderView>("readerView", ["visual", "text"], "visual"),
   hintsOn: readFlag("hints", true),
   workTab: "transcript",
   demoMode: false,
@@ -115,6 +123,10 @@ export const useUiStore = create<UiState>((set) => ({
   // sheets, so two open at once would stack one scroll container on another.
   openReader: (messageId) => set({ readerMessageId: messageId, usageOpen: false, sidebarOpen: false }),
   closeReader: () => set({ readerMessageId: null }),
+  setReaderView: (readerView) => {
+    writePref("readerView", readerView);
+    set({ readerView });
+  },
   setDocView: (docView) => {
     writePref("docView", docView);
     set({ docView });

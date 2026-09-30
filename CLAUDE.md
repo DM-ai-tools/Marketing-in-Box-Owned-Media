@@ -680,7 +680,48 @@ definitions rather than as a second set of tables — `PHASE2_OVERRIDES` in
 seven near-identical field registries kept in step by hand is how a field added later silently fails
 to reach its Phase 2 twin. `tests/test_phase2.py` pins the delta landing.
 
-### The CRO stage is stage 01, and that is the point
+### Its own ICP is stage 01: Phase 2 inherits the client, not the audience
+
+Phase 1's ICP is built from the client's headline service ("Social Media Marketing"). The buyer of
+one sub-service ("Meta Ads") is often a different person, with a different trigger, budget line and
+set of alternatives. So Phase 2 opens with an ICP stage of its own, and **Phase 1's ICP and value
+ladder never reach a Phase 2 run.**
+
+- **The prompt is `Phase2/ICP_phase2.md`: `ICP.md` plus exactly two edits.** The service input is
+  relabelled "Sub-Service + Price/Terms", and a SUB-SERVICE SCOPE section is added before the context
+  rules. `test_phase2_prompt_is_phase1s_plus_exactly_two_edits` reverses both edits and requires the
+  result to equal `ICP.md` byte for byte. So an improvement to the Phase 1 prompt that isn't carried
+  across fails a test instead of drifting, which is the SCOPE LOCK lesson applied in advance.
+- **The sub-service answers the service input** (`fromSubService` in the `icp` delta). The answer
+  stays editable, which is where a price or terms get added.
+- **The cut is in two places, over the same three keys** (`icp`, `offers`, `offer_ladder`):
+  - On the server, they are in `PHASE_SCOPED_CONTEXT_KEYS`, so `_latest_context_entry` never walks
+    them down `source_run_id`.
+  - On the client, they are in `PHASE1_ONLY_CONTEXT_KEYS`, so `phase2StartingContext` drops them from
+    the in-memory copy a Phase 2 leg starts from.
+  - Both halves matter. Without the server half, a Phase 2 stage started out of order would quietly
+    read the parent's ICP. Without the client half, the in-session copy would supply it before the
+    database was ever asked.
+- **What still crosses is client-level**: brand design tokens, `cro_client_settings` and
+  `industry_profile`. None of it changes per sub-service, and re-asking or re-capturing it would cost
+  CRO's 28 inherited questions and 17 Context.dev credits per run.
+  `test_client_level_documents_still_inherit` pins that line.
+- **Offer Ladder has no Phase 2 stage.** Lead Magnet's and SMS's offer-ladder inputs are optional and
+  now ask or go without, rather than borrowing a ladder priced for the headline service's buyer.
+- **The audience's industry is asked fresh, per run.** ICP's `industry` ("of the ICP you are
+  targeting"), Lead Magnet's `industry` and Content Marketing's `industry_niche` all describe the
+  audience.
+  - In Phase 1 they share the run-level `industry` fact.
+  - In Phase 2 they map to `PHASE2_AUDIENCE_INDUSTRY_FACT` instead, stored per run under
+    `phase2AudienceIndustryKey(runId)`, because each sub-service track has its own ICP and its own
+    audience. It is empty when the Phase 2 ICP asks, so the ICP asks it rather than reusing Phase 1's
+    answer. The later stages in that run then reuse it.
+  - A Phase 2 competitor search is scoped to that audience once it exists (`competitorNiche`).
+  - This is different from the *client's* industry (`industry_profile`), which drives the voice pack.
+    That one is inherited, and the industry question at the end of the ICP intake moves straight on.
+    `smoke/phase2icp.tsx` pins the difference.
+
+### The CRO stage follows it, and that is the point
 
 The Phase 2 Pillar Page prompt (`Master_Prompt_Universal_Page_Design_v1_phase2.md`) is a **design
 replicator with no service input of any kind**. Read its INPUTS: there is no service field, no topic
@@ -695,7 +736,7 @@ While Phase 2 had no CRO stage, that copy could only come from two places, and b
   on `improved_page_content`, since an inherited document that is always wrong must not sit under a
   "use it" button).
 
-So Phase 2 runs `cro` first. It starts from the Phase 1 prompt — that file already opens "works for
+So Phase 2 runs `cro` straight after its ICP. It starts from the Phase 1 prompt — that file already opens "works for
 any industry, any sub-service, any page scope" — and drops nothing, and it writes the four keys the
 rest of the phase reads: `cro_rewritten_copy`, `cro_locked_sections`, `cro_terminology_map` and
 `cro_audit_findings`. Pillar Page's copy field then fills from the Context Store like any other
@@ -710,11 +751,12 @@ them, so the strings stay the ones the prompt switches build-from-scratch mode o
 ### The SCOPE LOCK — why the prompt file is no longer a copy
 
 Naming the sub-service is not the same as writing about it. `target_service_or_sub_service` is one
-line of an INPUTS block whose strategy half arrives at the *parent's* scope by construction: the ICP
-document is inherited from the parent Phase 1 run, and Proof Assets Available, the outcome words and
-the tone of voice come from that run's `cro_client_settings`. Handed a parent-scope ICP and a
-one-line sub-service name, a model writes the page most of its input describes — which is the Social
-Media Marketing page this stage exists to prevent, arriving by a different route.
+line of an INPUTS block, and part of that block's strategy half arrives at the *parent's* scope by
+construction: Proof Assets Available, the outcome words and the tone of voice come from the parent
+run's `cro_client_settings`. Handed parent-scope material and a one-line sub-service name, a model
+writes the page most of its input describes. That is the Social Media Marketing page this stage
+exists to prevent, arriving by a different route. (The ICP used to be the largest such input. It is
+now built in-run for the sub-service, and the lock says so.)
 
 So `Master_Prompt_Universal_Page_Rewrite_v1_phase2.md` carries a **SCOPE LOCK** section, immediately
 after ROLE, that Phase 1's file does not. It names the input that decides the subject; bars the
@@ -722,8 +764,9 @@ parent's term from the H1, title tag, meta description, URL, primary keyword, of
 while keeping it reachable as the internal link up and as the term not to compete for; and splits
 each inherited input into what to **keep** (properties of the client and the buyer), what to
 **re-point** at the sub-service (the outcome, objections, proof and decision criteria) and what to
-**discard**. Step 0 makes the model state the subject and every re-pointing before it writes, Step
-1B re-reads the ICP at sub-service scope, Rule 8 says what "keep the existing H1 intent" means in a
+**discard**. Step 0 makes the model state the subject and every re-pointing before it writes. Step
+1B uses this run's ICP as written, but still re-points one the operator replaced with a parent-scope
+document. Rule 8 says what "keep the existing H1 intent" means in a
 mode where there is no existing H1, and Part 0 reports the lot back to the operator.
 
 This is the same fix `design_tokens.py` documents for colours: an instruction that cannot be
@@ -732,15 +775,10 @@ were **byte-identical** before the lock landed, which is the risk worth naming �
 1's over Phase 2's still builds, still renders INPUTS, still produces a polished page, and the page
 is about the wrong service. `tests/test_phase2_cro_scope.py` is the only thing that notices.
 
-**The ICP is the parent run's, and there is no other.** Phase 2 runs no ICP stage, so `icp_*`
-resolves down `source_run_id` to the Phase 1 document or to nothing at all. It stays `overridable`
-— an accept-or-replace card, so an operator who commissioned research for the sub-service can put it
-in — and the scope lock is what corrects its scope rather than a second ICP being generated. What
-Phase 2 changes is only the wording: Phase 1's help text says the ICP was "generated in this run",
-which is the one false claim on a card whose entire purpose is to let the operator weigh where the
-document came from. `rewordHelp` in the `cro` delta is that, and nothing else — the narrowest of the
-field deltas, changing no behaviour at all. `smoke/phase2cro.tsx` pins the card, its document and
-its wording together.
+**The ICP card on CRO is Phase 1's card again.** It is this run's own stage 01 document, so Phase
+1's help text ("the ICP generated in this run") is true, and the `rewordHelp` that used to say
+"from the parent Phase 1 run" is gone. It stays `overridable`, so an operator with commissioned
+research can replace it. `smoke/phase2cro.tsx` pins the card and its wording.
 
 ### `cro_client_settings` — asking once per client, not once per service
 
@@ -785,7 +823,7 @@ No new table, no new resolver.
 
 The net: **Phase 2's CRO stage asks 9 of its 37 fields**, and all nine are page- or run-specific —
 the parent pillar URL, sibling pages, existing ranking keywords, the four locked blocks, the CRO
-framework and free-text notes. Two more (the inherited ICP and the run's own competitor listing) stop
+framework and free-text notes. Two more (this run's ICP and its competitor listing) stop
 as accept-or-replace cards rather than questions, which is `overridable: true` behaviour Phase 1 has
 too. `smoke/phase2cro.tsx` walks the intake end to end and names that list, so a field joining it
 fails a test rather than landing on an operator.
@@ -805,6 +843,223 @@ what the rewrite is benchmarked against is the page, not the vendor. Its target-
 reading it would search the market for the phrase "NEW PAGE — no existing URL".
 
 ---
+
+## Industry personality — one voice block per client, and advice about which stages to run
+
+Every prompt in `assets/Prompts/` is industry-agnostic, and until this existed nothing told the model
+how a regulated lender should sound next to a Shopify store. The pipeline's own voice, a marketing
+agency's, bled into every client. Every client was also walked through all fifteen stages, Blog and
+Webinar included, whatever it sold.
+
+### The industry is the client's own, inferred then confirmed
+
+- **Whose industry.** ICP's `industry` field asks for the *target customer's* industry. A lender
+  whose customers are builders is still bound by financial-promotion rules, so the classifier is
+  shown that answer labelled as "a hint only".
+- **When it is asked.** At the end of the first stage's intake (ICP, normally), before anything
+  generates. `advanceIntake` pauses on `resolveIndustry`, which tries three things in order:
+  1. A value the run already holds. A Phase 2 leg inherits its parent's through `source_run_id`.
+  2. A guess to confirm. `POST /pipeline/industry/infer` makes one Haiku call and does a **free**
+     direct read of the home page's title, never a paid reader.
+  3. An outright question in a text box, when there is no guess at or above `MIN_CONFIDENCE`.
+- **Typed answers.** A typed answer, or one given through "Other: specify", is mapped server-side.
+  It falls to `general` when nothing fits, and the operator's own words are kept as `label`.
+- **Where it is stored.** The confirmed answer is filed by `POST /pipeline/runs/{id}/industry` as a
+  `ContextEntry` under `industry_profile`. It is server-composed, listed in
+  `SERVER_COMPOSED_CONTEXT_KEYS`.
+- **Changing it.** "Change" re-asks it between stages or mid-intake. The change applies to stages
+  generated from then on. Saved stages keep the voice they were written in.
+
+### The voice block
+
+- **Where it goes.** `industry_voice.voice_block` leads the tail of every stage's prompt in
+  `generation._prompt_parts`, in both phases, and also leads the refine prompt.
+- **Why there.** It sits after the cached reference library, so the 1h prompt cache still hits,
+  and before the brand tokens and INPUTS.
+- **What it contains.** One pack file per bucket in `assets/voice_packs/`, covering tone,
+  compliance posture, vocabulary and how aggressive claims may be. Every block carries the same
+  precedence clause: **INPUTS win**. A tone, claim tier or testimonial permission the operator
+  settled in CRO overrides the pack's default.
+- **`marketing_agency` is the default and renders no block at all.** A run that never sets an
+  industry sends every prompt byte-for-byte as before;
+  `test_default_bucket_and_no_profile_leave_every_prompt_byte_identical` pins that for every stage
+  in both phases. It has no pack file, on purpose.
+- **Never fork prompt files per industry.** Phase 2's SCOPE LOCK is the lesson: two files that
+  start identical drift silently. One block composed in one place cannot drift.
+
+### Stage advisories: advice, never removal
+
+`INDUSTRY_PROFILES` in `data/industryProfiles.ts` lists, per bucket, the stages it rarely needs and
+why.
+
+- **The advisory card.** When the forward walk reaches one (`proceedToStage`, called from
+  `saveStage`), it pushes a `stage-advisory` card. **Skip** is the primary option, following the
+  `NEW_PAGE_OPTIONS` pattern, and **Build it anyway** sits beside it.
+- **What a skip is.** A skip is recorded on the card itself. `skippedAssetIds` reads it off the
+  transcript the way `approvedAssetIds` reads approvals, so a skip needs no state of its own and is
+  cleared by `clearPhase`.
+- **What a skip is not.** It never marks the stage done. The diagram shows "Skipped", and
+  "Start here" still builds the stage.
+- **Only the forward walk is advised.** "Start here", a gate, a re-run and a resume are the operator
+  having already chosen the stage.
+- **A skip must never strand a later stage.** A bucket may not advise against a stage that a stage
+  it still recommends depends on. Book is built from Webinar, so the two are always listed together.
+  `test_no_advised_against_stage_is_a_prerequisite_of_a_recommended_one` enforces this against
+  `dependencies.py`.
+
+### Three files have to agree
+
+1. `BUCKETS` in `app/services/industry_voice.py`.
+2. One pack per bucket in `assets/voice_packs/`.
+3. `INDUSTRY_PROFILES` (keys *and* labels) in `data/industryProfiles.ts`.
+
+The confirm card answers with a label and the store maps it back to a bucket by that label, so a
+label that drifts matches no bucket at all. `tests/test_industry_voice.py` and
+`tests/test_industry_profiles_agree.py` check all three; `smoke/industry.tsx` drives the UI half.
+
+**Not yet built (Phase C).** Per-bucket default answers for repetitive CRO intake (claim tier,
+testimonials, pricing disclosure), offered as accept-or-replace. Deferred because the claim tier is a
+legal guardrail, and a default there is a decision someone has to own.
+
+## Deliverables, shown visually
+
+The reader (`pipeline/AssetReader.tsx`) opens every approved asset in a **Visual** view, with a
+**Text** toggle that shows the document exactly as exported. The preference is `uiStore.readerView`,
+remembered like `docView`.
+
+The structure was always in the documents. CRO scores its layers N/10 and the page /100, the
+ladder's offers carry `- Price:` and `- Ascends To:`, SMS messages carry `**Timing:**`, the lead
+magnet has a `Total /25` scorecard, and the webinar has a timed run of show. The Visual view draws
+that structure. It is a **re-layout, never a summary**.
+
+### The two guarantees, pinned by `smoke/visual.tsx`
+
+- **Partition.** `parseVisualBlocks` (`lib/visualBlocks.ts`) splits a section into blocks, and each
+  block records the exact text it consumed. The sources rejoin to the body byte for byte, and
+  anything no recogniser claims is a `markdown` block rendered as before.
+- **Containment.** Every recognised block renders every word of its source. This is the
+  word-multiset check `smoke/plan.tsx` uses for the mind map. A bar is drawn **beside** "6/10",
+  never instead of it, so no meaning is carried by colour alone.
+
+Both are run over **every real output in `manual_execution/`**. A recogniser that drops a word
+fails there, whichever document it happens on.
+
+### Recognisers, and table classification
+
+- **Recognisers, in order:**
+  - tables;
+  - score lines (`**Score: 58/100**`, drawn as a gauge);
+  - Value Ladder offer items (drawn as offer cards);
+  - runs of three or more timed slots (`- 0:00–0:03 — …`, drawn as a run of show);
+  - runs of same-level headings that are all timed (drawn as a sequence);
+  - runs of three or more whole-line bold leads with content (drawn as cards).
+
+  Fenced code is never parsed, so the funnel's ASCII flow stays as written.
+- **`classifyTable` decides a table's visual. The order is the specification:**
+  1. kanban, when at least 70% of rows are P0–P4 or a tier. "Ongoing" becomes its own column, and a
+     priority table with a Timeline column is still a kanban;
+  2. a rubric (`Total /25` over bare numbers, each criterion's maximum shared from the total);
+  3. score cells (N/10, %, ★, HIGH/MED/LOW, ✓/⚠/✗);
+  4. a time column, drawn as a timeline;
+  5. Stage/Page plus goal or source columns, drawn as a flow;
+  6. Metric/KPI plus Target/Baseline, drawn as KPI tiles;
+  7. anything else is a plain table, rendered exactly as the Text view does.
+
+**"At a glance"** (`lib/assetGlance.ts`) is derived and additive. It picks one picture per asset from
+the same blocks: a CRO score with layer bars, ladder rungs with offer counts and headline price
+ranges, the funnel's stages, the lead magnet's winning concept, a sequence's steps, a run of show,
+or the Plan of Action's existing `PlanMindMap`. Each item jumps to the section it came from. The
+Deliverables cards show the same glance, card-sized (`MiniGlance`), so a card and the document it
+opens never disagree.
+
+### Rules
+
+- **Exports never see any of this.** They read raw `message.text`.
+- **No chart library.** Everything is hand-built divs and SVG on the `var(--…)` tokens, so dark mode
+  needs nothing of its own.
+- **Adding a recogniser.** Claim contiguous lines only, keep every word in what you render, and add
+  a real-sample recognition assertion to `smoke/visual.tsx`. The corpus checks will then tell you if
+  it loses anything.
+
+## Checking a draft against the business — offers, funnel, business rules, virality
+
+Every stage writes a polished document, and nothing used to check it against the client's actual
+business: `save_stage` never reads the content. So an offer ladder could sell a service the client
+doesn't offer, a lead magnet could quote a price nobody set, and nothing estimated whether a post
+would travel. `app/services/asset_check.py` checks every finished draft, **automatically and
+advisorily**.
+
+### The facts it checks against — `business_facts.py`
+
+`load_business_facts` reads what the run already holds, through the usual inheritance:
+
+- **The offer catalogue**, from `offer_ladder` (or `offers`).
+  - `parse_offer_ladder` parses it deterministically, because the Value Ladder prompt fixes the item
+    format (`N. **[Format] "Title"**`, then `- Price:` / `- Estimated Value:` / `- Ascends To:`).
+  - A repeated offer is merged into its first description.
+  - `test_business_facts.py` parses the real ladder in `manual_execution/`.
+- **Pricing, claim tier, testimonials, words to avoid and tone**, from `cro_client_settings.fields`.
+- **Industry**, from `industry_profile`.
+- **ICP and funnel**, as text for the judge.
+- **Keyword volume**, from `keyword_clusters`.
+- **Social engagement**, from `social_post_sample`.
+
+**A fact that isn't there is listed as missing, never guessed.** A price check with no prices on
+record doesn't run; the panel says "not on record, so not checked".
+
+### Measure, then judge
+
+1. **Rules first: free and deterministic.** They are run against the facts and cover:
+   - a price that isn't on the ladder or in the pricing facts;
+   - any price at all under disclosure modes D or E;
+   - a routing asset (funnel, lead magnet, SMS, webinar) that names no real offer;
+   - words-to-avoid hits;
+   - ratings and attributed quotes when testimonials are NO or UNSURE;
+   - absolute claims at claim tier 2 or above;
+   - unsourced statistics and placeholders, as `info`.
+2. **One judge call** (Sonnet, `low` effort) for what the rules can't decide: whether the offer fits
+   the ICP, whether the funnel step matches the buyer's awareness, contradictions, and virality.
+3. **Every judge finding must quote the draft verbatim.** `_verified` drops any quote that isn't in
+   the text, and the report counts what it dropped. A checker that invents problems is as bad as a
+   stage that invents facts.
+
+### The noise floor is the product
+
+These documents mix customer copy with strategist notes, competitor tables and KPI targets. A
+checker that flags every "Guaranteed results" quoted from a competitor gets ignored. So:
+
+- Text under competitor, benchmark or market-scan headings is skipped (`_others_spans`).
+- Negation is read over the sentence ("results are not guaranteed" is the compliant sentence).
+- Ratings require a rating shape (`4.9/5`, not "SMS 4/5").
+- The testimonial and statistic rules apply only to `CUSTOMER_FACING` assets.
+- Rules report one finding per rule per line.
+- `test_real_outputs_raise_no_false_errors` runs the rules over real outputs. **Loosen a rule and
+  that test is what notices.**
+
+### Virality is a prediction
+
+Virality is scored against a rubric taken from the headline framework: hook, curiosity,
+specificity, emotion, shareability and platform fit. Where the run has real data, it is anchored to
+that data: keyword volume for terms the draft uses, and the real top posts' opening lines.
+
+- **The real data is collected at no extra cost.** The Stage 10 social prepass now also files
+  `social_post_sample`: `social_audit.engagement_stats` over posts it had already paid for.
+  `stats` is taken off the SSE event before it goes to the browser.
+- **Missing counts stay `None`**, never 0.
+- The report states its basis: `benchmarked` or `rubric only`. The panel labels the score a
+  prediction, always.
+
+### The UI
+
+- **When it runs.** `runAssetCheck` runs after every clean stream in `streamIntoMessage`
+  (generation, retry, refine). A truncated or failed draft is not checked, and a retry clears the
+  old report.
+- **What the panel shows.** `AssetCheckPanel` sits **above** the Approve row and never disables it.
+  It opens only when something is an error.
+- **Fixing.** "Fix N with Refine" sends the chosen findings to `submitRefine` as one quoted note
+  (`composeFixNote`). Errors and warnings are pre-selected; info is opt-in.
+- **The route.** `POST /pipeline/check/{asset_id}` stores nothing and records its cost as
+  `kind="check"`. A judge failure returns the rule findings alone, with `judge: "unavailable"`.
 
 ## Running a stage out of order
 

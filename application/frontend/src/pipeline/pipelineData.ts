@@ -6,6 +6,8 @@ import {
   SUB_SERVICE_FACT,
 } from "../data/phase2Catalog";
 import type { AssetDefinition, FieldDef } from "../data/types";
+import { INDUSTRY_BUCKETS, INDUSTRY_PROFILES } from "../data/industryProfiles";
+import type { IndustryBucket } from "../data/industryProfiles";
 
 /** The three foundation stages that are gated (human-in-the-loop) in the real orchestrator's
  * `asset_definitions.is_gated` column (see backend `scripts/seed_asset_definitions.py`). Every
@@ -45,9 +47,10 @@ export interface PipelineStageDef {
  * client is known yet, and everything downstream is built on those two.
  *
  * `phase2` builds the same kind of stack one level down, for a single *sub-service* (LinkedIn,
- * Meta Ads, Google Ads). It is deliberately shorter and skips the foundation stages: a sub-service
- * inherits the client and the audience from the parent service, so re-deriving an ICP per
- * sub-service would ask twenty questions to arrive back at the answer Phase 1 already produced. */
+ * Meta Ads, Google Ads). It is shorter than Phase 1 and inherits the *client* from the parent run
+ * (brand design, CRO client settings, industry), but not the *audience*: it opens with its own ICP,
+ * because the buyer of one sub-service is often not the buyer of the headline service. Phase 1's ICP
+ * and value ladder never cross over (`PHASE1_ONLY_CONTEXT_KEYS`). */
 export type PipelinePhase = "phase1" | "phase2";
 
 /** The Phase 2 sequence, listed explicitly rather than filtered out of the catalog.
@@ -56,6 +59,9 @@ export type PipelinePhase = "phase1" | "phase2";
  * before Blog, Funnel Hub last as the piece that assembles the designs), so the order here IS the
  * specification and must not be re-derived from `ASSET_CATALOG`. */
 const PHASE2_ASSET_IDS = [
+  // Its own ICP, for the sub-service. Phase 1's profiles the buyer of the headline service, who is
+  // often not the buyer of one sub-service — see `PHASE2_OVERRIDES["icp"]` in the backend.
+  "icp",
   "cro",
   "pillar_page",
   "funnel",
@@ -402,6 +408,59 @@ export const SUB_SERVICE_FIELD: FieldDef = {
   placeholder: "e.g. Google Ads, Meta Ads, TikTok",
 };
 
+// --------------------------------------------------------------------------------------
+// The client's industry — a run-level question, like the sub-service
+// --------------------------------------------------------------------------------------
+
+/** The run-level facts the confirmed industry is filed under in `clientProfile`. Not a
+ * `ClientFactKey`: nothing auto-fills a stage field from them. They drive the voice pack (server
+ * side, off the run's `industry_profile` entry) and the stage advisories (here). */
+export const INDUSTRY_BUCKET_FACT = "industry_bucket";
+export const INDUSTRY_LABEL_FACT = "industry_label";
+
+/** The typed-answer choice. Worded so `specifyPrefix` recognises it and `QuestionWidget` opens its
+ * inline box rather than filing the words as an answer. */
+export const INDUSTRY_OTHER_CHOICE = "Other: specify";
+
+/** Asked when the classifier had a confident guess: confirm it, pick another bucket, or type one.
+ *
+ * `general` is not offered as a pill. It is what a typed answer that fits nothing becomes, and a
+ * bare "Other industry" with no words attached would give the voice pack nothing to name. */
+export const INDUSTRY_CONFIRM_FIELD: FieldDef = {
+  field_id: "__industry_confirm",
+  label: "Client's industry",
+  kind: "enum_choice",
+  required: true,
+  source: "user_input",
+  choices: [
+    ...INDUSTRY_BUCKETS.filter((b) => b !== "general").map((b) => INDUSTRY_PROFILES[b].label),
+    INDUSTRY_OTHER_CHOICE,
+  ],
+  helpText:
+    "This is the client's own industry, not the industry of the customers they sell to. It sets the voice every stage writes in (tone, compliance caution, vocabulary) and which stages are recommended. You can change it later.",
+};
+
+/** Asked when there was no confident guess: the operator names the industry in their own words, and
+ * the server maps it to a bucket (or to `general`, keeping the words). */
+export const INDUSTRY_TEXT_FIELD: FieldDef = {
+  field_id: "__industry_text",
+  label: "What industry is the client in?",
+  kind: "text",
+  required: true,
+  source: "user_input",
+  placeholder: "e.g. Mortgage broking, Dental clinic, B2B payroll software, Plumbing",
+  helpText:
+    "The client's own industry, not their customers'. It sets the voice every stage writes in and which stages are recommended.",
+};
+
+export const INDUSTRY_FIELD_IDS = new Set([INDUSTRY_CONFIRM_FIELD.field_id, INDUSTRY_TEXT_FIELD.field_id]);
+
+/** Which bucket a confirm-card answer names, by label. Undefined for a typed ("Other: …") answer. */
+export function industryBucketForLabel(answer: string): IndustryBucket | undefined {
+  const text = answer.trim();
+  return INDUSTRY_BUCKETS.find((b) => INDUSTRY_PROFILES[b].label === text);
+}
+
 /** field_id -> the sub-service fact that answers it, for Phase 2's intake walk. */
 export const PHASE2_FIELD_TO_FACT: Record<string, string> = PHASE2_FIELD_TO_SUB_SERVICE;
 
@@ -505,9 +564,33 @@ export const COMPETITOR_CONSENT_FIELDS_BY_PHASE: Record<
   phase2: {},
 };
 
+/** The industry of the audience a Phase 2 run sells its sub-service to — its own fact, not Phase 1's.
+ *
+ * ICP's `industry` ("of the ICP you are targeting"), Lead Magnet's `industry` and Content
+ * Marketing's `industry_niche` all describe the *audience*, and in Phase 1 they share the run-level
+ * `industry` fact. Phase 2 builds its own ICP for the sub-service, whose buyers can sit in a
+ * different industry from the headline service's, so reusing Phase 1's answer there would hand the
+ * sub-service ICP the parent's audience with an edit chip on it. So in Phase 2 these fields map to
+ * this fact instead: empty when the Phase 2 ICP asks, so it is asked fresh, and then reused by the
+ * later stages of the same run rather than asked three times.
+ *
+ * Stored per run (`phase2AudienceIndustryKey`), because a chat can hold several Phase 2 tracks — one
+ * per sub-service — and each has its own ICP and its own audience. */
+export const PHASE2_AUDIENCE_INDUSTRY_FACT = "phase2_audience_industry";
+export const PHASE2_AUDIENCE_INDUSTRY_FIELDS: readonly string[] = ["industry", "industry_niche"];
+
+/** The client-profile key one Phase 2 run's audience industry is stored under. */
+export function phase2AudienceIndustryKey(runId: string | null): string {
+  return `${PHASE2_AUDIENCE_INDUSTRY_FACT}:${runId ?? "unsaved"}`;
+}
+
 export const FIELD_TO_FACT_BY_PHASE: Record<PipelinePhase, Record<string, string>> = {
   phase1: FIELD_TO_CLIENT_FACT,
-  phase2: { ...FIELD_TO_CLIENT_FACT, ...PHASE2_FIELD_TO_FACT },
+  phase2: {
+    ...FIELD_TO_CLIENT_FACT,
+    ...Object.fromEntries(PHASE2_AUDIENCE_INDUSTRY_FIELDS.map((id) => [id, PHASE2_AUDIENCE_INDUSTRY_FACT])),
+    ...PHASE2_FIELD_TO_FACT,
+  },
 };
 
 /** `PREPASS_BY_MAIN_ASSET`, per phase. Empty for Phase 2: every competitor stage it runs is gated,

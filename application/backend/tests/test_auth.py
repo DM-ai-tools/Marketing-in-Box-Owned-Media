@@ -122,6 +122,46 @@ def test_token_hash_is_stable_and_hex():
     assert digest != hash_token("abd")
 
 
+def test_deliver_password_reset_sends_mail_when_configured(monkeypatch, caplog):
+    """A configured transport gets the link; the logs do not — it is a live credential."""
+    sent: list[dict] = []
+    monkeypatch.setattr(auth_service.mail, "is_configured", lambda: True)
+    monkeypatch.setattr(
+        auth_service.mail, "send_email", lambda **kwargs: sent.append(kwargs)
+    )
+    url = "http://localhost:5173/?reset_token=secret-token"
+    with caplog.at_level("WARNING"):
+        auth_service.deliver_password_reset(email="a@example.com", reset_url=url)
+    assert len(sent) == 1
+    assert sent[0]["to"] == "a@example.com"
+    assert "secret-token" in sent[0]["text"]
+    assert "secret-token" in sent[0]["html"]
+    assert "secret-token" not in caplog.text
+
+
+def test_deliver_password_reset_logs_the_link_when_mail_is_off(monkeypatch, caplog):
+    monkeypatch.setattr(auth_service.mail, "is_configured", lambda: False)
+    url = "http://localhost:5173/?reset_token=secret-token"
+    with caplog.at_level("WARNING"):
+        auth_service.deliver_password_reset(email="a@example.com", reset_url=url)
+    assert "secret-token" in caplog.text
+
+
+def test_deliver_password_reset_swallows_send_failures(monkeypatch, caplog):
+    """A provider outage must not become a 500 on known addresses — that would enumerate accounts."""
+    monkeypatch.setattr(auth_service.mail, "is_configured", lambda: True)
+
+    def boom(**_kwargs):
+        raise auth_service.mail.MailError("Resend is down")
+
+    monkeypatch.setattr(auth_service.mail, "send_email", boom)
+    url = "http://localhost:5173/?reset_token=secret-token"
+    with caplog.at_level("ERROR"):
+        auth_service.deliver_password_reset(email="a@example.com", reset_url=url)
+    assert "failed" in caplog.text.lower()
+    assert "secret-token" not in caplog.text
+
+
 # --------------------------------------------------------------------------------------
 # End-to-end flows (require Postgres)
 # --------------------------------------------------------------------------------------
@@ -289,6 +329,22 @@ def test_forgot_password_answer_does_not_reveal_whether_the_account_exists(clien
     assert known.json() == unknown.json()
     # ...but only the real account actually got a link.
     assert len(sent) == 1
+
+
+@requires_db
+def test_forgot_password_still_200_when_mail_fails(client, fresh_email, monkeypatch):
+    """Same 200 as a successful send, so a down mailer cannot be used to enumerate accounts."""
+    monkeypatch.setattr(auth_service.mail, "is_configured", lambda: True)
+
+    def boom(**_kwargs):
+        raise auth_service.mail.MailError("Resend is down")
+
+    monkeypatch.setattr(auth_service.mail, "send_email", boom)
+    client.post("/auth/signup", json={"email": fresh_email, "password": "sixchr"})
+    client.post("/auth/logout")
+    res = client.post("/auth/forgot-password", json={"email": fresh_email})
+    assert res.status_code == 200
+    assert "on its way" in res.json()["message"]
 
 
 @requires_db

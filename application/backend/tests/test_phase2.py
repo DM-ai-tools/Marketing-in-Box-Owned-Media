@@ -40,6 +40,7 @@ from app.services.generation import _config as stage_config
 # here rather than imported (it lives in TypeScript) — which is exactly why it is worth asserting:
 # the two must agree or a stage the UI runs has no prompt behind it.
 PHASE2_ASSET_IDS = [
+    "icp",
     "cro",
     "pillar_page",
     "funnel",
@@ -74,14 +75,14 @@ def test_every_phase2_stage_is_also_a_phase1_stage():
 def test_has_stage_is_phase_specific():
     assert has_stage("blog", "phase2")
     assert has_stage("icp", "phase1")
-    # Phase 2 inherits the ICP from its parent run instead of re-deriving one.
-    assert not has_stage("icp", "phase2")
+    # Phase 2 builds its own ICP for the sub-service (see tests/test_phase2_icp.py).
+    assert has_stage("icp", "phase2")
     assert not has_stage("offers", "phase2")
 
 
 def test_unknown_phase2_stage_names_the_phase():
     with pytest.raises(UnknownStageError) as excinfo:
-        stage_config("icp", "phase2")
+        stage_config("offers", "phase2")
     assert "phase2" in str(excinfo.value)
 
 

@@ -225,7 +225,7 @@ const file = (field_id: string, label: string, opts: Partial<FieldDef> = {}): Fi
  * does state and wrong for this one, so `saveStage` skips these and lets them be read back from the
  * database when a stage actually wants one.
  */
-export const SERVER_COMPOSED_CONTEXT_KEYS: ReadonlySet<string> = new Set(["cro_client_settings"]);
+export const SERVER_COMPOSED_CONTEXT_KEYS: ReadonlySet<string> = new Set(["cro_client_settings", "industry_profile"]);
 
 export const ASSET_CATALOG: AssetDefinition[] = [
   // ---------------------------------------------------------------- Foundation

@@ -24,6 +24,7 @@ from pathlib import Path
 
 from app.services.claude_client import get_client
 from app.services.image_briefs import GeneratedImage
+from app.services.industry_voice import IndustryProfile, voice_block
 from app.services.page_structure import STRUCTURE_HEADING
 from app.services.usage import CallUsage
 
@@ -242,6 +243,21 @@ class Phase2Override:
 _PHASE2_PROMPT_SUBDIR = "Phase2"
 
 PHASE2_OVERRIDES: dict[str, Phase2Override] = {
+    # Phase 2's own ICP, and stage 01. Phase 1's ICP is built from the client's headline service, so
+    # the buyer it profiles is the buyer of "Social Media Marketing", not of "Meta Ads" — often a
+    # different person with a different trigger, budget line and set of alternatives. Phase 2 used to
+    # inherit that document down `source_run_id` and ask the CRO prompt's SCOPE LOCK to re-point it;
+    # now it builds its own, and `icp` is in `PHASE_SCOPED_CONTEXT_KEYS` (the router) so the parent's can never
+    # stand in for it.
+    #
+    # The file is `ICP.md` with exactly two edits — the service input relabelled to the sub-service,
+    # and a SUB-SERVICE SCOPE section before the context rules. `tests/test_phase2_icp.py` reverses
+    # both and requires the result to equal `ICP.md` byte for byte, so an improvement to the Phase 1
+    # prompt that is not carried across fails a test instead of silently drifting.
+    "icp": Phase2Override(
+        "ICP_phase2.md",
+        label_overrides=(("service_product_price_terms", "Sub-Service + Price/Terms"),),
+    ),
     # Phase 2's own CRO stage, and the reason it exists: the Pillar Page prompt designs the copy it
     # is handed and has no service input of any kind, so the copy *is* the subject of the page. With
     # no CRO stage here that copy could only be the parent Phase 1 run's rewrite of the client's
@@ -802,6 +818,7 @@ def _prompt_parts(
     answers: dict[str, str],
     phase: str = DEFAULT_PHASE,
     page_design: PageDesignInput | None = None,
+    voice: IndustryProfile | None = None,
 ) -> tuple[str, str]:
     """This stage's prompt, split at its cache boundary: (reference library, everything else).
 
@@ -815,6 +832,11 @@ def _prompt_parts(
 
     Moving them costs little: they still precede the INPUTS block and the master prompt body, so they
     are still read before the instruction to build, which is what their directive needs.
+
+    The industry voice block (`industry_voice.voice_block`) leads the tail on every stage, HTML or
+    not, for the same reason and on the same side of the cache boundary: it is per client, so it
+    must not sit in front of the library. It is "" for the default bucket, which keeps a run that
+    never set an industry byte-identical to the prompt before this block existed.
     """
     cfg = _config(asset_id, phase)
     answers = _apply_reference_injections(asset_id, answers)
@@ -829,7 +851,8 @@ def _prompt_parts(
 
     return (
         _load_reference_library(asset_id),
-        brand
+        voice_block(voice)
+        + brand
         + "— INPUTS (fill in before submitting) —\n\n"
         + "\n".join(lines)
         + "\n\n— END OF INPUTS —\n\n"
@@ -842,6 +865,7 @@ def build_prompt(
     answers: dict[str, str],
     phase: str = DEFAULT_PHASE,
     page_design: PageDesignInput | None = None,
+    voice: IndustryProfile | None = None,
 ) -> str:
     """The whole prompt as one string: any reference library this stage cites, then its own "fill in
     before submitting" INPUTS block reproduced from the caller's intake, then the file's real master
@@ -857,7 +881,7 @@ def build_prompt(
     concatenation, so the first half can carry a cache breakpoint — see `build_stage_request`. The
     text the model sees is identical either way, which is what this function pins.
     """
-    library, tail = _prompt_parts(asset_id, answers, phase, page_design)
+    library, tail = _prompt_parts(asset_id, answers, phase, page_design, voice)
     return library + tail
 
 
@@ -866,6 +890,7 @@ def build_stage_request(
     answers: dict[str, str],
     phase: str = DEFAULT_PHASE,
     page_design: PageDesignInput | None = None,
+    voice: IndustryProfile | None = None,
 ) -> tuple[list[dict[str, object]] | None, str | list[dict[str, object]]]:
     """The same prompt as `build_prompt`, as `(system_blocks, user_content)` ready for the API.
 
@@ -892,7 +917,7 @@ def build_stage_request(
     prompt's instruction to proceed, and an image appended after that sits between the instruction
     and the response.
     """
-    library, tail = _prompt_parts(asset_id, answers, phase, page_design)
+    library, tail = _prompt_parts(asset_id, answers, phase, page_design, voice)
 
     if page_design is not None:
         images = page_design.generated_images_for(asset_id)
@@ -939,12 +964,15 @@ def _stream_kwargs(
     return kwargs
 
 
-def build_revision_prompt(previous_draft: str, note: str) -> str:
+def build_revision_prompt(previous_draft: str, note: str, voice: IndustryProfile | None = None) -> str:
     """A deliberately different, much smaller prompt for the "Refine / Request Changes" path:
     hands Claude the exact previous draft plus the operator's requested change, rather than
     re-running the entire master prompt from scratch (which would ignore the previous output
-    and likely produce a different document, not a revision of the one being reviewed)."""
-    return (
+    and likely produce a different document, not a revision of the one being reviewed).
+
+    The industry voice block still leads it: a revision written without it drifts back to the
+    pipeline's default voice on exactly the paragraphs the operator asked to change."""
+    return voice_block(voice) + (
         "You previously produced the following document:\n\n"
         "----- PREVIOUS DRAFT -----\n"
         f"{previous_draft}\n"
@@ -968,20 +996,22 @@ async def generate_stage_stream(
     phase: str = DEFAULT_PHASE,
     on_usage: OnUsage | None = None,
     page_design: PageDesignInput | None = None,
+    voice: IndustryProfile | None = None,
 ) -> AsyncIterator[str]:
     """Stream this stage's real generation as Markdown text deltas."""
     cfg = _config(asset_id, phase)
     client = get_client()
-    system_blocks, user_content = build_stage_request(asset_id, answers, phase, page_design)
+    system_blocks, user_content = build_stage_request(asset_id, answers, phase, page_design, voice)
 
     logger.info(
-        "Streaming stage=%s phase=%s model=%s effort=%s cached_prefix=%s prompt=%s",
+        "Streaming stage=%s phase=%s model=%s effort=%s cached_prefix=%s prompt=%s industry=%s",
         asset_id,
         phase,
         cfg.model,
         cfg.effort if cfg.model in EFFORT_CAPABLE_MODELS else "n/a",
         system_blocks is not None,
         cfg.prompt_file,
+        voice.bucket if voice is not None else "default",
     )
     if page_design is not None and asset_id in BRAND_TOKEN_STAGES:
         logger.info(
@@ -1030,12 +1060,13 @@ async def generate_revision_stream(
     note: str,
     phase: str = DEFAULT_PHASE,
     on_usage: OnUsage | None = None,
+    voice: IndustryProfile | None = None,
 ) -> AsyncIterator[str]:
     """Stream a revision of `previous_draft` per the operator's `note`, using the same model
     tier as the stage's original generation."""
     cfg = _config(asset_id, phase)
     client = get_client()
-    prompt = build_revision_prompt(previous_draft, note)
+    prompt = build_revision_prompt(previous_draft, note, voice)
 
     logger.info("Streaming revision stage=%s model=%s effort=%s", asset_id, cfg.model, cfg.effort)
     started = time.monotonic()

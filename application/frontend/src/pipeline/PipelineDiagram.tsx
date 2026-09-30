@@ -3,7 +3,9 @@ import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import { Hint } from "../components/Hint";
 import { PhaseToggle } from "./PhaseToggle";
 import { PHASE_META, PHASE_ORDER, stagesFor, totalStagesFor } from "./pipelineData";
-import { approvedAssetIds, usePipelineStore } from "./pipelineStore";
+import { INDUSTRY_BUCKET_FACT, INDUSTRY_LABEL_FACT } from "./pipelineData";
+import { approvedAssetIds, skippedAssetIds, usePipelineStore } from "./pipelineStore";
+import { notRecommendedReason } from "../data/industryProfiles";
 
 type NodeStatus = "idle" | "pending" | "running" | "hitl" | "done";
 
@@ -140,6 +142,10 @@ export function PipelineDiagram() {
   const messages = usePipelineStore((s) => s.messages);
   const activePhase2TrackId = usePipelineStore((s) => s.activePhase2TrackId);
   const approved = useMemo(() => approvedAssetIds(messages, phase, activePhase2TrackId), [messages, phase, activePhase2TrackId]);
+  const skipped = useMemo(() => skippedAssetIds(messages, phase, activePhase2TrackId), [messages, phase, activePhase2TrackId]);
+  // Advisory only: a stage the client's industry rarely needs is tagged, never hidden.
+  const industryBucket = usePipelineStore((s) => s.clientProfile[INDUSTRY_BUCKET_FACT]);
+  const industryLabel = usePipelineStore((s) => s.clientProfile[INDUSTRY_LABEL_FACT] ?? "");
   const runningLabel = navStatus === "Awaiting Input" ? "Awaiting Input" : "Generating…";
   const nodeRefs = useRef<(HTMLDivElement | null)[]>([]);
   const reduceMotion = useReducedMotion();
@@ -193,6 +199,8 @@ export function PipelineDiagram() {
           // (the review gate, the resume banner, Re-run) and a second way in would compete with
           // them. Withheld entirely mid-generation: jumping then abandons a stream in flight.
           const startable = status === "idle" && activeStatus !== "running";
+          const wasSkipped = status === "idle" && skipped.has(stage.asset.asset_id);
+          const advisedAgainst = status !== "done" ? notRecommendedReason(industryBucket, stage.asset.asset_id) : undefined;
           return (
             <motion.div
               key={stage.asset.asset_id}
@@ -227,12 +235,17 @@ export function PipelineDiagram() {
                     <div className="text-[0.88rem] font-semibold leading-snug @[24rem]:truncate">
                       {stage.asset.label}
                     </div>
+                    {advisedAgainst && (
+                      <div className="mt-0.5 text-[0.66rem] text-[var(--fg-faint)]" title={advisedAgainst}>
+                        Optional for {industryLabel || "this industry"}
+                      </div>
+                    )}
                   </div>
                   <span
                     className={`ml-auto shrink-0 rounded-full px-2 py-0.5 text-[0.62rem] font-semibold ${BADGE_STYLE[status]}`}
                     style={{ backgroundColor: BADGE_BG[status] }}
                   >
-                    {status === "running" ? runningLabel : BADGE_LABEL[status]}
+                    {status === "running" ? runningLabel : wasSkipped ? "Skipped" : BADGE_LABEL[status]}
                   </span>
                 </div>
                 <ProgressBar status={status} progress={progress} />

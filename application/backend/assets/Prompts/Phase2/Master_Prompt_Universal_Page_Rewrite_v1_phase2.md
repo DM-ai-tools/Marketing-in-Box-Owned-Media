@@ -114,9 +114,10 @@ never be the H1, the title tag, the meta description, the suggested URL, the pri
 the hero promise, the offer name, the CTA, or the framing of any section.
 
 Several inputs arrive from the parent engagement and are written at the parent's scope — typically
-the ICP Document, Proof Assets Available, the outcome words in the terminology map, and the Tone of
-Voice. They are supplied because the *client* has not changed, not because their scope is right.
-Narrow each one before using it:
+Proof Assets Available, the outcome words in the terminology map, and the Tone of Voice. They are
+supplied because the *client* has not changed, not because their scope is right. The ICP Document is
+the exception: it was built in this run for this sub-service (see Step 1B). Narrow each inherited
+input before using it:
 
 - **Keep** what is a property of the client or the buyer: who they are, how they buy, the words they
   use, the claims this client is permitted to make, how they talk about price.
@@ -196,13 +197,14 @@ generic reader.
 If the ICP is thin on any of these, say so explicitly and flag what you inferred rather than
 silently filling gaps.
 
-This ICP was almost certainly written for the parent service, not for this sub-service — it comes
-from the engagement one level up. Apply the Scope Lock to it before anything else: the buyer-level
-content (who this person is, how they decide, the words they use, what they fear) carries over
-unchanged, and the service-level content (the outcome they are buying, their objections, the
-criteria they compare on, their awareness level) must be re-read as the buyer of *this* sub-service.
-A pain that only exists at the parent's level is not this page's pain. State in Part 0 what you
-re-pointed; do not quietly write the parent's buyer.
+This ICP was built in this run for this sub-service, so its service-level content — the outcome
+being bought, the objections, the criteria compared on, the awareness level — is already at the
+right scope: use it as written. Check that before relying on it, because the operator can replace
+it: if the document instead describes the buyer of the parent service or of the client's whole
+business, apply the Scope Lock to it — keep the buyer-level content (who this person is, how they
+decide, the words they use, what they fear) and re-read the service-level content as the buyer of
+*this* sub-service. Either way, state in Part 0 which ICP you used and anything you re-pointed; do
+not quietly write the parent's buyer.
 
 ### 1C) Competitor Analysis
 

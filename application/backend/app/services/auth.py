@@ -1,7 +1,9 @@
 """Account, credential, and session mechanics for the sign-in gate.
 
 Email and password only. There is no federated/OAuth sign-in: an account is an email plus a
-scrypt-hashed password in this project's own Postgres, and nothing here talks to a third party.
+scrypt-hashed password in this project's own Postgres. The only outbound call is a password-reset
+email, and that goes through `app/services/mail.py` — nothing in this module constructs a mail
+client.
 
 Everything security-sensitive about authentication lives in this module so there is exactly one
 place to audit; `app/routers/auth.py` above it does request/response shaping and cookie plumbing
@@ -36,6 +38,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import PasswordResetToken, User, UserSession
+from app.services import mail
 
 logger = logging.getLogger(__name__)
 
@@ -414,21 +417,65 @@ async def issue_password_reset(session: AsyncSession, *, email: str) -> tuple[st
     return token, reset_url
 
 
-def deliver_password_reset(*, email: str, reset_url: str) -> None:
-    """Send the reset link. Development delivery is a log line; production is one edit here.
+def _reset_email_text(reset_url: str) -> str:
+    minutes = int(RESET_TOKEN_TTL.total_seconds() // 60)
+    return (
+        "Use this link to set a new password for Marketing-in-a-Box.\n\n"
+        f"{reset_url}\n\n"
+        f"The link expires in {minutes} minutes and works once. If you did not ask for this, "
+        "you can ignore the message."
+    )
 
-    Logged at WARNING, not INFO, so it stands out in a busy request log — the operator running
-    this locally has to be able to find the link they just asked for. This is the single seam an
-    SMTP or Resend/SendGrid call replaces; nothing else in the flow (token issuing, expiry,
-    single-use redemption, session revocation) changes when real email arrives.
+
+def _reset_email_html(reset_url: str) -> str:
+    minutes = int(RESET_TOKEN_TTL.total_seconds() // 60)
+    # The URL is interpolated into an attribute and a text node. It is produced by this process
+    # (`app_base_url` + a `token_urlsafe` grant), never from operator input, so it is not escaped
+    # as untrusted HTML — but quotes in a mis-set APP_BASE_URL would still break the href, so they
+    # are stripped.
+    safe = reset_url.replace('"', "").replace("<", "").replace(">", "")
+    return (
+        "<p>Use this link to set a new password for Marketing-in-a-Box.</p>"
+        f'<p><a href="{safe}">Set a new password</a></p>'
+        f"<p>The link expires in {minutes} minutes and works once. If you did not ask for this, "
+        "you can ignore the message.</p>"
+    )
+
+
+def deliver_password_reset(*, email: str, reset_url: str) -> None:
+    """Send the reset link, or log it when no mail transport is configured.
+
+    Mail goes through `app/services/mail.py` (Resend or SMTP). A send failure is logged and
+    swallowed: the forgot-password route always returns the same 200 either way, and turning a
+    provider outage into a 500 on *known* addresses would disclose which emails have accounts.
+
+    The raw URL is logged only when mail is unconfigured, at WARNING so it stands out in a local
+    request log. Once a transport is set, the URL stays out of the logs — it is a live credential.
     """
+    minutes = int(RESET_TOKEN_TTL.total_seconds() // 60)
+    if mail.is_configured():
+        try:
+            mail.send_email(
+                to=email,
+                subject="Reset your Marketing-in-a-Box password",
+                text=_reset_email_text(reset_url),
+                html=_reset_email_html(reset_url),
+            )
+        except mail.MailError:
+            logger.exception(
+                "Password reset email failed for %s; the link was not logged because a mail "
+                "transport is configured.",
+                email,
+            )
+        return
+
     logger.warning(
         "PASSWORD RESET for %s — no mail transport configured, so the link is logged instead.\n"
         "    %s\n"
         "    (valid for %d minutes, single use)",
         email,
         reset_url,
-        int(RESET_TOKEN_TTL.total_seconds() // 60),
+        minutes,
     )
 
 

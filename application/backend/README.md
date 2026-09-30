@@ -69,16 +69,28 @@ wheel to install or pin.
 | Variable | Required | Notes |
 |---|---|---|
 | `APP_BASE_URL` | no | The **frontend** origin a password-reset link points at. Defaults to `http://localhost:5173`. |
+| `MAIL_FROM` | for sending mail | From address, e.g. `Marketing-in-a-Box <noreply@yourdomain>`. Required together with a transport. |
+| `RESEND_API_KEY` | no | Preferred transport (HTTPS). Used when set; SMTP is ignored if this is present. |
+| `SMTP_HOST` | no | Fallback transport when Resend is unset. |
+| `SMTP_PORT` | no | Defaults to `587`. Use `465` for implicit TLS. |
+| `SMTP_USER` / `SMTP_PASSWORD` | no | SMTP auth, if the host requires it. |
+| `SMTP_STARTTLS` | no | Default on. Set `0` only for a local unencrypted relay. |
 
-That is the entire auth configuration. The password floor (6 characters) is served to the form by
-`GET /auth/config`, so the rule the UI enforces is always the rule the API enforces.
+The password floor (6 characters) is served to the form by `GET /auth/config`, so the rule the UI
+enforces is always the rule the API enforces.
 
-### Password reset in development
+Mail is sent from `app/services/mail.py` only. `deliver_password_reset` in `app/services/auth.py`
+calls it; token issuing, expiry, single-use redemption, and session revocation do not change.
 
-There is no mail transport wired up. `POST /auth/forgot-password` issues a real, single-use,
-one-hour token and **logs the reset URL at WARNING level** — copy it out of the server log and open
-it. `deliver_password_reset` in `app/services/auth.py` is the single seam an SMTP/Resend/SendGrid
-call replaces; nothing else in the flow changes when real email arrives.
+### Password reset
+
+`POST /auth/forgot-password` issues a real, single-use, one-hour token. If Resend or SMTP is
+configured, the link is emailed and **not** written to the log (it is a live credential). If neither
+is configured, the URL is logged at WARNING so local development still works — copy it from the
+server log and open it.
+
+A send failure still returns the same 200 as a success ("if an account exists…"), so a down mailer
+cannot be used to enumerate which addresses are registered.
 
 ### Where credentials live
 

@@ -11,12 +11,15 @@ import {
   fetchAssetReadiness,
   fetchCompetitorBriefing,
   fetchRunContext,
+  fetchRunIndustry,
+  inferIndustry,
   getChatSession,
   listHeadlineSlots,
   listSourceRuns,
   runCompetitorAnalysis,
   saveCompetitorAnalysis,
   saveHeadlineSelection,
+  saveRunIndustry,
   saveStageOutput,
   scrapePage,
   seedRunContext,
@@ -25,12 +28,15 @@ import {
   suggestHeadlines,
   updateChatSession,
 } from "./pipelineApi";
-import { ApiFaultError, StreamTruncatedError } from "./pipelineApi";
+import { ApiFaultError, StreamTruncatedError, checkAsset } from "./pipelineApi";
 import type {
   ApiFault,
+  AssetCheckReport,
   AssetReadiness,
+  CheckFinding,
   CompetitorAnalysisResult,
   HeadlineCandidate,
+  IndustryProfileResult,
   PrepassEvent,
   SourceRunSummary,
 } from "./pipelineApi";
@@ -40,19 +46,31 @@ import {
   COMPETITOR_CONSENT_FIELDS_BY_PHASE,
   FIELD_TO_FACT_BY_PHASE,
   GATED_COMPETITOR_IDS_BY_PHASE,
+  INDUSTRY_BUCKET_FACT,
+  INDUSTRY_CONFIRM_FIELD,
+  INDUSTRY_FIELD_IDS,
+  INDUSTRY_LABEL_FACT,
+  INDUSTRY_OTHER_CHOICE,
+  INDUSTRY_TEXT_FIELD,
   NEW_PAGE_OPTIONS,
+  PHASE2_AUDIENCE_INDUSTRY_FACT,
+  PHASE2_AUDIENCE_INDUSTRY_FIELDS,
   PHASE_META,
   PREPASS_BY_MAIN_ASSET_BY_PHASE,
   SCRAPE_SOURCES,
   SUB_SERVICE_FIELD,
   competitorStageFor,
+  industryBucketForLabel,
+  phase2AudienceIndustryKey,
   stageAt,
   stagesFor,
   totalStagesFor,
 } from "./pipelineData";
 import type { PipelinePhase } from "./pipelineData";
-import { SUB_SERVICE_FACT } from "../data/phase2Catalog";
+import { SUB_SERVICE_FACT, phase2StartingContext } from "../data/phase2Catalog";
 import { SERVER_COMPOSED_CONTEXT_KEYS } from "../data/assetCatalog";
+import { INDUSTRY_PROFILES, isIndustryBucket, notRecommendedReason } from "../data/industryProfiles";
+import { specifyPrefix } from "../lib/specifyChoice";
 
 export type NavStatus = "Ready" | "Awaiting Input" | "Generating…" | "Awaiting Review";
 export type ActiveStatus = "running" | "hitl" | null;
@@ -75,7 +93,29 @@ export type PipelineMessageKind =
   /** The documents a stage needs, checked against the run, before it is entered out of order. */
   | "stage-gate"
   /** A stage the operator stopped part-way, and what they can do next. */
-  | "stage-stopped";
+  | "stage-stopped"
+  /** The next stage is one the client's industry rarely needs: skip it (the default) or build it. */
+  | "stage-advisory";
+
+/** A draft's check against the client's business (`POST /pipeline/check/{asset}`). Advisory only. */
+export interface AssetCheckState {
+  status: "running" | "done" | "error";
+  report?: AssetCheckReport;
+  error?: string;
+}
+
+/** A `kind: "stage-advisory"` card. Advice, never removal — see `data/industryProfiles.ts`.
+ *
+ * Its status is also the record of the skip: `skippedAssetIds` reads it off the transcript, the same
+ * way `approvedAssetIds` reads approvals, so a skip is scoped to its phase and track, survives a
+ * reload, and is undone by approving the stage later through "Start here". */
+export interface StageAdvisoryState {
+  assetId: string;
+  label: string;
+  reason: string;
+  industryLabel: string;
+  status: "pending" | "skipped" | "building";
+}
 
 /** A `kind: "stage-gate"` card: the documents `assetId` needs, checked against this run, shown
  * before the stage is entered out of order.
@@ -305,6 +345,16 @@ export interface PipelineMessage {
    * real answer — see `NEW_PAGE_OPTIONS`. Carries the subject so the offer can name the service the
    * page would be for rather than asking in the abstract. */
   pageSource?: { assetId: string; subject?: string };
+  /** Set on the industry confirm question: what the classifier guessed, offered as the one-click
+   * answer. Absent on the typed-answer question and on a re-ask from "change". */
+  industryGuess?: IndustryProfileResult;
+  /** Set on an industry question asked from "change" with no stage intake behind it: answering it
+   * updates the industry and resumes nothing. */
+  industryStandalone?: boolean;
+  /** Populated on `kind: "stage-advisory"`. */
+  advisory?: StageAdvisoryState;
+  /** On a generation card: the check of this draft against the client's business. */
+  check?: AssetCheckState;
   /** Set when a resumed chat's draft was cut off mid-stream by the tab closing. The partial text
    * is kept (it may be most of the asset) but the card warns and offers a regeneration. */
   interrupted?: boolean;
@@ -352,6 +402,8 @@ export function fieldBeingAsked(state: {
   const awaiting = state.intake?.awaitingFieldId;
   if (!awaiting) return undefined;
   if (awaiting === SUB_SERVICE_FIELD.field_id) return SUB_SERVICE_FIELD;
+  if (awaiting === INDUSTRY_CONFIRM_FIELD.field_id) return INDUSTRY_CONFIRM_FIELD;
+  if (awaiting === INDUSTRY_TEXT_FIELD.field_id) return INDUSTRY_TEXT_FIELD;
   return state.intake?.asset.fields.find((f) => f.field_id === awaiting);
 }
 
@@ -537,6 +589,14 @@ interface PipelineState {
   declareNewPage: (messageId: string) => void;
   /** Abandon this stage and open the one that builds a page from nothing instead. */
   skipStageForNewPage: (messageId: string) => void;
+  /** Check this draft against the client's business again (after a failure, or on demand). */
+  recheckAsset: (messageId: string) => void;
+  /** Send the chosen check findings to Refine as one note. */
+  fixCheckFindings: (messageId: string, findings: CheckFinding[]) => Promise<void>;
+  /** Take the advisory's default: pass over a stage the client's industry rarely needs. */
+  skipAdvisedStage: (messageId: string) => void;
+  /** Build the advised-against stage anyway. */
+  buildAdvisedStage: (messageId: string) => void;
   /** Stop the stage in progress and free the run to start a different one.
    *
    * Abandons work in flight only: intake answers, an unsaved draft, an in-flight stream (which is
@@ -705,6 +765,11 @@ function repairInterruptedMessages(messages: PipelineMessage[]): PipelineMessage
       return { ...m, prepass, streaming: false, competitorError: INTERRUPTED_COMPETITOR };
     }
 
+    // A check still running when the tab closed: the request is gone, so offer the retry.
+    if (m.kind === "generation" && m.check?.status === "running") {
+      return { ...m, prepass, check: { status: "error" as const, error: "The check was still running when the chat was closed." } };
+    }
+
     // Suggestions that were still being generated when the tab closed. This one strands the chat
     // hardest of any card here — the gate is what the intake is blocked on, and its loading state
     // has no buttons at all — so it is restored as the retryable failure it is. The error card
@@ -828,6 +893,7 @@ function deriveResumeActivity(
     // A stopped stage is the operator's turn by definition: they stopped it to choose something
     // else. Counted so a reopened chat does not report itself as mid-run.
     if (m.kind === "stage-stopped") return awaitingInput;
+    if (m.kind === "stage-advisory" && m.advisory?.status === "pending") return awaitingInput;
     if (m.kind === "question" && !m.answered && intake?.awaitingFieldId === m.field?.field_id) return awaitingInput;
     if (m.kind === "competitor" && m.savePhase !== "saved") return awaitingReview;
     if (m.kind === "generation" && !m.refineSubmitted && m.savePhase !== "saved") return awaitingReview;
@@ -857,6 +923,7 @@ export function selectNeedsResume(s: PipelineState): boolean {
     if (m.kind === "context-choice") return m.contextChoiceStatus === "pending";
     if (m.kind === "stage-gate") return !!m.gate && m.gate.status !== "entered";
     if (m.kind === "stage-stopped") return true;
+    if (m.kind === "stage-advisory") return m.advisory?.status === "pending";
     if (m.kind === "headline-choice") return m.headlines?.status !== "chosen";
     if (m.kind === "competitor-consent") return m.consent?.status === "pending";
     if (m.kind === "source-run") return m.sourceRunStatus === "pending" || m.sourceRunStatus === "error";
@@ -1391,6 +1458,8 @@ async function streamIntoMessage(
     }, controller.signal);
     patchMessage(get, set, messageId, { streaming: false });
     set({ activeStatus: "hitl", progress: 100, navStatus: "Awaiting Review" });
+    // Only a clean finish: a truncated or failed draft is not worth checking until it is complete.
+    void runAssetCheck(get, set, messageId);
   } catch (err) {
     // A stop the operator asked for is not a failure and not a truncated draft. `stopStage` has
     // already superseded this card and put the run back to Ready, so anything set here would
@@ -1411,6 +1480,40 @@ async function streamIntoMessage(
     stop();
     if (generationRequests.get(messageId) === controller) generationRequests.delete(messageId);
   }
+}
+
+/** Check a finished draft against the client's business: offers, funnel, business rules and — for
+ * content — predicted virality. Runs on its own after every clean stream (generation, retry,
+ * refine). Advisory: the report sits under the card and never gates Approve. A failure is shown as
+ * a retryable note, never as a failed stage. */
+async function runAssetCheck(get: () => PipelineState, set: (partial: Partial<PipelineState>) => void, messageId: string) {
+  const message = get().messages.find((m) => m.id === messageId);
+  if (!message || message.kind !== "generation" || !message.assetId || !message.text?.trim()) return;
+  patchMessage(get, set, messageId, { check: { status: "running" } });
+  try {
+    const report = await checkAsset(message.assetId, message.text, {
+      phase: get().phase,
+      clientProfile: get().clientProfile,
+      ...attribution(get),
+    });
+    patchMessage(get, set, messageId, { check: { status: "done", report } });
+  } catch (err) {
+    patchMessage(get, set, messageId, {
+      check: { status: "error", error: err instanceof Error ? err.message : String(err) },
+    });
+  }
+}
+
+/** The Refine note for the findings the operator chose to fix: each one quoted, with why and how. */
+export function composeFixNote(findings: CheckFinding[]): string {
+  const lines = findings.map((f, i) => {
+    const where = f.quote ? `Where: "${f.quote}". ` : "";
+    return `${i + 1}. ${where}Problem: ${f.why}${f.fix ? ` Fix: ${f.fix}` : ""}`;
+  });
+  return (
+    "Fix these issues found when checking this draft against the client's business, and change nothing else:\n" +
+    lines.join("\n")
+  );
 }
 
 /** Who to bill the next API call to. Read at call time rather than closed over, because a chat's
@@ -1577,6 +1680,24 @@ async function runStage(
   );
 }
 
+/** The fact values the intake walk answers repeated questions from.
+ *
+ * The client profile, plus — in Phase 2 — this run's own audience industry under the fact name the
+ * field map uses. Left out entirely until the Phase 2 ICP has answered it, so the ICP asks it fresh
+ * rather than reusing Phase 1's audience. */
+function knownFactValues(state: Pick<PipelineState, "phase" | "runId" | "clientProfile">): Record<string, string> {
+  if (state.phase !== "phase2") return state.clientProfile;
+  const audience = state.clientProfile[phase2AudienceIndustryKey(state.runId)];
+  return audience ? { ...state.clientProfile, [PHASE2_AUDIENCE_INDUSTRY_FACT]: audience } : state.clientProfile;
+}
+
+/** The market a competitor search is scoped to: in Phase 2, the sub-service's own audience once its
+ * ICP has named one; otherwise the run-level industry. */
+function competitorNiche(state: Pick<PipelineState, "phase" | "runId" | "clientProfile">): string {
+  const audience = state.phase === "phase2" ? state.clientProfile[phase2AudienceIndustryKey(state.runId)] : undefined;
+  return audience || state.clientProfile.industry;
+}
+
 /** Fold any client-identifying answers this stage collected into the run-level profile, so a
  * later stage that only asks for a topic (blog / webinar / podcast) can still tell its
  * competitor prepass which site to benchmark. First non-empty value wins — the profile describes
@@ -1588,6 +1709,23 @@ function captureClientProfile(
 ) {
   const profile = { ...get().clientProfile };
   let changed = false;
+
+  // Phase 2's audience industry is this run's own fact (see `PHASE2_AUDIENCE_INDUSTRY_FACT`). Last
+  // answer wins rather than first: every Phase 2 field that carries it is either the ICP asking it
+  // fresh or a later stage reusing it, so a newer answer is a correction, not a competing source.
+  if (get().phase === "phase2") {
+    const key = phase2AudienceIndustryKey(get().runId);
+    for (const fieldId of PHASE2_AUDIENCE_INDUSTRY_FIELDS) {
+      const raw = answers[fieldId];
+      if (typeof raw !== "string") continue;
+      const value = raw.trim();
+      if (!value || value.startsWith("[[context:") || ["N/A", "NONE", "UNKNOWN"].includes(value.toUpperCase())) continue;
+      if (profile[key] !== value) {
+        profile[key] = value;
+        changed = true;
+      }
+    }
+  }
 
   for (const [fieldId, key] of Object.entries(CLIENT_PROFILE_SOURCES)) {
     if (profile[key]) continue;
@@ -2016,7 +2154,7 @@ function advanceIntake(
   fromIndex: number,
 ) {
   const result = findNextAskable(asset, get().context, answers, fromIndex, {
-    values: get().clientProfile,
+    values: knownFactValues(get()),
     // Phase 2 adds one fact to the Phase 1 set: the sub-service the whole run is for, which answers
     // the "target service" field on four of its seven stages rather than being asked four times.
     fieldToFact: FIELD_TO_FACT_BY_PHASE[get().phase],
@@ -2106,8 +2244,18 @@ function advanceIntake(
     return;
   }
 
-  set({ intake: null });
   captureClientProfile(get, set, answers);
+
+  // The client's industry sets the voice every stage is written in, so it is settled before the
+  // first generation — ICP's included — rather than after it. Asked once per client: every later
+  // stage finds the fact already on the profile and walks straight past this.
+  if (!get().clientProfile[INDUSTRY_BUCKET_FACT]) {
+    set({ intake: { asset, answers, awaitingFieldId: null } });
+    void resolveIndustry(get, set, index, asset, answers);
+    return;
+  }
+
+  set({ intake: null });
   const autoLabels = Array.from(new Set(result.autoContextLabels));
   if (autoLabels.length) {
     push(get, set, {
@@ -2120,6 +2268,258 @@ function advanceIntake(
 
   const finalAnswers = resolveFinalAnswers(asset, get().context, answers);
   void runStage(get, set, index, finalAnswers);
+}
+
+// --------------------------------------------------------------------------------------
+// The client's industry
+//
+// Hybrid by design: infer it from what the intake already holds and ask the operator to confirm,
+// or — when there is no confident guess — ask outright in a text box. Never assumed silently: the
+// industry picks the voice pack every later stage is written with, and a wrong guess nobody saw
+// would write a lender's pages in a shop's voice.
+// --------------------------------------------------------------------------------------
+
+/** What the classifier is shown, under the ICP field ids it reads. The run profile fills gaps for a
+ * stage that is not ICP (a run started out of order), and CRO's `client_industry` — the client's own
+ * industry in the operator's words — is passed through when this intake has it. */
+function industrySignals(profile: Record<string, string>, answers: Record<string, unknown>): Record<string, string> {
+  const pick = (...values: unknown[]) => {
+    for (const v of values) {
+      if (typeof v !== "string") continue;
+      const t = v.trim();
+      if (t && !t.startsWith("[[context:") && !/^(n\/a|none|unknown)$/i.test(t)) return t;
+    }
+    return "";
+  };
+  const signals: Record<string, string> = {
+    company_name: pick(answers.company_name, answers.client_name, profile.client_name),
+    website_url: pick(answers.website_url, answers.client_website_url, profile.website_url),
+    company_type: pick(answers.company_type),
+    business_model: pick(answers.business_model),
+    offer_type: pick(answers.offer_type),
+    service_product_price_terms: pick(answers.service_product_price_terms, profile.target_service),
+    market_region_country: pick(answers.market_region_country, profile.region),
+    client_industry: pick(answers.client_industry, answers.sub_vertical_niche),
+    industry: pick(answers.industry, answers.industry_niche, profile.industry),
+  };
+  return Object.fromEntries(Object.entries(signals).filter(([, v]) => v));
+}
+
+/** File a confirmed industry on the run profile. The server copy is written by the caller. */
+function applyIndustry(
+  get: () => PipelineState,
+  set: (partial: Partial<PipelineState>) => void,
+  profile: Pick<IndustryProfileResult, "bucket" | "label">,
+) {
+  set({
+    clientProfile: {
+      ...get().clientProfile,
+      [INDUSTRY_BUCKET_FACT]: profile.bucket,
+      [INDUSTRY_LABEL_FACT]: profile.label,
+    },
+  });
+  schedulePersist();
+}
+
+/** The line announcing the industry, with its edit chip, and what it changes about the walk ahead. */
+function announceIndustry(
+  get: () => PipelineState,
+  set: (partial: Partial<PipelineState>) => void,
+  profile: Pick<IndustryProfileResult, "bucket" | "label">,
+  lead: string,
+) {
+  const bucket = isIndustryBucket(profile.bucket) ? INDUSTRY_PROFILES[profile.bucket] : undefined;
+  const named = bucket && bucket.label !== profile.label ? `${profile.label} (${bucket.label})` : profile.label;
+  const advised = bucket
+    ? stagesFor(get().phase)
+        .filter((s) => bucket.notRecommended[s.asset.asset_id])
+        .map((s) => s.asset.label)
+    : [];
+  const voice =
+    profile.bucket === "marketing_agency"
+      ? "Stages are written in the pipeline's standard agency voice."
+      : "Every stage from here is written in that industry's voice: its tone, compliance caution and vocabulary.";
+  const skips = advised.length
+    ? ` ${advised.join(", ")} ${advised.length === 1 ? "is" : "are"} rarely needed for this industry. You'll be offered a skip when you reach ${advised.length === 1 ? "it" : "them"}, and nothing is removed.`
+    : "";
+  push(get, set, {
+    role: "assistant",
+    kind: "text",
+    text: `${lead} ${named}. ${voice}${skips}`,
+    editableFields: [{ fieldId: INDUSTRY_CONFIRM_FIELD.field_id, label: "Client's industry" }],
+  });
+}
+
+/** Settle the client's industry, then finish the intake it interrupted.
+ *
+ * In order: a value this run already holds (a Phase 2 leg inherits its parent's; a chat reopened
+ * elsewhere reads its own back), then a guess to confirm, then an outright question. Only the last
+ * two ask anything, and neither blocks for long: a failed lookup or classifier call falls through
+ * to asking. */
+async function resolveIndustry(
+  get: () => PipelineState,
+  set: (partial: Partial<PipelineState>) => void,
+  index: number,
+  asset: AssetDefinition,
+  answers: Record<string, unknown>,
+) {
+  // The operator may stop the stage or leave the chat while a request is out. Anything that lands
+  // after that must not ask a question into an intake that no longer exists.
+  const stillHere = () => {
+    const s = get();
+    return s.intake?.asset.asset_id === asset.asset_id && s.intake.answers === answers && !s.intake.awaitingFieldId;
+  };
+
+  const runId = get().runId;
+  const stored = runId ? await fetchRunIndustry(runId).catch(() => null) : null;
+  if (!stillHere()) return;
+  if (stored) {
+    applyIndustry(get, set, stored);
+    announceIndustry(
+      get,
+      set,
+      stored,
+      get().phase === "phase2" ? "Using the client's industry from the Phase 1 run:" : "Using the client's industry recorded on this run:",
+    );
+    advanceIntake(get, set, index, asset, answers, 0);
+    return;
+  }
+
+  set({ navStatus: "Awaiting Input", activeStatus: "running" });
+  const guess = await inferIndustry(industrySignals(get().clientProfile, answers)).catch(() => null);
+  if (!stillHere()) return;
+
+  const field = guess ? INDUSTRY_CONFIRM_FIELD : INDUSTRY_TEXT_FIELD;
+  set({ intake: { asset, answers, awaitingFieldId: field.field_id } });
+  push(get, set, {
+    role: "assistant",
+    kind: "question",
+    assetId: asset.asset_id,
+    field,
+    ...(guess ? { industryGuess: guess } : {}),
+  });
+}
+
+/** An answer to either industry question. Files it on the run, then resumes whatever it paused. */
+async function submitIndustryAnswer(
+  get: () => PipelineState,
+  set: (partial: Partial<PipelineState>) => void,
+  intake: IntakeFlow,
+  raw: string,
+) {
+  const fieldId = intake.awaitingFieldId as string;
+  const answer = raw.trim();
+  if (!answer) return;
+
+  const question = [...messagesInCurrentTrack(get())]
+    .reverse()
+    .find((m) => m.kind === "question" && !m.answered && !m.superseded && m.field?.field_id === fieldId);
+  const guess = question?.industryGuess;
+  const standalone = !!question?.industryStandalone;
+  const previous = get().clientProfile[INDUSTRY_BUCKET_FACT];
+
+  markQuestionAnswered(get, set, fieldId);
+  push(get, set, { role: "user", kind: "text", text: answer });
+  set({ intake: { ...intake, awaitingFieldId: null }, editSeed: null });
+
+  let profile: Pick<IndustryProfileResult, "bucket" | "label" | "source" | "confidence" | "rationale">;
+  const picked = industryBucketForLabel(answer);
+  if (picked) {
+    const confirmed = guess?.bucket === picked;
+    profile = {
+      bucket: picked,
+      label: confirmed && guess ? guess.label : INDUSTRY_PROFILES[picked].label,
+      source: confirmed ? "inferred_confirmed" : "operator_picked",
+      confidence: confirmed ? guess?.confidence ?? null : null,
+      rationale: confirmed ? guess?.rationale ?? "" : "",
+    };
+  } else {
+    // Typed, either in the text box or behind "Other: specify", whose prefix is the choice's own
+    // words rather than the operator's and would otherwise be read as part of the industry.
+    const prefix = specifyPrefix(INDUSTRY_OTHER_CHOICE);
+    const typed = prefix && answer.startsWith(`${prefix}:`) ? answer.slice(prefix.length + 1).trim() : answer;
+    if (!typed) return;
+    const mapped = await inferIndustry({}, typed).catch(() => null);
+    profile = {
+      bucket: mapped?.bucket ?? "general",
+      label: typed,
+      source: "operator_typed",
+      confidence: mapped?.confidence ?? null,
+      rationale: mapped?.rationale ?? "",
+    };
+  }
+
+  applyIndustry(get, set, profile);
+  try {
+    const runId = await ensureRun(get, set);
+    await saveRunIndustry(runId, profile);
+  } catch (err) {
+    console.error("Could not save the client's industry", err);
+    push(get, set, {
+      role: "assistant",
+      kind: "text",
+      text: `The industry couldn't be saved to the run (${err instanceof Error ? err.message : String(err)}). Stages will use the standard voice until it is saved. Use "change" to try again.`,
+    });
+  }
+
+  announceIndustry(get, set, profile, previous ? "Client's industry changed to" : "Filed the client's industry as");
+
+  if (standalone) {
+    set({ intake: null });
+    set(deriveResumeActivity(get().messages, null, get().currentIndex, get().progress, get().phase, get().activePhase2TrackId));
+    return;
+  }
+  advanceIntake(get, set, get().currentIndex, intake.asset, intake.answers, 0);
+}
+
+/** Enter `index`, unless the client's industry rarely needs it — then say so and offer the skip.
+ *
+ * Only the forward walk goes through here. "Start here", a gate, a re-run and a resume all enter
+ * the stage directly: each of those is the operator having already chosen it. */
+function proceedToStage(get: () => PipelineState, set: (partial: Partial<PipelineState>) => void, index: number) {
+  const stage = stagesFor(get().phase)[index];
+  const bucket = get().clientProfile[INDUSTRY_BUCKET_FACT];
+  const reason = stage ? notRecommendedReason(bucket, stage.asset.asset_id) : undefined;
+  if (!stage || !reason) {
+    beginStage(get, set, index);
+    return;
+  }
+  set({ currentIndex: index, subStep: null, intake: null, activeStatus: "running", navStatus: "Awaiting Input" });
+  push(get, set, {
+    role: "assistant",
+    kind: "stage-advisory",
+    assetId: stage.asset.asset_id,
+    advisory: {
+      assetId: stage.asset.asset_id,
+      label: stage.asset.label,
+      reason,
+      industryLabel: get().clientProfile[INDUSTRY_LABEL_FACT] || (isIndustryBucket(bucket) ? INDUSTRY_PROFILES[bucket].label : ""),
+      status: "pending",
+    },
+  });
+}
+
+/** The end of a leg: every stage is either approved or skipped. */
+function finishPhase(get: () => PipelineState, set: (partial: Partial<PipelineState>) => void) {
+  const phase = get().phase;
+  const total = totalStagesFor(phase);
+  const activeTrackId = get().activePhase2TrackId;
+  set({
+    activeStatus: null,
+    currentIndex: total,
+    navStatus: "Ready",
+    ...(phase === "phase2" && activeTrackId && get().phase2Tracks[activeTrackId]
+      ? { phase2Tracks: { ...get().phase2Tracks, [activeTrackId]: { ...get().phase2Tracks[activeTrackId], status: "complete" } } }
+      : {}),
+  });
+  const skipped = skippedAssetIds(get().messages, phase).size;
+  push(get, set, {
+    role: "assistant",
+    kind: "text",
+    text: skipped
+      ? `${PHASE_META[phase].label} is complete. ${total - skipped} of ${total} assets were generated and saved to the Context Store, and ${skipped} ${skipped === 1 ? "was" : "were"} skipped as rarely needed for this industry. Use "Start here" on a skipped stage to build it anyway.`
+      : `All ${total} ${PHASE_META[phase].label} assets have been generated and saved to the Context Store. ${PHASE_META[phase].label} is complete.`,
+  });
 }
 
 /** A readable name for a context key no asset owns — a document the operator supplied by hand.
@@ -2226,7 +2626,7 @@ async function runCompetitorStep(
   const inputs: CompetitorRunInputs =
     opts.inputs ?? {
       target_url: profile.website_url,
-      niche: profile.industry,
+      niche: competitorNiche(get()),
       location: profile.region,
       // `service` is what the competitor prompt searches on. In Phase 2 that is the sub-service the
       // run is for, and it is the entire difference between this search and the Phase 1 one: without
@@ -2318,7 +2718,7 @@ function offerCompetitorResearch(
       topicCount,
       targetUrl,
       location: profile.region,
-      niche: profile.industry,
+      niche: competitorNiche(get()),
       fieldId: field.field_id,
       subject: config.subject,
       status: "pending",
@@ -2349,10 +2749,11 @@ function askSubService(get: () => PipelineState, set: (partial: Partial<Pipeline
 
 /** Offer the Phase 1 runs this sub-service run could be built on.
  *
- * Phase 2 reads the ICP, CRO rewrite and value ladder its parent run approved, so the parent has to
- * be chosen before anything else — including before the run row exists, since the link is set at
- * creation. Listing failures are not fatal: the card offers "start without a Phase 1 run", which
- * simply means every inherited document gets asked for instead. */
+ * Phase 2 reuses the client-level documents its parent run settled (brand design, CRO client
+ * settings, industry), so the parent has to be chosen before anything else — including before the
+ * run row exists, since the link is set at creation. It does not reuse the parent's ICP or value
+ * ladder: Phase 2 builds its own ICP. Listing failures are not fatal: the card offers "start without
+ * a Phase 1 run", which simply means the client-level answers get asked for instead. */
 async function offerSourceRun(get: () => PipelineState, set: (partial: Partial<PipelineState>) => void) {
   const message = push(get, set, {
     role: "assistant",
@@ -2394,7 +2795,7 @@ async function beginPhase2(get: () => PipelineState, set: (partial: Partial<Pipe
   push(get, set, {
     role: "assistant",
     kind: "text",
-    text: "Building on this chat's Phase 1 run. Its approved assets — ICP, CRO copy, value ladder and the rest — are read as this run needs them, and each one is offered for you to accept or replace rather than being used silently.",
+    text: "Building on this chat's Phase 1 run. Its client-level settings — brand design, the CRO client settings and the client's industry — are reused, so they are not asked again. The audience is not: this phase builds its own ICP for the sub-service at Stage 01, and Phase 1's ICP and value ladder are not used.",
   });
 
   try {
@@ -2607,6 +3008,7 @@ function resurfacePendingCard(
     if (m.kind === "context-choice") return m.contextChoiceStatus === "pending";
     if (m.kind === "stage-gate") return !!m.gate && m.gate.status !== "entered";
     if (m.kind === "stage-stopped") return true;
+    if (m.kind === "stage-advisory") return m.advisory?.status === "pending";
     if (m.kind === "competitor-consent") return m.consent?.status === "pending";
     return false;
   };
@@ -2660,11 +3062,30 @@ export function approvedAssetIds(messages: PipelineMessage[], phase: PipelinePha
  */
 function nextUnexecutedIndex(state: PipelineState): number {
   const approved = approvedAssetIds(state.messages, state.phase);
+  // A stage the operator chose to skip on an industry advisory is passed over too — otherwise
+  // approving the stage after it would walk straight back to the one they just declined.
+  const skipped = skippedAssetIds(state.messages, state.phase);
   const stages = stagesFor(state.phase);
   for (let i = 0; i < stages.length; i++) {
-    if (!approved.has(stages[i].asset.asset_id)) return i;
+    const id = stages[i].asset.asset_id;
+    if (!approved.has(id) && !skipped.has(id)) return i;
   }
   return stages.length;
+}
+
+/** Stages this leg skipped on an industry advisory and has not since built.
+ *
+ * Read off the transcript like `approvedAssetIds`, and for the same reasons: it is scoped to the
+ * phase and track by construction, it survives a reload with the messages, and it needs no state of
+ * its own to clear. A skip is not a removal — "Start here" still opens the stage, and approving it
+ * takes it out of this set. */
+export function skippedAssetIds(messages: PipelineMessage[], phase: PipelinePhase, trackId?: string | null): Set<string> {
+  const approved = approvedAssetIds(messages, phase, trackId);
+  return new Set(
+    messagesInPhase(messages, phase, trackId)
+      .filter((m) => m.kind === "stage-advisory" && m.advisory?.status === "skipped" && !approved.has(m.advisory.assetId))
+      .map((m) => m.advisory!.assetId),
+  );
 }
 
 /** Enter `index` as the stage now being worked on, asking its first question.
@@ -2746,8 +3167,8 @@ export const usePipelineStore = create<PipelineState>((set, get) => ({
       role: "assistant",
       kind: "text",
       text: runId
-        ? `Building on “${chosen?.chat_title || chosen?.company_name || "the selected run"}”. Its approved assets — ICP, CRO copy, value ladder and the rest — are read as this run needs them, and each one is offered for you to accept or replace rather than being used silently.`
-        : "Starting without a Phase 1 run. Nothing is inherited, so every document a stage needs will be asked for.",
+        ? `Building on “${chosen?.chat_title || chosen?.company_name || "the selected run"}”. Its client-level settings — brand design, the CRO client settings and the client's industry — are reused, so they are not asked again. The audience is not: this phase builds its own ICP for the sub-service at Stage 01, and Phase 1's ICP and value ladder are not used.`
+        : "Starting without a Phase 1 run. Nothing is inherited, so the client settings and brand design will be asked for or captured again. The ICP is built at Stage 01 either way.",
     });
 
     // Created up front rather than lazily on first save: the link is set at creation, and stage 01's
@@ -2943,6 +3364,13 @@ export const usePipelineStore = create<PipelineState>((set, get) => ({
       return;
     }
 
+    // The client's industry is a run-level fact too, filed to the profile and the run rather than to
+    // this stage's answers — and then the intake it paused carries on.
+    if (INDUSTRY_FIELD_IDS.has(intake.awaitingFieldId)) {
+      void submitIndustryAnswer(get, set, intake, String(value));
+      return;
+    }
+
     const field = intake.asset.fields.find((f) => f.field_id === intake.awaitingFieldId);
     if (!field) return;
 
@@ -3105,6 +3533,8 @@ export const usePipelineStore = create<PipelineState>((set, get) => ({
       streaming: true,
       text: "",
       prepass: undefined,
+      // The old report is about text that is being thrown away.
+      check: undefined,
     });
     await streamIntoMessage(get, set, messageId, (onChunk, signal) =>
       streamGenerateStage(assetId, answers, onChunk, {
@@ -3265,22 +3695,9 @@ export const usePipelineStore = create<PipelineState>((set, get) => ({
       }
 
       if (!done) {
-        beginStage(get, set, target);
+        proceedToStage(get, set, target);
       } else {
-        const activeTrackId = get().activePhase2TrackId;
-        set({
-          activeStatus: null,
-          currentIndex: total,
-          navStatus: "Ready",
-          ...(phase === "phase2" && activeTrackId && get().phase2Tracks[activeTrackId]
-            ? { phase2Tracks: { ...get().phase2Tracks, [activeTrackId]: { ...get().phase2Tracks[activeTrackId], status: "complete" } } }
-            : {}),
-        });
-        push(get, set, {
-          role: "assistant",
-          kind: "text",
-          text: `All ${total} ${PHASE_META[phase].label} assets have been generated and saved to the Context Store. ${PHASE_META[phase].label} is complete.`,
-        });
+        finishPhase(get, set);
       }
     } catch (err) {
       const msg = recordFailure(set, err);
@@ -3333,6 +3750,45 @@ export const usePipelineStore = create<PipelineState>((set, get) => ({
 
   editField: (fieldId) => {
     const state = get();
+
+    // The client's industry is a run-level fact with no stage behind it, so it can be changed
+    // between stages as well as mid-intake — anywhere nothing is in flight. Re-asked on the confirm
+    // card without a guess: the operator is correcting one, and offering it again is the one answer
+    // they have just said is wrong.
+    if (INDUSTRY_FIELD_IDS.has(fieldId)) {
+      if (state.isLoadingSession || state.messages.some((m) => m.streaming)) return;
+      const live = state.intake;
+      const standalone = !live;
+      const stage = stageAt(state.phase, Math.min(state.currentIndex, totalStagesFor(state.phase) - 1));
+      const intake: IntakeFlow = live ?? { asset: stage.asset, answers: {}, awaitingFieldId: null };
+      set({
+        messages: get().messages.map((m) =>
+          (m.kind === "question" && !m.answered && m.field?.field_id === live?.awaitingFieldId) ||
+          (m.kind === "question" && m.field && INDUSTRY_FIELD_IDS.has(m.field.field_id))
+            ? { ...m, superseded: true }
+            : m,
+        ),
+        intake: { ...intake, awaitingFieldId: INDUSTRY_CONFIRM_FIELD.field_id },
+        activeStatus: "running",
+        navStatus: "Awaiting Input",
+        editSeed: null,
+      });
+      push(get, set, {
+        role: "assistant",
+        kind: "text",
+        text: "Changing the client's industry. It applies to every stage generated from here; stages already saved keep the voice they were written in.",
+      });
+      push(get, set, {
+        role: "assistant",
+        kind: "question",
+        assetId: intake.asset.asset_id,
+        field: INDUSTRY_CONFIRM_FIELD,
+        editing: true,
+        ...(standalone ? { industryStandalone: true } : {}),
+      });
+      return;
+    }
+
     if (!selectCanEditAnswers(state)) return;
 
     // Mid-intake the live answers are in `intake`. After generation they are on the draft card —
@@ -3682,7 +4138,7 @@ chooseHeadlines: async (messageId, ids) => {
     // would drop the topic on a Pillar Page re-run and quietly search for something else.
     const inputs = message.competitorInputs ?? {
       target_url: profile.website_url,
-      niche: profile.industry,
+      niche: competitorNiche(get()),
       location: profile.region,
     };
 
@@ -3779,7 +4235,9 @@ chooseHeadlines: async (messageId, ids) => {
       rerunReturnIntake: resuming?.rerunReturnIntake ?? null,
       subStep: resuming?.subStep ?? null,
       intake: hydrateIntake(resuming?.intake ?? null),
-      context: resuming?.context ?? (phase === "phase2" ? { ...state.context } : {}),
+      // Phase 2 starts from Phase 1's context minus the audience documents: it builds its own ICP
+      // for the sub-service, and the parent's must not fill that stage's place.
+      context: resuming?.context ?? (phase === "phase2" ? phase2StartingContext(state.context) : {}),
       progress: resuming?.progress ?? 0,
       activeStatus: null,
       navStatus: "Ready",
@@ -3893,7 +4351,7 @@ chooseHeadlines: async (messageId, ids) => {
         : {}),
       runId: null,
       sourceRunId: parent?.runId ?? null,
-      context: parent ? { ...parent.context } : {},
+      context: parent ? phase2StartingContext(parent.context) : {},
       clientProfile: otherHasWork ? profile : {},
       currentIndex: 0,
       rerunReturnIndex: null,
@@ -4174,6 +4632,50 @@ chooseHeadlines: async (messageId, ids) => {
     });
 
     get().startAtStage(option.insteadAssetId);
+  },
+
+  recheckAsset: (messageId) => {
+    if (!liveMessage(get(), messageId)) return;
+    void runAssetCheck(get, set, messageId);
+  },
+
+  fixCheckFindings: async (messageId, findings) => {
+    if (!findings.length) return;
+    await get().submitRefine(messageId, composeFixNote(findings));
+  },
+
+  skipAdvisedStage: (messageId) => {
+    const message = liveMessage(get(), messageId);
+    const advisory = message?.advisory;
+    if (!advisory || advisory.status !== "pending" || message.superseded) return;
+
+    patchMessage(get, set, messageId, { advisory: { ...advisory, status: "skipped" } });
+    push(get, set, { role: "user", kind: "text", text: `Skip ${advisory.label}.` });
+
+    // The skip is recorded on the card, so this already passes over it — and over any earlier skip.
+    const target = nextUnexecutedIndex(get());
+    if (target >= totalStagesFor(get().phase)) {
+      finishPhase(get, set);
+      return;
+    }
+    push(get, set, {
+      role: "assistant",
+      kind: "text",
+      text: `Skipped ${advisory.label}. It stays in the pipeline; use "Start here" on it any time to build it.`,
+    });
+    proceedToStage(get, set, target);
+  },
+
+  buildAdvisedStage: (messageId) => {
+    const message = liveMessage(get(), messageId);
+    const advisory = message?.advisory;
+    if (!advisory || advisory.status !== "pending" || message.superseded) return;
+    const index = stagesFor(get().phase).findIndex((s) => s.asset.asset_id === advisory.assetId);
+    if (index < 0) return;
+
+    patchMessage(get, set, messageId, { advisory: { ...advisory, status: "building" } });
+    push(get, set, { role: "user", kind: "text", text: `Build ${advisory.label} anyway.` });
+    beginStage(get, set, index);
   },
 
   stopStage: () => {

@@ -1,3 +1,5 @@
+import { assetGlance } from "../lib/assetGlance";
+import { MiniGlance } from "./visual/GlanceView";
 import { useMemo } from "react";
 import { countWords, parseAssetDocument } from "../lib/assetDocument";
 import { summariseAsset } from "../lib/assetSummary";
@@ -41,6 +43,8 @@ export function DeliverablesGrid() {
           stageNumber: stage?.stageNumber,
           words: doc.words || countWords(text),
           summary: summariseAsset(message.assetId, doc, text),
+          // The same picture the reader opens on, card-sized: a score, the ladder's rungs, a funnel.
+          glance: assetGlance(message.assetId, doc),
           sections: doc.sections.length,
           structured: doc.structured,
         };
@@ -102,6 +106,7 @@ export function DeliverablesGrid() {
                 {item.structured ? `${item.sections} parts · ` : ""}
                 {item.words.toLocaleString()} words
               </span>
+              {item.glance && <MiniGlance glance={item.glance} />}
               {item.summary.flags.length > 0 && (
                 <span className="mt-1.5 flex flex-wrap gap-1">
                   <SummaryFlags flags={item.summary.flags} />

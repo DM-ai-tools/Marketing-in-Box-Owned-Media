@@ -195,7 +195,9 @@ const PHASE1_SLOT = {
   // The parent link is not a property of the cleared leg — it is which Phase 1 run this chat's
   // Phase 2 builds on, and that run is still there.
   ok("phase2 clear: still built on the same Phase 1 run", after.sourceRunId === "run-p1", String(after.sourceRunId));
-  ok("phase2 clear: context restarts from Phase 1's", after.context.icp !== undefined && after.context.cro !== undefined, JSON.stringify(Object.keys(after.context)));
+  ok("phase2 clear: context restarts from Phase 1's", after.context.cro !== undefined, JSON.stringify(Object.keys(after.context)));
+  // ...minus the audience. Phase 2 builds its own ICP, so Phase 1's must not come back with the clear.
+  ok("phase2 clear: Phase 1's ICP is not carried over", after.context.icp === undefined, JSON.stringify(Object.keys(after.context)));
   ok("phase2 clear: the client is kept", after.clientProfile.client_name === "Acme", JSON.stringify(after.clientProfile));
   ok("phase2 clear: the sub-service goes with the leg", after.clientProfile.sub_service === undefined, JSON.stringify(after.clientProfile));
   ok("phase2 clear: the intake is dropped", after.intake === null);

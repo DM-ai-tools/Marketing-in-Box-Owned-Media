@@ -51,7 +51,9 @@ function entry(text: string, assetId = "cro") {
 {
   const order = stagesFor("phase2").map((s) => s.asset.asset_id);
   ok("phase2 runs cro", order.includes("cro"), order.join(","));
-  ok("cro is stage 01", order[0] === "cro", order.join(","));
+  // Stage 01 is the sub-service's own ICP; CRO follows it and still precedes everything it writes for.
+  ok("icp is stage 01", order[0] === "icp", order.join(","));
+  ok("cro is stage 02", order[1] === "cro", order.join(","));
   // It writes the copy the next stage designs, so anywhere else in the order is the same bug.
   ok("cro runs before pillar_page", order.indexOf("cro") < order.indexOf("pillar_page"));
 }
@@ -189,26 +191,25 @@ function entry(text: string, assetId = "cro") {
   ok("walk: the client name is not asked", !asked.includes("client_name"));
   ok("walk: no existing page is asked for", !asked.includes("existing_page_url") && !asked.includes("existing_page_content"));
 
-  // The inherited ICP and the run's own competitor listing are `overridable: true` on the Phase 1
+  // The ICP (stage 01 of this run) and the run's own competitor listing are `overridable: true` on the Phase 1
   // asset — a deliberate "use ours or supply your own" stop, since an operator plausibly has better
   // research than the pipeline's. That is a choice, not a question, and Phase 2 keeps it.
   ok("walk: the ICP is offered, not asked", confirmed.includes("icp_document") && !asked.includes("icp_document"), confirmed.join(","));
 
-  // Which ICP, though. Phase 2 runs no ICP stage, so `icp_*` resolves to the parent Phase 1 run's
-  // document or to nothing at all — that document is the phase's only ICP by construction, and the
-  // card is where an operator decides whether to accept it. So what the card says about where it
-  // came from is their whole basis for that decision, and Phase 1's wording — "the ICP generated in
-  // this run" — is the one claim on it that is false here.
+  // Which ICP, though. Phase 2 builds its own at stage 01, for the sub-service, so the document on
+  // this card is the one this run generated — and Phase 1's wording, "the ICP generated in this
+  // run", is true here again. It must not be reworded back to claiming the parent's.
   const icp = CRO.fields.find((f) => f.field_id === "icp_document");
-  ok("icp: nothing in Phase 2 writes an ICP of its own", !Object.values(PHASE2_ASSETS).some((a) => a.writesContextKeys.some((k) => k.startsWith("icp"))));
+  ok("icp: Phase 2 writes an ICP of its own", Object.values(PHASE2_ASSETS).some((a) => a.writesContextKeys.includes("icp")));
   const icpPlan = planField(icp!, context, {}, knownFacts);
   ok(
-    "icp: the parent run's document is what fills it",
+    "icp: this run's own document is what fills it",
     icpPlan.action === "confirm-context" && icpPlan.text.includes("the audience"),
     icpPlan.action,
   );
-  ok("icp: the card says the document came from Phase 1", /parent Phase 1 run/.test(icp?.helpText ?? ""), icp?.helpText);
-  ok("icp: the card no longer claims this run generated it", !/in this run/.test(icp?.helpText ?? ""), icp?.helpText);
+  ok("icp: the card says this run generated it", /in this run/.test(icp?.helpText ?? ""), icp?.helpText);
+  ok("icp: the card no longer points at the parent run", !/parent Phase 1 run/.test(icp?.helpText ?? ""), icp?.helpText);
+  ok("icp: Phase 2's ICP asks for the sub-service", PHASE2_ASSETS.icp.fields.some((f) => f.field_id === "service_product_price_terms" && f.label === "Sub-Service + Price/Terms"));
   ok(
     "walk: the competitor listing is offered, not asked",
     confirmed.includes("competitor_analysis") && !asked.includes("competitor_analysis"),

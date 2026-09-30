@@ -623,6 +623,12 @@ async def _read_direct(url: str) -> ScrapedPage:
     return page
 
 
+async def read_direct(raw_url: str) -> ScrapedPage:
+    """The free direct reader alone, with no paid fallback — for callers that want a hint from a
+    page (its title, its meta description) and would rather go without than spend a credit on it."""
+    return await _read_direct(normalize_url(raw_url))
+
+
 # The fallback readers, in the order they are tried, each paired with the line the UI shows so a
 # fallback read is never invisible. Both are only reached when the free direct read has failed.
 _FALLBACK_READERS: tuple[tuple[str, str], ...] = (

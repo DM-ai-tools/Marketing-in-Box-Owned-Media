@@ -31,6 +31,8 @@ import { SourceRunCard } from "./SourceRunCard";
 import { StageGateCard } from "./StageGateCard";
 import { EditAnswerButton } from "./EditAnswerButton";
 import { ScrapeCard } from "./ScrapeCard";
+import { IndustryGuessOptions, StageAdvisoryCard } from "./IndustryCards";
+import { AssetCheckPanel } from "./AssetCheckPanel";
 import { NEW_PAGE_OPTIONS, PHASE_META, stageAt, stagesFor, totalStagesFor } from "./pipelineData";
 import { PipelineInputBar } from "./PipelineInputBar";
 import {
@@ -695,6 +697,8 @@ function GenerationCard({ message }: { message: PipelineMessage }) {
         </div>
       )}
       <GenerationBody message={message} label={stage?.asset.label ?? "Generated page"} />
+      {/* Above Approve, never instead of it: the check advises, the operator decides. */}
+      {!message.streaming && !message.superseded && message.check && <AssetCheckPanel message={message} />}
       {!message.streaming && !message.superseded && (
         <ActionRow
           message={message}
@@ -751,6 +755,8 @@ function QuestionCard({ message }: { message: PipelineMessage }) {
       <FieldHint field={field} compact parts={isActive ? "all" : "hint"} />
       {isActive ? (
         <>
+          {/* Above the pills: the guess is the one-click answer, the pills are the correction. */}
+          {message.industryGuess && <IndustryGuessOptions message={message} />}
           {showWidget ? (
             <QuestionWidget field={field} onChoose={(v) => submitAnswer(v)} onSkip={skipField} />
           ) : (
@@ -1094,6 +1100,9 @@ function MessageRow({ message }: { message: PipelineMessage }) {
       break;
     case "stage-stopped":
       content = <StageStoppedCard message={message} />;
+      break;
+    case "stage-advisory":
+      content = <StageAdvisoryCard message={message} />;
       break;
     default:
       content = <TextBubble message={message} />;

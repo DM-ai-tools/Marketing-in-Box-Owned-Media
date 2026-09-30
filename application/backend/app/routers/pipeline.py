@@ -87,11 +87,14 @@ from app.services.competitor import (
     to_prompt_text,
 )
 from app.services import (
+    asset_check as asset_check_service,
+    business_facts as business_facts_service,
     cro_settings,
     design_md as design_md_service,
     design_tokens as design_tokens_service,
     headlines as headlines_service,
     image_briefs as image_briefs_service,
+    industry_voice,
     insights,
     keywords as keywords_service,
     media_storage,
@@ -715,10 +718,19 @@ _MAX_SOURCE_RUN_HOPS = 4
 # Context keys that stop at the run that wrote them, instead of being inherited down the
 # `source_run_id` chain like everything else.
 #
-# Inheritance is the right default and is what Phase 2 is built on: a sub-service run reads its
-# parent's ICP, CRO rewrite and pillar page precisely so those are not re-derived per sub-service.
-# These two keys are the exception, and the distinction is about *scope*, not about freshness:
+# Inheritance is the default because what a sub-service run inherits describes the *client* — its
+# brand design, its CRO client settings, its industry — and none of that changes per sub-service.
+# These keys are the exception, and the distinction is about *scope*, not about freshness: each one
+# describes the *service* a run is for, and a sub-service is a different service.
 #
+#   `icp`, `offers`,      — the buyer, and the value ladder priced for that buyer. Phase 1 profiles
+#   `offer_ladder`          the buyer of the headline service; Phase 2 runs its own ICP stage for the
+#                           sub-service, because the person who buys "Meta Ads" is often not the one
+#                           who buys "Social Media Marketing". Inherited, the parent's ICP silently
+#                           answered six Phase 2 stages whenever the run's own had not been built —
+#                           a stage started out of order read the wrong buyer with no sign of it.
+#                           `offers` is here as well as `offer_ladder` because an approved stage is
+#                           stored under its asset id, and readiness looks a document up under both.
 #   `keyword_clusters`    — search demand for the service the run is for. Phase 1's is demand for
 #                           "Social Media Marketing"; Phase 2's is demand for "Meta Ads". They are
 #                           different keyword universes with different volumes and different
@@ -731,7 +743,9 @@ _MAX_SOURCE_RUN_HOPS = 4
 #
 # So a Phase-2 run that has not built its own gets a 404 and builds one, rather than quietly
 # working from the parent's. Everything else still inherits.
-PHASE_SCOPED_CONTEXT_KEYS: frozenset[str] = frozenset({"keyword_clusters", "selected_headlines"})
+PHASE_SCOPED_CONTEXT_KEYS: frozenset[str] = frozenset(
+    {"keyword_clusters", "selected_headlines", "icp", "offers", "offer_ladder"}
+)
 
 
 async def _latest_context_entry(
@@ -930,6 +944,152 @@ async def seed_run_context(run_id: str, payload: SeedContextRequest) -> SeedCont
         chars=len(payload.content),
         producer=producer_of(payload.context_key),
     )
+
+
+# --------------------------------------------------------------------------------------
+# The client's industry — inferred from ICP intake, confirmed by the operator
+#
+# `industry_voice.py` owns the taxonomy, the classifier and the voice packs; these routes only move
+# a profile between the UI and the run. Inference stores nothing: a guess is not an answer until the
+# operator confirms it, and it is the confirmation that is written.
+# --------------------------------------------------------------------------------------
+
+
+class IndustryProfileOut(BaseModel):
+    bucket: str
+    bucket_label: str
+    label: str
+    source: str
+    confidence: float | None = None
+    rationale: str = ""
+
+
+def _industry_out(profile: industry_voice.IndustryProfile) -> IndustryProfileOut:
+    return IndustryProfileOut(
+        bucket=profile.bucket,
+        bucket_label=profile.bucket_label,
+        label=profile.label,
+        source=profile.source,
+        confidence=profile.confidence,
+        rationale=profile.rationale,
+    )
+
+
+class InferIndustryRequest(BaseModel):
+    #: The ICP intake answers (or whatever intake is at hand) — the classifier reads a fixed subset.
+    answers: dict[str, str] = Field(default_factory=dict)
+    #: Set when the operator typed the industry themselves: the classifier then only maps it.
+    typed: str | None = None
+
+
+class InferIndustryResponse(BaseModel):
+    #: Null means "no confident guess" — the UI asks the operator outright.
+    profile: IndustryProfileOut | None = None
+
+
+@router.post("/industry/infer", response_model=InferIndustryResponse)
+async def infer_industry_route(payload: InferIndustryRequest) -> InferIndustryResponse:
+    """Guess the client's own industry bucket, or map a typed one. One small Haiku call plus a free
+    direct read of the home page's title; stores nothing."""
+    profile = await industry_voice.infer_industry(payload.answers, typed=payload.typed)
+    return InferIndustryResponse(profile=_industry_out(profile) if profile is not None else None)
+
+
+class SaveIndustryRequest(BaseModel):
+    bucket: NonBlankStr
+    label: NonBlankStr
+    source: Literal["inferred_confirmed", "operator_picked", "operator_typed"]
+    confidence: float | None = None
+    rationale: str = ""
+
+
+class IndustryResponse(BaseModel):
+    run_id: str
+    profile: IndustryProfileOut
+    version: int | None = None
+    inherited_from_run_id: str | None = None
+
+
+@router.post("/runs/{run_id}/industry", response_model=IndustryResponse)
+async def save_run_industry(run_id: str, payload: SaveIndustryRequest) -> IndustryResponse:
+    """File the operator's confirmed industry on the run. Append-only like every context entry, so a
+    correction is a new version and the latest wins; a Phase 2 child inherits it down `source_run_id`."""
+    try:
+        run_uuid = uuid.UUID(run_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid run_id: {run_id!r}") from exc
+    if not industry_voice.is_valid_bucket(payload.bucket):
+        raise HTTPException(
+            status_code=422,
+            detail=f"{payload.bucket!r} is not an industry bucket. Valid buckets: {', '.join(industry_voice.BUCKETS)}",
+        )
+
+    profile = industry_voice.IndustryProfile(
+        bucket=payload.bucket,
+        label=" ".join(payload.label.split()),
+        source=payload.source,
+        confidence=payload.confidence,
+        rationale=payload.rationale,
+    )
+    session_factory = get_sessionmaker()
+    async with session_factory() as session:
+        run = await session.get(Run, run_uuid)
+        if run is None:
+            raise HTTPException(status_code=404, detail=f"Run not found: {run_id}")
+        version = await _next_version(session, run_uuid, industry_voice.CONTEXT_KEY)
+        session.add(
+            ContextEntry(
+                run_id=run_uuid,
+                context_key=industry_voice.CONTEXT_KEY,
+                version=version,
+                value=industry_voice.render(profile),
+                written_by_asset_id=None,
+            )
+        )
+        await session.commit()
+
+    logger.info("Saved industry run_id=%s bucket=%s source=%s version=%d", run_id, profile.bucket, profile.source, version)
+    return IndustryResponse(run_id=run_id, profile=_industry_out(profile), version=version)
+
+
+@router.get("/runs/{run_id}/industry", response_model=IndustryResponse)
+async def get_run_industry(run_id: str) -> IndustryResponse:
+    """The run's confirmed industry, inherited from its source run when it has none of its own.
+    404 when neither has one — the UI's cue to ask. Free, safe to poll."""
+    try:
+        run_uuid = uuid.UUID(run_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid run_id: {run_id!r}") from exc
+
+    session_factory = get_sessionmaker()
+    async with session_factory() as session:
+        found = await _latest_context_entry(session, run_uuid, industry_voice.CONTEXT_KEY)
+    profile = industry_voice.from_entry(found[0].value) if found is not None else None
+    if found is None or profile is None:
+        raise HTTPException(status_code=404, detail=f"No industry recorded for run {run_id}")
+    entry, found_on = found
+    return IndustryResponse(
+        run_id=run_id,
+        profile=_industry_out(profile),
+        version=entry.version,
+        inherited_from_run_id=str(found_on) if found_on != run_uuid else None,
+    )
+
+
+async def _run_industry(run_id: str | None) -> industry_voice.IndustryProfile | None:
+    """The profile a stage is written with, or None (the default voice). Never raises: a lookup
+    failure costs the voice pack, not the stage."""
+    if not run_id:
+        return None
+    try:
+        run_uuid = uuid.UUID(run_id)
+        session_factory = get_sessionmaker()
+        async with session_factory() as session:
+            found = await _latest_context_entry(session, run_uuid, industry_voice.CONTEXT_KEY)
+    except Exception as exc:  # noqa: BLE001 — degrade to the default voice
+        logger.warning("Industry lookup failed for run_id=%s: %s", run_id, exc)
+        return None
+    return industry_voice.from_entry(found[0].value) if found is not None else None
 
 
 class DependencyStatus(BaseModel):
@@ -2460,6 +2620,103 @@ class SlideDecksResponse(BaseModel):
     bundle_filename: str
 
 
+# --------------------------------------------------------------------------------------
+# Checking a draft against the client's business — see `app/services/asset_check.py`
+#
+# Advisory: nothing here blocks approval, and nothing is stored. The report lives on the draft card,
+# like a slide deck is built from the text in the request rather than read off the run.
+# --------------------------------------------------------------------------------------
+
+
+class AssetCheckRequest(BaseModel):
+    text: NonBlankStr
+    run_id: str | None = None
+    phase: str = DEFAULT_PHASE
+    client_profile: dict[str, str] = Field(default_factory=dict)
+    chat_session_id: str | None = None
+
+
+class CheckFindingOut(BaseModel):
+    check: str
+    severity: str
+    quote: str
+    why: str
+    fix: str = ""
+    source: str = "rule"
+
+
+class CheckResultOut(BaseModel):
+    check: str
+    score: int | None = None
+    verdict: str = ""
+    findings: list[CheckFindingOut] = []
+
+
+class AssetCheckResponse(BaseModel):
+    asset_id: str
+    checks: list[CheckResultOut]
+    facts_used: list[str]
+    facts_missing: list[str]
+    judge: str
+    dropped_quotes: int = 0
+    virality_basis: str = ""
+    duration_ms: int = 0
+
+
+async def _business_facts(run_id: str | None, client_profile: dict[str, str], asset_id: str):
+    """The run's facts, read through the same inheritance every other document uses. A run that
+    cannot be read yields empty facts — reported as missing, never as a failed check."""
+    run_uuid: uuid.UUID | None = None
+    if run_id:
+        try:
+            run_uuid = uuid.UUID(run_id)
+        except ValueError:
+            run_uuid = None
+    if run_uuid is None:
+        async def nothing(_key: str) -> None:
+            return None
+
+        return await business_facts_service.load_business_facts(nothing, client_profile, asset_id=asset_id)
+
+    session_factory = get_sessionmaker()
+    async with session_factory() as session:
+
+        async def lookup(key: str) -> object | None:
+            found = await _latest_context_entry(session, run_uuid, key)
+            return found[0].value if found is not None else None
+
+        return await business_facts_service.load_business_facts(lookup, client_profile, asset_id=asset_id)
+
+
+@router.post("/check/{asset_id}", response_model=AssetCheckResponse)
+async def check_asset_route(asset_id: str, payload: AssetCheckRequest) -> AssetCheckResponse:
+    """Check a draft against the client's offers, funnel, business rules and — for content —
+    predicted virality. Deterministic rules plus one low-effort model call; works on an unsaved
+    draft. A model failure returns the rule findings alone (`judge: "unavailable"`)."""
+    if not has_stage(asset_id, payload.phase):
+        raise HTTPException(status_code=404, detail=f"Unknown asset_id {asset_id!r} for phase {payload.phase!r}")
+
+    try:
+        facts = await _business_facts(payload.run_id, payload.client_profile, asset_id)
+    except Exception as exc:  # noqa: BLE001 — facts that cannot be read are missing facts
+        logger.warning("Asset check could not read facts for run %s: %s", payload.run_id, exc)
+        facts = business_facts_service.BusinessFacts(missing=["everything on the run (it could not be read)"])
+
+    report = await asset_check_service.check_asset(
+        asset_id,
+        payload.text,
+        facts,
+        on_usage=usage_service.recorder(
+            kind="check",
+            chat_session_id=payload.chat_session_id,
+            run_id=payload.run_id,
+            asset_id=asset_id,
+            phase=payload.phase,
+        ),
+    )
+    return AssetCheckResponse.model_validate(report.as_dict())
+
+
 class SlideDeckRequest(BaseModel):
     #: The generated webinar document. Sent by the client rather than read from the run, so the
     #: button works on an unsaved draft exactly as `Download` does — an operator who wants the deck
@@ -3496,7 +3753,7 @@ _SOCIAL_LIVE_RESEARCH_PATTERN = re.compile(r"research\s+live", re.IGNORECASE)
 
 async def _fetch_competitor_social_blocks(
     competitor_list_raw: str, requested_count: str
-) -> tuple[str, tuple[str, ...], bool]:
+) -> tuple[str, tuple[str, ...], bool, list[dict]]:
     """Resolve up to `_MAX_AUTO_COMPETITORS` competitors from `competitor_list` to real social
     handles (Firecrawl first, Context.dev as fallback — see `social_audit.resolve_competitor_handles`)
     and fetch their live posts. Returns `(markdown, notes, any_data)`; never raises — a competitor
@@ -3506,12 +3763,16 @@ async def _fetch_competitor_social_blocks(
     `any_data` is `True` only when at least one competitor's social accounts were actually resolved
     — the caller uses it to decide whether this prepass produced anything real at all, since the
     markdown itself is never empty (a "not fetched, here's why" sentence is still text).
+
+    The fourth element is `social_audit.engagement_stats` for every account fetched — the same posts,
+    counted rather than rendered, for the asset check's virality benchmark.
     """
     if not competitor_list_raw or competitor_list_raw.startswith("[[context:"):
         return (
             "Not fetched — no competitor list is available on this run yet.",
             ("Competitor list is empty or unresolved; competitor rows are N/D.",),
             False,
+            [],
         )
 
     try:
@@ -3526,6 +3787,7 @@ async def _fetch_competitor_social_blocks(
             f"({exc}). Competitor rows are N/D per this brief's own rule.",
             (f"Competitor list parse failed: {exc}",),
             False,
+            [],
         )
 
     try:
@@ -3536,7 +3798,7 @@ async def _fetch_competitor_social_blocks(
     competitors = analysis.competitors[:take]
 
     if not competitors:
-        return "Not fetched — the competitor list has no entries.", (), False
+        return "Not fetched — the competitor list has no entries.", (), False, []
 
     notes: list[str] = []
     if requested > take:
@@ -3545,7 +3807,7 @@ async def _fetch_competitor_social_blocks(
             f"API spend (cap: {_MAX_AUTO_COMPETITORS}). Use POST /pipeline/social/posts for the rest."
         )
 
-    async def _one(competitor) -> tuple[str, bool]:
+    async def _one(competitor) -> tuple[str, bool, list[dict]]:
         accounts = await social_audit_service.resolve_competitor_handles(competitor.domain)
         if not accounts:
             return (
@@ -3553,15 +3815,21 @@ async def _fetch_competitor_social_blocks(
                 f"profile could be resolved from `{competitor.domain}` via Firecrawl or "
                 "Context.dev. Mark this competitor's post-level metrics N/D.\n",
                 False,
+                [],
             )
         results, account_notes = await social_audit_service.fetch_account_snapshot(
             accounts, limit_per_platform=_COMPETITOR_LIMIT_PER_PLATFORM
         )
-        return social_audit_service.render_social_data_md(competitor.name, results, account_notes), True
+        return (
+            social_audit_service.render_social_data_md(competitor.name, results, account_notes),
+            True,
+            social_audit_service.engagement_stats(f"{competitor.name} (competitor)", results),
+        )
 
     outcomes = await asyncio.gather(*(_one(c) for c in competitors), return_exceptions=True)
 
     rendered: list[str] = []
+    stats: list[dict] = []
     any_data = False
     for competitor, outcome in zip(competitors, outcomes):
         if isinstance(outcome, Exception):
@@ -3572,11 +3840,12 @@ async def _fetch_competitor_social_blocks(
                 "Mark this competitor's post-level metrics N/D.\n"
             )
             continue
-        block, resolved_any = outcome
+        block, resolved_any, account_stats = outcome
         rendered.append(block)
+        stats.extend(account_stats)
         any_data = any_data or resolved_any
 
-    return "\n".join(rendered), tuple(notes), any_data
+    return "\n".join(rendered), tuple(notes), any_data, stats
 
 
 async def _run_social_data_prepass(
@@ -3633,7 +3902,7 @@ async def _run_social_data_prepass(
     label = (answers.get(_SOCIAL_CLIENT_NAME_FIELD_ID) or "Client").strip() or "Client"
     client_block = social_audit_service.render_social_data_md(f"{label} (client)", client_results, ())
 
-    competitor_block, competitor_notes, competitor_any_data = await _fetch_competitor_social_blocks(
+    competitor_block, competitor_notes, competitor_any_data, competitor_stats = await _fetch_competitor_social_blocks(
         (answers.get(_SOCIAL_COMPETITOR_LIST_FIELD_ID) or "").strip(),
         answers.get(_SOCIAL_COMPETITOR_COUNT_FIELD_ID) or "",
     )
@@ -3663,7 +3932,42 @@ async def _run_social_data_prepass(
             {"platform": r.platform, "handle": r.handle, "sample_size": len(r.posts), "credits_used": r.credits_used}
             for r in client_results
         ],
+        # Taken off the event and stored by `_generation_sse_stream` as `social_post_sample`, which
+        # has the run id this function does not. Never sent to the browser.
+        "stats": social_audit_service.engagement_stats(f"{label} (client)", client_results) + competitor_stats,
     }
+
+
+#: The engagement stats of the last fetched social sample — the asset check's virality benchmark.
+SOCIAL_SAMPLE_CONTEXT_KEY = "social_post_sample"
+
+
+async def _store_social_sample(run_id: str, stats: list[dict]) -> None:
+    """File the posts the social prepass already paid for, counted, so the asset check can compare a
+    draft's hook against the hooks that actually travelled for this client and its competitors.
+    Costs no credits. Never raises: a benchmark is not worth failing Stage 10 over."""
+    try:
+        run_uuid = uuid.UUID(run_id)
+        session_factory = get_sessionmaker()
+        async with session_factory() as session:
+            version = await _next_version(session, run_uuid, SOCIAL_SAMPLE_CONTEXT_KEY)
+            lines = [
+                f"- {s.get('account')} · {s.get('platform')}: {s.get('sample_size')} posts, median engagement "
+                f"{s.get('median_engagement') if s.get('median_engagement') is not None else 'not published'}"
+                for s in stats
+            ]
+            session.add(
+                ContextEntry(
+                    run_id=run_uuid,
+                    context_key=SOCIAL_SAMPLE_CONTEXT_KEY,
+                    version=version,
+                    value={"content": "# Social engagement sample\n\n" + "\n".join(lines) + "\n", "stats": stats},
+                    written_by_asset_id=None,
+                )
+            )
+            await session.commit()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Could not store the social sample for run %s: %s", run_id, exc)
 
 
 async def _generation_sse_stream(
@@ -3702,6 +4006,9 @@ async def _generation_sse_stream(
         # `_run_social_data_prepass`'s docstring for why the competitor rows stay N/D.
         answers, social_prepass_event = await _run_social_data_prepass(asset_id, answers)
         if social_prepass_event is not None:
+            social_stats = social_prepass_event.pop("stats", None)
+            if social_stats and run_id:
+                await _store_social_sample(run_id, social_stats)
             yield _sse(social_prepass_event)
 
         # Captured once per run and cached; None when there is no page to read. `build_prompt`
@@ -3709,6 +4016,10 @@ async def _generation_sse_stream(
         # values rather than inventing a palette. Which view of it a stage sees — the full DESIGN.md
         # or the theme brief — and whether it gets the screenshots is decided in `generation.py`.
         page_design = await resolve_page_design(run_id, answers, client_profile, asset_id=asset_id)
+
+        # The client's confirmed industry, if one is on the run (or its source run). None keeps the
+        # default voice, which is the prompt exactly as it was before voice packs existed.
+        voice = await _run_industry(run_id)
 
         # Only the stages that rebuild a page, and only when there is a page to rebuild. Captured
         # before the generation rather than after it so the operator learns *now* whether the
@@ -3745,6 +4056,7 @@ async def _generation_sse_stream(
                 phase=phase,
             ),
             page_design=page_design,
+            voice=voice,
         ):
             if assembling:
                 chunks.append(delta)
@@ -3807,6 +4119,7 @@ async def _revision_sse_stream(
     run_id: str | None = None,
 ):
     try:
+        voice = await _run_industry(run_id)
         async for delta in generate_revision_stream(
             asset_id,
             previous_draft,
@@ -3819,6 +4132,7 @@ async def _revision_sse_stream(
                 asset_id=asset_id,
                 phase=phase,
             ),
+            voice=voice,
         ):
             yield _sse({"type": "delta", "text": delta})
     except Exception as exc:  # noqa: BLE001 - every failure is classified and streamed, never swallowed

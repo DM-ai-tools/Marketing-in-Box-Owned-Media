@@ -2,6 +2,9 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import { AssetExportButtons } from "../components/AssetExportButtons";
 import { SectionBody } from "../components/AssetDocumentView";
+import { assetGlance } from "../lib/assetGlance";
+import { GlanceView } from "./visual/GlanceView";
+import { VisualSectionBody } from "./visual/VisualBlocks";
 import { Markdown } from "../components/Markdown";
 import { OverflowItem, OverflowMenu } from "../components/OverflowMenu";
 import { parseAssetDocument } from "../lib/assetDocument";
@@ -11,7 +14,7 @@ import { stagesFor } from "./pipelineData";
 import { usePipelineStore } from "./pipelineStore";
 
 /**
- * The reading surface, as a right-hand sheet over the working panes.
+ * The reading surface, as a centred dialog over the working panes (full-screen on a phone).
  *
  * The transcript is for *flow* — questions, decisions, what happened next. A six-thousand-word
  * deliverable is for *reading*, and making one column do both is what made the app feel like a
@@ -19,7 +22,7 @@ import { usePipelineStore } from "./pipelineStore";
  * and doing so moved you away from the stage you were reviewing.
  *
  * So the document gets its own scroll container and its own outline, and opening Part 3 no longer
- * moves the transcript behind it. A sheet rather than a route, for the reason `UsageOverlay` is
+ * moves the transcript behind it. A dialog rather than a route, for the reason `UsageOverlay` is
  * one: this is something you open, read and dismiss, and a route would lose the transcript's
  * position on the way back.
  *
@@ -38,7 +41,7 @@ export function AssetReader() {
   const message = readerMessageId ? messages.find((m) => m.id === readerMessageId) : undefined;
 
   // A message can vanish under the reader — the chat was switched, or a re-run replaced the draft.
-  // Closing is the honest response; leaving an empty sheet open is not.
+  // Closing is the honest response; leaving an empty dialog open is not.
   useEffect(() => {
     if (readerMessageId && !message) closeReader();
   }, [readerMessageId, message, closeReader]);
@@ -55,7 +58,9 @@ export function AssetReader() {
   return (
     <AnimatePresence>
       {readerMessageId && message && (
-        <div className="fixed inset-0 z-50 flex justify-end">
+        // Centred over the app rather than a sheet from the edge: full-screen on a phone, a framed
+        // dialog from `sm` up, with the working panes still visible around it.
+        <div className="fixed inset-0 z-50 flex items-center justify-center sm:p-6">
           <motion.button
             type="button"
             aria-label="Close document"
@@ -70,10 +75,10 @@ export function AssetReader() {
             role="dialog"
             aria-modal="true"
             aria-label="Generated document"
-            className="relative flex h-full w-full flex-col bg-[var(--bg)] sm:w-[min(94vw,76rem)] sm:border-l sm:border-[var(--border-strong)]"
-            initial={reduceMotion ? { opacity: 0 } : { x: "100%" }}
-            animate={reduceMotion ? { opacity: 1 } : { x: 0 }}
-            exit={reduceMotion ? { opacity: 0 } : { x: "100%" }}
+            className="relative flex h-full w-full flex-col overflow-hidden bg-[var(--bg)] sm:h-[min(92vh,64rem)] sm:w-[min(94vw,76rem)] sm:rounded-2xl sm:border sm:border-[var(--border-strong)] sm:shadow-2xl"
+            initial={reduceMotion ? { opacity: 0 } : { opacity: 0, scale: 0.97, y: 12 }}
+            animate={reduceMotion ? { opacity: 1 } : { opacity: 1, scale: 1, y: 0 }}
+            exit={reduceMotion ? { opacity: 0 } : { opacity: 0, scale: 0.97, y: 12 }}
             transition={reduceMotion ? { duration: 0 } : { type: "spring", stiffness: 420, damping: 34, mass: 0.8 }}
           >
             <ReaderContents
@@ -112,6 +117,12 @@ function ReaderContents({
   // next stage reads, is untouched, and the export places the section the same way.
   const shown = useMemo(() => withTopicSuggestions(text, preamble, assetId), [text, preamble, assetId]);
   const doc = useMemo(() => parseAssetDocument(shown), [shown]);
+  const view = useUiStore((s) => s.readerView);
+  const setView = useUiStore((s) => s.setReaderView);
+  const glance = useMemo(() => (view === "visual" ? assetGlance(assetId, doc) : null), [view, assetId, doc]);
+  // The same function either way, so a section's heading, id and place in the outline never depend
+  // on the view: only how its body is drawn does.
+  const Body = view === "visual" ? VisualSectionBody : SectionBody;
 
   const [query, setQuery] = useState("");
   const [activeId, setActiveId] = useState<string | null>(doc.sections[0]?.id ?? null);
@@ -172,6 +183,22 @@ function ReaderContents({
           </span>
         )}
         <span className="flex-1" />
+
+        {/* Visual first. Text is the document exactly as exported, one click away. */}
+        <div role="group" aria-label="View" className="flex rounded-full border border-[var(--border-strong)] p-0.5 text-[0.72rem] font-semibold">
+          {(["visual", "text"] as const).map((v) => (
+            <button
+              key={v}
+              type="button"
+              aria-pressed={view === v}
+              onClick={() => setView(v)}
+              className="min-h-8 cursor-pointer rounded-full px-2.5 py-0.5 sm:min-h-0"
+              style={view === v ? { backgroundColor: "var(--accent)", color: "var(--accent-fg)" } : undefined}
+            >
+              {v === "visual" ? "Visual" : "Text"}
+            </button>
+          ))}
+        </div>
 
         {/* On a phone the outline rail has nowhere to go, so the contents become a menu. */}
         {doc.structured && (
@@ -256,10 +283,15 @@ function ReaderContents({
           </nav>
         )}
 
-        <div ref={scroller} className="pane-scroll min-h-0 flex-1 overflow-y-auto px-3 py-4 sm:px-6"
+        <div ref={scroller} className="pane-scroll min-h-0 min-w-0 flex-1 overflow-y-auto px-3 py-4 sm:px-6"
           /* The surface behind any table in here, for `.md-scroll`'s scroll shadows. */
           style={{ "--md-cover": "var(--bg)" } as React.CSSProperties}>
-          <div className="doc-measure mx-auto w-full">
+          <div
+            className="doc-measure mx-auto w-full"
+            // Cards, flows and timelines need more room than a line of prose does.
+            style={view === "visual" ? ({ "--doc-measure": "62rem" } as React.CSSProperties) : undefined}
+          >
+            {glance && <GlanceView glance={glance} onJump={jump} text={shown} label={label} />}
             {doc.structured ? (
               doc.sections.map((section, i) => (
                 <section
@@ -272,12 +304,13 @@ function ReaderContents({
                   className={`scroll-mt-3 ${i > 0 ? "mt-7 border-t border-[var(--border)] pt-6" : ""}`}
                 >
                   <h2 className="mb-2 text-balance text-[1.02rem] font-semibold">{section.label}</h2>
-                  <SectionBody body={section.body} label={`${label} — ${section.label}`} />
+                  <Body body={section.body} label={`${label} — ${section.label}`} />
                 </section>
               ))
             ) : (
-              /* No usable structure — the document renders exactly as the card always rendered it. */
-              <Markdown text={shown} />
+              /* No usable structure — the document renders exactly as the card always rendered it,
+                 with any tables or scores in it still drawn in the Visual view. */
+              view === "visual" ? <VisualSectionBody body={shown} label={label} /> : <Markdown text={shown} />
             )}
             <div className="mt-8 border-t border-[var(--border)] pt-4">
               <AssetExportButtons text={text} label={label} stageNumber={stage?.stageNumber} preamble={preamble} assetId={assetId} />

@@ -286,9 +286,9 @@ def test_phase2_does_not_depend_on_a_field_phase2_drops() -> None:
 
 
 def test_asking_for_a_stage_a_phase_does_not_run_raises() -> None:
-    assert "icp" not in CONFIGS_BY_PHASE["phase2"]
+    assert "offers" not in CONFIGS_BY_PHASE["phase2"]
     with pytest.raises(KeyError):
-        D.dependencies_for("icp", "phase2")
+        D.dependencies_for("offers", "phase2")
 
 
 def test_wildcard_keys_resolve_to_the_key_an_operator_would_recognise() -> None:
@@ -399,7 +399,7 @@ def test_readiness_rejects_a_malformed_run_id(client: TestClient) -> None:
 
 def test_readiness_404s_for_a_stage_the_phase_does_not_run(client: TestClient) -> None:
     response = client.get(
-        "/pipeline/runs/00000000-0000-0000-0000-000000000000/readiness/icp",
+        "/pipeline/runs/00000000-0000-0000-0000-000000000000/readiness/offers",
         params={"phase": "phase2"},
     )
     assert response.status_code == 404

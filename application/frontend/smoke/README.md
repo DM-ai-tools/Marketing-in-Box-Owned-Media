@@ -23,6 +23,31 @@ superseded, interrupted, failed, refining — without a browser or a new depende
 - `topics.tsx` — the "Topic suggestions" section at the top of an exported `.md`: which headline
   gate a document is paired with, what each topic says (why, funnel stage, content type, keyword
   basis), and that it is never put in front of an `.html` export.
+- `visual.tsx` — the reader's Visual view. Over **every real output in `manual_execution/`** it
+  checks two things:
+  - a section's visual blocks rejoin to its body byte for byte;
+  - every recognised block renders every word of its source.
+
+  Then it checks the structure is actually recognised on the real samples (the CRO gauge, ladder
+  offers, the SMS sequence, the lead-magnet winner, the funnel flow, kanban and heat table, and the
+  webinar run of show), and gives each table rule a positive and a negative case. Finally, the reader
+  opens in Visual, Text is the old markup, and grid cards carry the glance.
+- `check.tsx` — the business check on a draft, driven through the store's real actions with the
+  generation, check and refine routes stubbed. Covers:
+  - a clean finish is checked with no click, and the panel shows scores, the "prediction" label on
+    virality and the findings;
+  - Approve stays on offer;
+  - "Fix with Refine" sends the chosen findings, quoted;
+  - a failed check offers a retry without failing the draft;
+  - a failed draft is not checked.
+- `phase2icp.tsx` — Phase 2's own ICP. Checks that a Phase 2 leg starts without Phase 1's ICP and
+  value ladder, and that the ICP asks the audience's industry fresh even when Phase 1 answered it.
+  The answer is filed against that run only, and later Phase 2 stages reuse it rather than Phase 1's.
+- `industry.tsx` — the client's industry and the stage advisories, driven through the store's real
+  actions with `fetch` stubbed. It covers the pause at the end of ICP intake, the confirm card
+  versus the text box, the source each answer is filed with, and reuse of an industry already on the
+  run. For advisories, it checks that the walk stops in front of a stage the industry rarely needs,
+  that Skip passes it over without marking it saved, and that the default bucket changes nothing.
 - `plan.tsx` — the Plan of Action tree, its layout, the diagram and the standalone HTML export.
   The losslessness check there is word-multiset containment rather than line matching, and the
   comment above it records why: two weaker versions of that check each let a real data-loss bug
