@@ -294,6 +294,30 @@ def test_route_404s_for_a_stage_the_phase_does_not_run() -> None:
     assert res.status_code == 404
 
 
+def test_phase2_icp_is_not_checked_but_phase1_icp_is(monkeypatch: pytest.MonkeyPatch) -> None:
+    called: list[str] = []
+
+    async def facts(_run_id: str | None, _profile: dict[str, str], _asset: str) -> BusinessFacts:
+        called.append("facts")
+        return _facts()
+
+    async def judge(_prompt: str, _on_usage: Any) -> str:
+        called.append("judge")
+        return json.dumps({"checks": {"business_logic": {"score": 80, "verdict": "Fine.", "findings": []}}})
+
+    monkeypatch.setattr(pipeline_router, "_business_facts", facts)
+    monkeypatch.setattr(A, "_call_judge", judge)
+    client = TestClient(app)
+
+    refused = client.post("/pipeline/check/icp", json={"text": "An ICP.", "phase": "phase2"})
+    assert refused.status_code == 422, refused.text
+    assert called == []  # no facts read, no model call, so nothing billed
+
+    assert client.post("/pipeline/check/icp", json={"text": "An ICP.", "phase": "phase1"}).status_code == 200
+    assert A.check_applies("icp", "phase1") and not A.check_applies("icp", "phase2")
+    assert A.check_applies("cro", "phase2")
+
+
 def test_blank_drafts_are_rejected() -> None:
     assert TestClient(app).post("/pipeline/check/blog", json={"text": "   "}).status_code == 422
 
@@ -333,3 +357,115 @@ async def test_the_social_prepass_hands_its_counts_to_the_stream_not_the_browser
         "social_content_strategy_audit", {}, {}, "phase1", None, "11111111-1111-1111-1111-111111111111")]
     assert stored == [("11111111-1111-1111-1111-111111111111", [{"account": "Acme"}])]
     assert not any('"stats"' in e for e in events)
+
+
+# --------------------------------------------------------------------------------------
+# Fix with Refine: the revision sees the facts, the re-check sees the previous report
+# --------------------------------------------------------------------------------------
+
+
+def _previous(score: int = 60) -> list[A.CheckResult]:
+    return [
+        A.CheckResult("business_logic", score, "One claim to fix.", [
+            A.Finding("business_logic", "error", "Guaranteed results", "Absolute claim at tier 2.", "Soften it.")
+        ])
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_recheck_shows_the_judge_the_previous_report(monkeypatch: pytest.MonkeyPatch) -> None:
+    prompts = _patch_judge(monkeypatch, json.dumps({"checks": {}}))
+    await A.check_asset("blog", DRAFT, _facts(), previous=_previous())
+    await A.check_asset("blog", DRAFT, _facts())
+    assert "PREVIOUS CHECK" in prompts[0] and "business_logic: score 60" in prompts[0]
+    assert "Absolute claim at tier 2." in prompts[0]
+    assert "PREVIOUS CHECK" not in prompts[1]
+
+
+@pytest.mark.asyncio
+async def test_a_recheck_cannot_score_lower_without_a_finding_to_show_for_it(monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch_judge(monkeypatch, json.dumps({"checks": {"business_logic": {"score": 52, "verdict": "", "findings": []}}}))
+    report = await A.check_asset("blog", DRAFT, _facts(), previous=_previous(60))
+    assert next(c for c in report.checks if c.check == "business_logic").score == 60
+
+
+@pytest.mark.asyncio
+async def test_a_recheck_may_score_lower_when_it_names_the_problem(monkeypatch: pytest.MonkeyPatch) -> None:
+    reply = {"checks": {"business_logic": {"score": 52, "verdict": "", "findings": [
+        {"severity": "warn", "quote": "in five minutes", "why": "Unsubstantiated time claim.", "fix": ""}
+    ]}}}
+    _patch_judge(monkeypatch, json.dumps(reply))
+    report = await A.check_asset("blog", DRAFT, _facts(), previous=_previous(60))
+    assert next(c for c in report.checks if c.check == "business_logic").score == 52
+
+
+def test_check_route_accepts_the_previous_report(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: list[str] = []
+
+    async def facts(_run_id: str | None, _profile: dict[str, str], _asset: str) -> BusinessFacts:
+        return _facts()
+
+    async def judge(prompt: str, _on_usage: Any) -> str:
+        seen.append(prompt)
+        return json.dumps({"checks": {}})
+
+    monkeypatch.setattr(pipeline_router, "_business_facts", facts)
+    monkeypatch.setattr(A, "_call_judge", judge)
+    previous = [{"check": "business_logic", "score": 60, "verdict": "", "findings": [
+        {"check": "business_logic", "severity": "error", "quote": "Guaranteed", "why": "Absolute claim.", "fix": "", "source": "rule"}
+    ]}]
+    res = TestClient(app).post("/pipeline/check/blog", json={"text": DRAFT, "previous": previous})
+    assert res.status_code == 200, res.text
+    assert "business_logic: score 60" in seen[0]
+
+
+def test_the_revision_prompt_carries_the_facts_only_when_given() -> None:
+    from app.services.generation import build_revision_prompt
+
+    plain = build_revision_prompt("draft", "fix it")
+    with_facts = build_revision_prompt("draft", "fix it", None, A.fix_context(_facts()))
+    assert "THE CLIENT'S BUSINESS" not in plain
+    assert "THE CLIENT'S BUSINESS" in with_facts and '"Partner-Voice Content Capture Kit"' in with_facts
+    assert with_facts.index("END PREVIOUS DRAFT") < with_facts.index("THE CLIENT'S BUSINESS") < with_facts.index("fix it")
+
+
+@pytest.mark.parametrize("business_fix", [True, False])
+def test_refine_route_hands_the_facts_over_only_for_a_business_fix(monkeypatch: pytest.MonkeyPatch, business_fix: bool) -> None:
+    received: list[str | None] = []
+
+    async def facts(_run_id: str | None, _profile: dict[str, str], _asset: str) -> BusinessFacts:
+        return _facts()
+
+    async def revise(*_args: Any, business_facts: str | None = None, **_kwargs: Any):
+        received.append(business_facts)
+        yield "revised"
+
+    monkeypatch.setattr(pipeline_router, "_business_facts", facts)
+    monkeypatch.setattr(pipeline_router, "generate_revision_stream", revise)
+    res = TestClient(app).post(
+        "/pipeline/refine/blog/stream",
+        json={"previous_draft": "draft", "note": "fix it", "business_fix": business_fix},
+    )
+    assert res.status_code == 200 and "revised" in res.text
+    assert (received[0] is not None and "Partner-Voice Content Capture Kit" in received[0]) if business_fix else received == [None]
+
+
+@pytest.mark.parametrize(("raw", "expected"), [(80, 80), (79.6, 79), ("80", 80), ("80/100", 80), ("80%", 80),
+                                               (140, 100), ("n/a", None), (None, None), ("high", None), (True, None)])
+def test_judge_scores_are_read_from_numbers_and_numeric_strings_only(raw: Any, expected: int | None) -> None:
+    assert A._score_of(raw) == expected
+
+
+@pytest.mark.asyncio
+async def test_a_missing_previous_score_is_not_shown_to_the_judge_as_na(monkeypatch: pytest.MonkeyPatch) -> None:
+    """"score n/a" in the previous block came back as `"score": "n/a"`, so one unscored check made
+    every re-check after it unscored too, however many times the draft was fixed."""
+    prompts = _patch_judge(monkeypatch, json.dumps({"checks": {}}))
+    await A.check_asset("blog", DRAFT, _facts(), previous=[A.CheckResult("business_logic", None, "", [])])
+    assert "n/a" not in prompts[0].split("PREVIOUS CHECK", 1)[1].split("RE-CHECK RULES", 1)[0]
+    assert "business_logic: not scored" in prompts[0]
+    assert "never null" in prompts[0]
+
+
+def test_the_social_audit_is_not_scored_for_virality() -> None:
+    assert "virality" not in A.CHECKS_BY_ASSET["social_content_strategy_audit"]

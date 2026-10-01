@@ -15,6 +15,9 @@ import { summariseAsset } from "../lib/assetSummary";
 import { buildPlanMindMapHtml } from "../lib/planMindMapHtml";
 import { splitHtmlBlocks } from "../lib/htmlBlocks";
 import { topicPreambleFor } from "../lib/topicSuggestions";
+import { assetAppendixFor } from "../lib/assetAppendix";
+import { checkAppliesTo } from "../lib/businessCheck";
+import { stripPromptEchoes } from "../lib/promptEcho";
 import { QuestionWidget } from "../components/QuestionWidget";
 import { TypingIndicator } from "../components/TypingIndicator";
 import { DeliverablesGrid } from "./DeliverablesGrid";
@@ -31,6 +34,7 @@ import { SourceRunCard } from "./SourceRunCard";
 import { StageGateCard } from "./StageGateCard";
 import { EditAnswerButton } from "./EditAnswerButton";
 import { ScrapeCard } from "./ScrapeCard";
+import { ServiceChoiceCard } from "./ServiceChoiceCard";
 import { IndustryGuessOptions, StageAdvisoryCard } from "./IndustryCards";
 import { AssetCheckPanel } from "./AssetCheckPanel";
 import { NEW_PAGE_OPTIONS, PHASE_META, stageAt, stagesFor, totalStagesFor } from "./pipelineData";
@@ -309,6 +313,12 @@ function ActionRow({ message, label, stageNumber }: { message: PipelineMessage; 
                 // The topics this asset was built on, and the ones passed over, at the top of the
                 // file. Read at click time from the store rather than subscribed to here.
                 preamble={() => topicPreambleFor(usePipelineStore.getState().messages, message)}
+                // The competitors it was benchmarked on, then its business check, at the end of the
+                // file. Both read the live message: a re-check can land after this card rendered.
+                appendix={() => {
+                  const { messages } = usePipelineStore.getState();
+                  return assetAppendixFor(messages, messages.find((m) => m.id === message.id) ?? message);
+                }}
                 assetId={message.assetId}
                 onDone={close}
               />
@@ -474,7 +484,10 @@ function PlanSwitch({ text, label, doc }: { text: string; label: string; doc: As
 }
 
 function GenerationBody({ message, label }: { message: PipelineMessage; label: string }) {
-  const text = message.text ?? "";
+  // Stripped at display as well as at the end of the stream, so a draft saved before that existed
+  // does not show prompt plumbing either.
+  const raw = message.text ?? "";
+  const text = useMemo(() => (message.streaming ? raw : stripPromptEchoes(raw)), [message.streaming, raw]);
   const streaming = !!message.streaming;
   const openReader = useUiStore((s) => s.openReader);
   const docView = useUiStore((s) => s.docView);
@@ -698,7 +711,9 @@ function GenerationCard({ message }: { message: PipelineMessage }) {
       )}
       <GenerationBody message={message} label={stage?.asset.label ?? "Generated page"} />
       {/* Above Approve, never instead of it: the check advises, the operator decides. */}
-      {!message.streaming && !message.superseded && message.check && <AssetCheckPanel message={message} />}
+      {!message.streaming && !message.superseded && message.check && checkAppliesTo(message.phase, message.assetId) && (
+        <AssetCheckPanel message={message} />
+      )}
       {!message.streaming && !message.superseded && (
         <ActionRow
           message={message}
@@ -767,6 +782,7 @@ function QuestionCard({ message }: { message: PipelineMessage }) {
           {/* Under the answer line, not instead of it: the client usually does have a page, and
               that path stays a single action. */}
           {message.pageSource && !message.editing && <PageSourceOptions message={message} />}
+          {message.referenceSource && !message.editing && <ReferenceSourceOptions message={message} />}
           {message.editing && (
             <button
               type="button"
@@ -852,6 +868,53 @@ function PageSourceOptions({ message }: { message: PipelineMessage }) {
         Building from scratch keeps this stage: it writes the page copy, the locked sections and the
         terminology map that {instead} needs. Skipping means {instead} asks you for those instead.
       </p>
+    </div>
+  );
+}
+
+/** The Pillar Page's answer to "there is no reference page": name the main landing page instead,
+ * whose brand design (not its layout) the new page is built on. On the follow-up question itself,
+ * the client's own site is offered as the one-click answer. See `SERVICE_SCAN_OPTIONS`. */
+function ReferenceSourceOptions({ message }: { message: PipelineMessage }) {
+  const declareNoReferencePage = usePipelineStore((s) => s.declareNoReferencePage);
+  const chooseLandingPage = usePipelineStore((s) => s.chooseLandingPage);
+  const source = message.referenceSource;
+  if (!source) return null;
+
+  if (source.landing) {
+    if (!source.suggestedUrl) return null;
+    const suggested = source.suggestedUrl;
+    return (
+      <div className="mt-2.5 flex flex-wrap items-center gap-2">
+        <motion.button
+          type="button"
+          onClick={() => chooseLandingPage(message.id, suggested)}
+          whileTap={{ scale: 0.97 }}
+          className="min-h-10 cursor-pointer rounded-full px-3.5 py-1.5 text-[0.78rem] font-semibold text-white sm:min-h-0"
+          style={{ backgroundColor: "var(--color-electric-blue)" }}
+        >
+          Use {suggested.replace(/^https?:\/\//, "").replace(/\/$/, "")}
+        </motion.button>
+        <span className="text-[0.72rem] text-[var(--fg-faint)]">or type a different landing page below</span>
+      </div>
+    );
+  }
+
+  return (
+    <div className="mt-2.5 rounded-xl border border-dashed border-[var(--border)] bg-[var(--bg-sunken)] px-3 py-2.5">
+      <div className="text-[0.76rem] font-semibold">No reference page for this yet?</div>
+      <p className="mt-0.5 text-[0.72rem] leading-relaxed text-[var(--fg-muted)]">
+        Give the main landing page instead. Its brand design (palette, type, buttons, logo) is used,
+        and the new page gets a pillar-page layout of its own rather than a copy of the home page.
+      </p>
+      <motion.button
+        type="button"
+        onClick={() => declareNoReferencePage(message.id)}
+        whileTap={{ scale: 0.97 }}
+        className="mt-2 min-h-10 cursor-pointer rounded-full border border-[var(--border-strong)] px-3.5 py-1.5 text-[0.78rem] font-medium sm:min-h-0"
+      >
+        This page doesn't exist yet
+      </motion.button>
     </div>
   );
 }
@@ -1065,7 +1128,7 @@ function ResumeBanner() {
   );
 }
 
-function MessageRow({ message }: { message: PipelineMessage }) {
+function MessageRow({ message, flashed }: { message: PipelineMessage; flashed?: boolean }) {
   let content: React.ReactNode;
   switch (message.kind) {
     case "generation":
@@ -1104,12 +1167,21 @@ function MessageRow({ message }: { message: PipelineMessage }) {
     case "stage-advisory":
       content = <StageAdvisoryCard message={message} />;
       break;
+    case "service-choice":
+      content = <ServiceChoiceCard message={message} />;
+      break;
     default:
       content = <TextBubble message={message} />;
   }
 
   return (
-    <div className={`flex min-w-0 ${message.role === "user" ? "justify-end" : "justify-start"}`}>{content}</div>
+    <div
+      data-message-id={message.id}
+      // Clears the StopStageBar and tab row when scrolled to from the pipeline diagram.
+      className={`flex min-w-0 scroll-mt-3 rounded-2xl transition-shadow duration-500 ${message.role === "user" ? "justify-end" : "justify-start"} ${flashed ? "ring-2 ring-[var(--color-signal-green)] ring-offset-2 ring-offset-[var(--bg)]" : ""}`}
+    >
+      {content}
+    </div>
   );
 }
 
@@ -1180,6 +1252,27 @@ export function GenerationStream() {
     if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
   }, [lastText, messages.length]);
 
+  // A saved stage clicked in the pipeline diagram. The request also switched the tab to the
+  // transcript, so this runs after the render that mounted it; the frame wait covers the pane
+  // becoming visible on mobile in the same commit. The brief ring says which card was meant.
+  const transcriptFocus = useUiStore((s) => s.transcriptFocus);
+  const [flashId, setFlashId] = useState<string | null>(null);
+  useEffect(() => {
+    if (!transcriptFocus) return;
+    const { messageId } = transcriptFocus;
+    const frame = requestAnimationFrame(() => {
+      const el = scrollRef.current?.querySelector<HTMLElement>(`[data-message-id="${CSS.escape(messageId)}"]`);
+      if (!el) return;
+      el.scrollIntoView({ behavior: "smooth", block: "start" });
+      setFlashId(messageId);
+    });
+    const clear = setTimeout(() => setFlashId(null), 1800);
+    return () => {
+      cancelAnimationFrame(frame);
+      clearTimeout(clear);
+    };
+  }, [transcriptFocus]);
+
   /* Ahead of every other branch, including the welcome state: the sample is a look at the
    * interface, and gating it behind having started a run would make it unavailable exactly when
    * somebody most wants to see what the app does. It reads no run state, so there is nothing for it
@@ -1239,7 +1332,7 @@ export function GenerationStream() {
         ) : (
           <div className="mx-auto flex w-full max-w-[55rem] flex-col gap-2.5 sm:gap-3">
             {messages.map((m) => (
-              <MessageRow key={m.id} message={m} />
+              <MessageRow key={m.id} message={m} flashed={m.id === flashId} />
             ))}
             {needsResume && <ResumeBanner />}
           </div>

@@ -48,13 +48,27 @@ CHECKS_BY_ASSET: dict[str, tuple[str, ...]] = {
     "lead_magnet": ("offer_relevance", "funnel_relevance", "business_logic", "virality"),
     "blog": ("business_logic", "virality"),
     "content_marketing_strategy": ("business_logic",),
-    "social_content_strategy_audit": ("business_logic", "virality"),
+    # No virality: the deliverable is an audit of posts (workbooks and a narrative), not posts. The
+    # judge said so on every run — "an internal data/methodology deliverable ... cannot be
+    # predicted" — and scored it ~20, a number no Refine could raise without wrecking the audit.
+    "social_content_strategy_audit": ("business_logic",),
     "webinar": ("offer_relevance", "business_logic", "virality"),
     "book": ("business_logic",),
     "podcast": ("business_logic", "virality"),
     "sms_sequence": ("offer_relevance", "funnel_relevance", "business_logic", "virality"),
     "plan_of_action": ("business_logic",),
 }
+
+#: Stages that get no business check in a phase, as `(phase, asset_id)`. Phase 2's ICP is built for
+#: one sub-service's buyer and there is no business-side document yet to hold it against. The UI
+#: never asks (`checkAppliesTo` in `lib/businessCheck.ts` — keep the two in step); the route refuses
+#: so a stale client cannot spend a judge call on it.
+NO_CHECK: frozenset[tuple[str, str]] = frozenset({("phase2", "icp")})
+
+
+def check_applies(asset_id: str, phase: str) -> bool:
+    return (phase, asset_id) not in NO_CHECK
+
 
 #: Copy a prospect reads. Strategy documents quote KPI targets ("aim for a 3% CTR") by design, and
 #: flagging every percentage in them as an unsourced statistic would bury the findings that matter.
@@ -394,8 +408,47 @@ _RUBRIC = {
 }
 
 
+def fix_context(facts: BusinessFacts) -> str:
+    """The facts a "Fix with Refine" revision is written against: the same summary and ICP excerpt
+    the judge checked the draft against, so a fix and the re-check agree on what is true."""
+    return facts.summary() + (f"\n\nICP (excerpt):\n{facts.icp[:6000]}" if facts.icp else "")
+
+
+def _previous_block(previous: list[CheckResult] | None, checks: tuple[str, ...]) -> str:
+    """The report on the draft this one was revised from, so a re-check judges the revision against
+    what was asked of it rather than starting from zero and finding a different set of problems."""
+    if not previous:
+        return ""
+    lines: list[str] = []
+    for result in previous:
+        if result.check not in checks:
+            continue
+        # A missing previous score is written as "not scored", never "n/a": the judge copies what it
+        # is shown, and "score n/a" came back as `"score": "n/a"` on every re-check after it.
+        score = f"score {result.score}" if result.score is not None else "not scored"
+        lines.append(f"- {result.check}: {score}" + (f" — {result.verdict}" if result.verdict else ""))
+        for f in result.findings:
+            where = f' — "{f.quote}"' if f.quote else ""
+            lines.append(f"    - [{f.severity}] {f.why}{where}")
+    if not lines:
+        return ""
+    return (
+        "PREVIOUS CHECK — this draft is a revision of one checked before, which was given these scores "
+        "and findings:\n" + "\n".join(lines) + "\n\n"
+        "RE-CHECK RULES:\n"
+        "- For each previous finding, decide whether the revision fixed it. Re-report it (quoting the "
+        "draft as it now reads) only if the problem is still there. Do not re-report a fixed one.\n"
+        "- Add a new finding only if the revision introduced it, or it is material and was clearly "
+        "missed before. Do not go looking for fresh minor issues to replace the fixed ones.\n"
+        "- Score relative to the previous score: higher when previous findings were fixed and nothing "
+        "worse was introduced. Score lower than before only when a previous problem remains AND the "
+        "revision introduced a new one — and that new problem must be one of your findings.\n\n"
+    )
+
+
 def _judge_prompt(asset_id: str, checks: tuple[str, ...], facts: BusinessFacts, text: str,
-                  rule_findings: list[Finding], benchmarks: str) -> str:
+                  rule_findings: list[Finding], benchmarks: str,
+                  previous: list[CheckResult] | None = None) -> str:
     rubric = "\n".join(f"- {c}: {_RUBRIC[c]}" for c in checks)
     already = "\n".join(f"- [{f.check}] {f.why} — \"{f.quote}\"" for f in rule_findings if f.quote) or "(none)"
     schema = {
@@ -421,15 +474,35 @@ def _judge_prompt(asset_id: str, checks: tuple[str, ...], facts: BusinessFacts, 
         + (f"REAL BENCHMARKS:\n{benchmarks}\n\n" if benchmarks and "virality" in checks else "")
         + f"CHECKS TO RUN:\n{rubric}\n\n"
         f"ALREADY FOUND BY RULES (do not repeat these):\n{already}\n\n"
-        "RULES FOR FINDINGS:\n"
+        + _previous_block(previous, checks)
+        + "RULES FOR FINDINGS:\n"
         "- Every finding's `quote` must be words copied exactly from the draft, 4 to 200 characters. "
         "A finding you cannot quote is not a finding.\n"
         "- At most 6 findings per check, most important first. No findings is a valid answer.\n"
+        "- Every check's `score` is an integer from 0 to 100, never null, \"n/a\" or words, even "
+        "when a previous score was missing or the check fits the draft poorly.\n"
         "- Score 90+ only when there is nothing material to fix.\n\n"
         f"DRAFT:\n-----\n{text[:_MAX_DRAFT_CHARS]}\n-----\n\n"
         "Reply with ONLY a JSON object of this shape, no prose, no code fence:\n"
         + json.dumps(schema)
     )
+
+
+_SCORE_TEXT = re.compile(r"^\s*(\d{1,3}(?:\.\d+)?)\s*(?:/\s*100|%)?\s*$")
+
+
+def _score_of(value: object) -> int | None:
+    """The judge's score as 0-100, or None. A number, or a string holding one ("80", "80/100",
+    "80%"). Anything else ("n/a", null, prose) is no score rather than a guessed one."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        number = float(value)
+    elif isinstance(value, str) and (match := _SCORE_TEXT.match(value)):
+        number = float(match.group(1))
+    else:
+        return None
+    return max(0, min(100, int(number)))
 
 
 def _parse_judge(raw: str) -> dict[str, object] | None:
@@ -466,6 +539,19 @@ async def _call_judge(prompt: str, on_usage: OnUsage | None) -> str:
 # --------------------------------------------------------------------------------------
 
 
+def _hold_unexplained_drops(results: dict[str, CheckResult], previous: list[CheckResult]) -> None:
+    """A re-check may not score a check lower than before while reporting nothing material in it.
+    A lower score with no error or warning to show for it is the judge's run-to-run noise, and it
+    is what made "Fix with Refine" look as if it had made the draft worse."""
+    before = {p.check: p.score for p in previous if p.score is not None}
+    for name, result in results.items():
+        was = before.get(name)
+        if was is None or result.score is None or result.score >= was:
+            continue
+        if not any(f.severity in {"error", "warn"} for f in result.findings):
+            result.score = was
+
+
 async def check_asset(
     asset_id: str,
     raw: str,
@@ -473,7 +559,10 @@ async def check_asset(
     *,
     on_usage: OnUsage | None = None,
     use_judge: bool = True,
+    previous: list[CheckResult] | None = None,
 ) -> CheckReport:
+    """`previous` is the report on the draft this one was revised from (a Refine), if any. The judge
+    is shown it so the re-check scores the revision against what was asked of it."""
     started = time.monotonic()
     checks = CHECKS_BY_ASSET.get(asset_id, ("business_logic",))
     text = draft_text(raw)
@@ -490,7 +579,7 @@ async def check_asset(
 
     if use_judge and text.strip():
         try:
-            data = _parse_judge(await _call_judge(_judge_prompt(asset_id, checks, facts, text, rule_findings, benchmarks), on_usage))
+            data = _parse_judge(await _call_judge(_judge_prompt(asset_id, checks, facts, text, rule_findings, benchmarks, previous), on_usage))
             if data is None:
                 raise ValueError("the judge's reply was not the requested JSON")
             judge_state = "ok"
@@ -498,9 +587,7 @@ async def check_asset(
                 if name not in results or not isinstance(body, dict):
                     continue
                 result = results[name]
-                score = body.get("score")
-                if isinstance(score, (int, float)):
-                    result.score = max(0, min(100, int(score)))
+                result.score = _score_of(body.get("score"))
                 result.verdict = " ".join(str(body.get("verdict") or "").split())
                 for item in body.get("findings") or []:
                     if not isinstance(item, dict):
@@ -523,6 +610,9 @@ async def check_asset(
         except Exception as exc:  # noqa: BLE001 — the rules still stand on their own
             logger.warning("Asset check judge failed for %s: %s", asset_id, exc)
             judge_state = "unavailable"
+
+    if judge_state == "ok" and previous:
+        _hold_unexplained_drops(results, previous)
 
     if dropped:
         logger.info("Asset check for %s dropped %d finding(s) whose quote is not in the draft", asset_id, dropped)

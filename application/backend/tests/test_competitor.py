@@ -353,3 +353,20 @@ def test_listing_reads_a_hand_typed_list():
 def test_listing_with_no_domain_is_still_a_parse_error():
     with pytest.raises(CompetitorParseError):
         parse_competitor_listing("x", "Entourage and Axton Finance are the two main competitors.")
+
+
+def test_the_social_audit_searches_the_clients_own_market_not_social_agencies() -> None:
+    """Stage 10 benchmarks each competitor's posts and service coverage against the client's own,
+    so its competitors must sell what the client sells. The prompt used to ask for companies that
+    sell social content strategy, which for ARG Finance (a commercial broker) returned three social
+    media agencies — suppliers to its market, with nothing to compare against its services."""
+    from app.services.competitor import _schema_defaults, build_competitor_prompt, _config
+
+    asset = "competitor_analysis_social_content_strategy"
+    prompt = build_competitor_prompt(asset, {"target_url": "https://argfinance.com.au/", "niche": "", "location": "Australia"})
+    assert "competes with the target for the same buyers" in prompt
+    assert "suppliers to the target's market" in prompt
+    assert "active public social presence" in prompt
+    assert "specialised in social content strategy" not in prompt
+    # No fixed default may re-point the search at the social-media service itself.
+    assert "service" not in _schema_defaults(_config(asset))

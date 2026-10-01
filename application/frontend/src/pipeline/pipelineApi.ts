@@ -258,6 +258,9 @@ export async function streamRefineStage(
   signal?: AbortSignal,
   phase: PipelinePhase = "phase1",
   attribution: { chatSessionId?: string | null; runId?: string | null } = {},
+  /** Set for "Fix with Refine": the revision is then handed the business facts the findings were
+   * checked against, so it can use the real price or offer instead of guessing one. */
+  businessFix?: { clientProfile: Record<string, string> },
 ): Promise<void> {
   const res = await fetch(`/api/pipeline/refine/${assetId}/stream`, {
     method: "POST",
@@ -268,6 +271,8 @@ export async function streamRefineStage(
       phase,
       chat_session_id: attribution.chatSessionId ?? null,
       run_id: attribution.runId ?? null,
+      business_fix: Boolean(businessFix),
+      client_profile: businessFix?.clientProfile ?? {},
     }),
     signal,
   });
@@ -1047,6 +1052,46 @@ export interface AssetCheckReport {
   duration_ms: number;
 }
 
+export interface ScannedService {
+  name: string;
+  url: string;
+  /** The broader service it sits under, when the site groups it. Empty for a top-level one. */
+  parent: string;
+}
+
+export interface ServiceScanResult {
+  source_url: string;
+  services: ScannedService[];
+  notes: string[];
+}
+
+/** The services (Phase 1) or sub-services (Phase 2) the page at `url` links to. One free fetch and
+ * one small model call; stores nothing. A page that cannot be read is a 422 with the reason. */
+export async function scanServices(
+  url: string,
+  opts: {
+    phase?: string;
+    focus?: string;
+    runId?: string | null;
+    chatSessionId?: string | null;
+    signal?: AbortSignal;
+  } = {},
+): Promise<ServiceScanResult> {
+  const res = await fetch("/api/pipeline/services/scan", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      url,
+      phase: opts.phase ?? "phase1",
+      focus: opts.focus ?? "",
+      run_id: opts.runId ?? null,
+      chat_session_id: opts.chatSessionId ?? null,
+    }),
+    signal: opts.signal,
+  });
+  return unwrap<ServiceScanResult>(res, "Find this site's services");
+}
+
 /** Check a draft (saved or not) against the client's offers, funnel, business rules and predicted
  * virality. Stores nothing; one low-effort model call plus free rule checks. */
 export async function checkAsset(
@@ -1057,6 +1102,8 @@ export async function checkAsset(
     phase?: string;
     clientProfile?: Record<string, string>;
     chatSessionId?: string | null;
+    /** The report on the draft this one was refined from, so the re-check builds on it. */
+    previous?: CheckResult[];
     signal?: AbortSignal;
   } = {},
 ): Promise<AssetCheckReport> {
@@ -1069,6 +1116,7 @@ export async function checkAsset(
       phase: opts.phase ?? "phase1",
       client_profile: opts.clientProfile ?? {},
       chat_session_id: opts.chatSessionId ?? null,
+      previous: opts.previous ?? null,
     }),
     signal: opts.signal,
   });

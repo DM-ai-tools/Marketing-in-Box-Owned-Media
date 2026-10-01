@@ -139,7 +139,7 @@ async def test_pagination_stops_at_the_page_cap_even_if_more_is_available(monkey
 @pytest.mark.asyncio
 async def test_facebook_engagement_fields_are_normalised(monkeypatch):
     async def get(path, params):
-        assert path == "/scrape/facebook/profile-posts"
+        assert path == "/scrape/facebook/profile/posts"
         assert params["url"] == "https://www.facebook.com/trafficradius"
         return _Response(
             {
@@ -216,3 +216,92 @@ async def test_a_failed_request_raises_a_sociavault_error(monkeypatch):
 
     with pytest.raises(sociavault_client.SociaVaultError):
         await sociavault_client.fetch_recent_posts("instagram", "ghost", limit=10)
+
+
+# --------------------------------------------------------------------------------------
+# The live API's real shapes — taken from real responses on 2026-10-01, not from the docs' prose
+# --------------------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("platform", "handle", "data"),
+    [
+        (
+            "instagram",
+            "someone",
+            {"items": {"0": {"pk": "a", "code": "A", "taken_at": 2, "like_count": 8, "comment_count": 2,
+                             "caption": {"text": "Choosing a broker is high-stakes."}},
+                       "1": {"pk": "b", "code": "B", "taken_at": 1, "like_count": 20, "comment_count": 0,
+                             "caption": {"text": "Find your niche."}}},
+             "next_max_id": None, "more_available": False},
+        ),
+        (
+            "facebook",
+            "https://www.facebook.com/someone/",
+            {"posts": {"0": {"id": "a", "text": "Choosing a broker is high-stakes.", "publishTime": 2, "reactionCount": 0, "commentCount": 0},
+                       "1": {"id": "b", "text": "Find your niche.", "publishTime": 1, "reactionCount": 1, "commentCount": 0}},
+             "cursor": None},
+        ),
+        (
+            "linkedin",
+            "https://www.linkedin.com/company/someone/",
+            {"name": "Someone", "posts": {"0": {"url": "u0", "datePublished": "2026-07-01T09:34:03.192Z", "text": "Choosing a broker is high-stakes."},
+                                          "1": {"url": "u1", "datePublished": "2026-06-01T09:34:03.192Z", "text": "Find your niche."}}},
+        ),
+    ],
+)
+async def test_posts_keyed_by_index_are_read_on_every_platform(monkeypatch, platform, handle, data):
+    """The live API sends `items` / `posts` as `{"0": {...}, "1": {...}}`. Iterated as a list, that
+    is its keys, and every account came back with zero posts while still costing its credits."""
+
+    async def get(path, params):
+        return _Response({"success": True, "data": data, "credits_used": 1})
+
+    monkeypatch.setattr(sociavault_client, "_client", lambda: types.SimpleNamespace(get=get))
+    result = await sociavault_client.fetch_recent_posts(platform, handle, limit=10)
+
+    assert [p.caption for p in result.posts] == ["Choosing a broker is high-stakes.", "Find your niche."]
+    assert result.note is None
+
+
+@pytest.mark.parametrize(
+    "raw",
+    ["socialbroker.com.au", "@socialbroker.com.au", "https://www.instagram.com/socialbroker.com.au/",
+     "instagram.com/socialbroker.com.au?hl=en", "https://instagram.com/socialbroker.com.au/reels/"],
+)
+def test_instagram_handles_are_reduced_to_the_bare_username(raw):
+    assert sociavault_client.instagram_username(raw) == "socialbroker.com.au"
+
+
+@pytest.mark.asyncio
+async def test_an_instagram_profile_url_is_sent_as_a_handle(monkeypatch):
+    """The endpoint answers a URL with a 400: "You must provide a handle, not a url"."""
+    sent = []
+
+    async def get(path, params):
+        sent.append(params["handle"])
+        return _Response({"success": True, "data": {"items": {}, "more_available": False}, "credits_used": 1})
+
+    monkeypatch.setattr(sociavault_client, "_client", lambda: types.SimpleNamespace(get=get))
+    await sociavault_client.fetch_recent_posts("instagram", "https://www.instagram.com/socialbroker.com.au/", limit=5)
+    assert sent == ["socialbroker.com.au"]
+
+
+@pytest.mark.asyncio
+async def test_a_sample_that_stops_at_the_limit_is_not_reported_as_the_full_history(monkeypatch):
+    """Facebook pages three posts at a time; at limit=15 paging stops on exactly 15 with the API
+    still offering a cursor. That used to come back `more_available=False`, and the document said
+    "This is the account's full recent history"."""
+    calls = {"n": 0}
+
+    async def get(path, params):
+        calls["n"] += 1
+        posts = {str(i): {"id": f"{calls['n']}-{i}", "text": "x", "publishTime": 1} for i in range(3)}
+        return _Response({"success": True, "data": {"posts": posts, "cursor": f"c{calls['n']}"}, "credits_used": 1})
+
+    monkeypatch.setattr(sociavault_client, "_client", lambda: types.SimpleNamespace(get=get))
+    result = await sociavault_client.fetch_recent_posts("facebook", "https://www.facebook.com/someone", limit=15)
+
+    assert len(result.posts) == 15 and calls["n"] == 5
+    assert result.more_available is True

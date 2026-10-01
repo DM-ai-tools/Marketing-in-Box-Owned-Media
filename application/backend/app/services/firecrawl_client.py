@@ -46,6 +46,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 from dataclasses import dataclass, field
 from functools import lru_cache
 from typing import Any
@@ -62,6 +63,13 @@ _TIMEOUT_SECONDS = 30.0
 # off one page, not a crawl — if it has not finished in this long it is not going to.
 _MAX_POLL_SECONDS = 45.0
 _POLL_INTERVAL_SECONDS = 2.0
+# The longest this module will wait out a 429 before trying once more. Firecrawl's lower plans are
+# rate-limited per minute (a live run hit "Consumed (req/min): 3, Remaining: 0 ... retry after 37s"
+# on its third competitor), and the reply says exactly when the window resets. Waiting once for it
+# costs seconds; giving up drops that competitor from the audit. A wait longer than this, or a
+# second 429, is reported as the failure it is rather than stalling a stage.
+_MAX_RATE_LIMIT_WAIT_SECONDS = 65.0
+_RETRY_AFTER_IN_BODY = re.compile(r"retry after (\d+(?:\.\d+)?)\s*s", re.IGNORECASE)
 
 _SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -146,6 +154,38 @@ def reset_client() -> None:
     _client.cache_clear()
 
 
+def _rate_limit_wait(response: httpx.Response) -> float | None:
+    """Seconds until a 429's window resets, from `Retry-After` or the "retry after Ns" in the body,
+    or None when it is not a 429, says nothing, or asks for longer than this module will wait."""
+    if response.status_code != 429:
+        return None
+    wait: float | None = None
+    header = response.headers.get("retry-after", "").strip()
+    if header:
+        try:
+            wait = float(header)
+        except ValueError:
+            wait = None
+    if wait is None:
+        match = _RETRY_AFTER_IN_BODY.search(response.text or "")
+        wait = float(match.group(1)) if match else None
+    if wait is None or wait > _MAX_RATE_LIMIT_WAIT_SECONDS:
+        return None
+    return max(wait, 1.0)
+
+
+async def _post_extract(client: httpx.AsyncClient, body: dict[str, Any]) -> httpx.Response:
+    """Submit an extract job, waiting out one rate-limit window if Firecrawl names one."""
+    response = await client.post("/extract", json=body)
+    wait = _rate_limit_wait(response)
+    if wait is not None:
+        logger.info("Firecrawl rate limit hit; waiting %.0fs for the window to reset", wait)
+        await asyncio.sleep(wait)
+        response = await client.post("/extract", json=body)
+    response.raise_for_status()
+    return response
+
+
 def _fail(what: str, exc: Exception) -> FirecrawlError:
     if isinstance(exc, httpx.TimeoutException):
         detail = f"Firecrawl did not answer within {int(_TIMEOUT_SECONDS)}s."
@@ -210,8 +250,7 @@ async def extract_brand_tokens(url: str) -> BrandTokens:
     logger.info("Firecrawl API executing operation=extract_brand_tokens url=%r", url)
     client = _client()
     try:
-        submit = await client.post("/extract", json={"urls": [url], "schema": _SCHEMA})
-        submit.raise_for_status()
+        submit = await _post_extract(client, {"urls": [url], "schema": _SCHEMA})
     except httpx.HTTPError as exc:
         logger.error("Firecrawl API error operation=extract_brand_tokens url=%r error=%s", url, exc)
         raise _fail(f"Could not submit a Firecrawl extract for {url}", exc) from exc
@@ -283,8 +322,7 @@ async def extract_reference_images(url: str) -> ReferenceImages:
     logger.info("Firecrawl API executing operation=extract_reference_images url=%r", url)
     client = _client()
     try:
-        submit = await client.post("/extract", json={"urls": [url], "schema": _IMAGE_SCHEMA})
-        submit.raise_for_status()
+        submit = await _post_extract(client, {"urls": [url], "schema": _IMAGE_SCHEMA})
     except httpx.HTTPError as exc:
         logger.error("Firecrawl API error operation=extract_reference_images url=%r error=%s", url, exc)
         raise _fail(f"Could not submit a Firecrawl image extract for {url}", exc) from exc
@@ -347,8 +385,7 @@ async def extract_social_links(url: str) -> SocialLinks:
     logger.info("Firecrawl API executing operation=extract_social_links url=%r", url)
     client = _client()
     try:
-        submit = await client.post("/extract", json={"urls": [url], "schema": _SOCIAL_LINKS_SCHEMA})
-        submit.raise_for_status()
+        submit = await _post_extract(client, {"urls": [url], "schema": _SOCIAL_LINKS_SCHEMA})
     except httpx.HTTPError as exc:
         logger.error("Firecrawl API error operation=extract_social_links url=%r error=%s", url, exc)
         raise _fail(f"Could not submit a Firecrawl social-links extract for {url}", exc) from exc
@@ -377,6 +414,12 @@ async def _poll(client: httpx.AsyncClient, job_id: str, url: str) -> dict[str, A
     while elapsed <= _MAX_POLL_SECONDS:
         try:
             response = await client.get(f"/extract/{job_id}")
+            wait = _rate_limit_wait(response)
+            if wait is not None and elapsed + wait <= _MAX_POLL_SECONDS + _MAX_RATE_LIMIT_WAIT_SECONDS:
+                # A status poll counts against the same per-minute limit as the submit.
+                await asyncio.sleep(wait)
+                elapsed += wait
+                continue
             response.raise_for_status()
         except httpx.HTTPError as exc:
             raise _fail(f"Could not poll the Firecrawl extract job for {url}", exc) from exc

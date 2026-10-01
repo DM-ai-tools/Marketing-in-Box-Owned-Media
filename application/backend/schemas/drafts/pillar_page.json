@@ -12,6 +12,8 @@
     { "field_id": "reference_design_scope", "label": "Reference Design Scope", "kind": "enum_choice", "required": true, "source": "user_input",
       "choices": ["FULL SITE STYLE", "THIS ONE PAGE ONLY", "A DIFFERENT PAGE ON THE SAME SITE"],
       "raw_explanation": "FULL SITE STYLE / THIS ONE PAGE ONLY / A DIFFERENT PAGE ON THE SAME SITE" },
+    { "field_id": "services_covered", "label": "Services / Sub-Services to Cover", "kind": "text", "required": false, "source": "user_input",
+      "raw_explanation": "LIST — one per line, with the URL of each service's existing page where it has one / NONE. Picked from the services (Phase 1) or sub-services (Phase 2) linked from the reference page (or the main landing page when there is no reference page), plus any the operator types. One combined pillar page covers every listed service. Each selected service's own page is read automatically at generation time and appended as SOURCE CONTENT; blank means the page covers what the Improved Page Content covers." },
     { "field_id": "improved_page_content", "label": "Improved Page Content", "kind": "context_reference", "required": true, "source": "auto_from_context",
       "context_key": "cro_rewritten_copy", "fallback": "ask_user_if_missing",
       "raw_explanation": "UPLOAD OR PASTE — the full rewritten page copy. Normally the CRO stage's (Master_Prompt_Universal_Page_Rewrite_v1.md) Part 2 output, but this prompt also runs standalone on any finished copy if pasted directly. If it includes a CRO audit or mode-resolution table, ignore that — design the final page copy only." },

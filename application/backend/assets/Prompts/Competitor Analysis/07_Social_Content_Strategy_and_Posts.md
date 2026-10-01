@@ -1,61 +1,74 @@
 # Competitor Analysis Prompt — Social Content Strategy and Social Media Post Creation
 
-Find UP TO 10 direct competitors in the {LOCATION} market for the company: {TARGET_URL},
-using the optional targeting inputs below to control how narrow/broad the competitor set should be.
+Find UP TO 10 direct competitors in the {LOCATION} market for the company: {TARGET_URL}, whose
+social media presence will be audited and benchmarked against the target's own, post for post.
+Use the optional targeting inputs below to control how narrow/broad the competitor set should be.
 If fewer than 10 genuinely qualifying competitors can be found and verified, return fewer rather
 than padding the list with weak or unverified matches — flag any lower-confidence entries instead
 of silently including them.
 
+WHO COUNTS AS A COMPETITOR HERE: a business that competes with the target for the same buyers —
+it sells the same or substitutable services/products to the same kind of customer, in the same
+market. It is NOT a company that sells social media management, content creation or marketing
+services, unless that is what the target itself sells. A mortgage broker's competitors are other
+lenders and brokers; a roofer's are other roofers; only a marketing agency's are marketing
+agencies. The audit that consumes this list compares each competitor's posts, cadence and
+service coverage with the target's own, so a competitor that does not sell what the target sells
+makes every comparison in it meaningless.
+
 Additional inputs (all optional unless stated):
 
 competitor_type:
-  "niche_specialist" = a company specialised in social content strategy and post creation as its
-  core offer
-  "full_stack_niche" = a full-service company in the same industry as the target that prominently
-  offers social content strategy and post creation as a distinct, structured service
+  "niche_specialist" = a company specialised in the target's core service as its main offer
+  "full_stack_niche" = a broader company in the same industry that offers the target's core
+  service as a distinct line of business
   If missing or empty, include both types.
 
-service: "social content strategy" and "social media post creation" — the operational execution
-service (content pillars, editorial/content calendar, post copywriting, graphic design, and
-scheduling/publishing), relevant if the target offers or relies on this service.
-  (Only include companies with a genuine strategy-to-execution pipeline: evidence of content
-  pillar/calendar planning AND actual post creation (copy, design, video) AND ideally scheduling/
-  publishing. A page that only offers paid social ADS does not count. A page that only offers
-  high-level "content marketing" with no concrete post-creation detail does not count either.)
+service: the target's own core services/products, inferred from {TARGET_URL} — what the target
+actually sells, and therefore what a competitor must also sell.
 
-niche: {NICHE} — leave open if not specified.
+niche: {NICHE} — leave open if not specified. Where given, it describes the target's own
+industry and the buyers it serves; competitors must be in it.
 
 location: {LOCATION}, if not specified analyze it from {TARGET_URL}, boosting local leaders if provided.
 
 excluded_competitors: [list any domains already sourced in prior runs]
 
 Competitor Selection Logic:
-- Find {LOCATION} companies that offer both content strategy (pillars, calendar, tone/format
-  planning) AND hands-on post creation/scheduling as a described, structured service
+- Determine what the target sells and to whom from {TARGET_URL} (and {NICHE} where given) first;
+  then find {LOCATION} companies selling the same or substitutable services to the same buyers
 - Apply competitor_type and niche filtering if provided
-- Exclude companies where the service is actually paid-ads-only, or where "strategy" and
-  "content" are vague marketing language with no concrete deliverable described
+- REQUIRED: an active public social presence. Each competitor must have at least one Facebook,
+  Instagram or LinkedIn account that is linked from its own website (header, footer, contact
+  page) and has posted within roughly the last six months. Name the platforms found in
+  `offering_summary`. A strong competitor with no findable or no active social account cannot be
+  audited, so exclude it and say so in `notes`
+- Prefer competitors whose social activity is visibly planned — recurring themes or pillars, a
+  steady cadence, consistent formats, posts that lead back to a service or offer — over accounts
+  that post sporadically, since a planned feed is the more useful benchmark
+- Exclude marketing, social media and content agencies that merely serve the target's industry
+  (e.g. "social media for mortgage brokers") — they are suppliers to the target's market, not
+  competitors in it — unless the target is itself such an agency
 - CRITICAL: verify genuine {LOCATION} presence for every candidate — check for an {LOCATION}
-  phone number, office address, or other locale-specific evidence. Agencies running
+  phone number, office address, or other locale-specific evidence. Businesses running
   auto-localised international SEO pages (e.g. a /au/ URL path on a site headquartered
   elsewhere, with leftover pricing in foreign currency or references to non-{LOCATION} retail
   events/dates) must be excluded even if the page itself reads as a strong topical match.
-- MUST have strong organic visibility (ranking pages, consistent SEO presence)
 - Verify each candidate by fetching the actual page where possible
 
 CRITICAL REQUIREMENTS:
-- ONLY include high-quality competitors with strong organic traffic/SEO presence in {LOCATION}
-- Prefer companies that: publish concrete post-count/pricing tiers, describe a content pillar or
-  calendar process, and confirm actual content production rather than strategy consulting alone
-- Exclude: directories, marketplaces, freelancer platforms, low-quality or inactive sites,
-  aggregators, and non-{LOCATION} companies running localised international pages
+- ONLY include genuine, established competitors with a real presence in {LOCATION} — strong
+  organic search visibility for the target's services is a good signal of one
+- Exclude: directories, marketplaces, comparison/aggregator sites, freelancer platforms, and
+  low-quality or inactive businesses
 - Mark verification_confidence for each entry (Verified / Partially verified / Unverified)
 
 Ranking & Scoring Guidance:
 similarity_score (0–1) should reflect:
-- Strength/concreteness of the strategy-to-post pipeline (highest weight)
+- Service and buyer overlap with the target (highest weight)
+- Strength and activity of the social presence available to audit
 - Verification confidence, including confirmed genuine {LOCATION} presence
-- Service and niche match
+- Niche match
 - Geographic relevance (boost if location provided)
 - Organic search competitiveness overlap with the target
 

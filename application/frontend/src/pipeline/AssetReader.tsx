@@ -4,10 +4,14 @@ import { AssetExportButtons } from "../components/AssetExportButtons";
 import { SectionBody } from "../components/AssetDocumentView";
 import { assetGlance } from "../lib/assetGlance";
 import { GlanceView } from "./visual/GlanceView";
-import { VisualSectionBody } from "./visual/VisualBlocks";
+import { VisualOptionsContext, VisualSectionBody } from "./visual/VisualBlocks";
+import { ReportHero, SectionContent } from "./visual/AssetReport";
+import { templateFor } from "../lib/assetTemplates";
 import { Markdown } from "../components/Markdown";
 import { OverflowItem, OverflowMenu } from "../components/OverflowMenu";
 import { parseAssetDocument } from "../lib/assetDocument";
+import { assetAppendixFor } from "../lib/assetAppendix";
+import { stripPromptEchoes } from "../lib/promptEcho";
 import { topicPreambleFor, withTopicSuggestions } from "../lib/topicSuggestions";
 import { useUiStore } from "../store/uiStore";
 import { stagesFor } from "./pipelineData";
@@ -82,12 +86,15 @@ export function AssetReader() {
             transition={reduceMotion ? { duration: 0 } : { type: "spring", stiffness: 420, damping: 34, mass: 0.8 }}
           >
             <ReaderContents
-              text={message.text ?? ""}
+              text={stripPromptEchoes(message.text ?? "")}
               assetId={message.assetId}
               phase={phase}
               // The topics this asset was built on and the ones passed over — shown in the reader
               // (and so from Deliverables) and carried into the exported file.
               preamble={topicPreambleFor(messages, message)}
+              // The competitors the stage was benchmarked on, then its business check — at the end
+              // of the document, here and in the exported file.
+              appendix={assetAppendixFor(messages, message)}
               onClose={closeReader}
             />
           </motion.div>
@@ -102,12 +109,14 @@ function ReaderContents({
   assetId,
   phase,
   preamble,
+  appendix,
   onClose,
 }: {
   text: string;
   assetId?: string;
   phase: ReturnType<typeof usePipelineStore.getState>["phase"];
   preamble: string;
+  appendix: string;
   onClose: () => void;
 }) {
   const stage = stagesFor(phase).find((s) => s.asset.asset_id === assetId);
@@ -115,11 +124,18 @@ function ReaderContents({
   // What the reader shows: the stage's own text with the topic suggestions placed in it (before the
   // lead magnet's PART 2 scorecard, at the top elsewhere). Display only — the saved text, which the
   // next stage reads, is untouched, and the export places the section the same way.
-  const shown = useMemo(() => withTopicSuggestions(text, preamble, assetId), [text, preamble, assetId]);
+  const shown = useMemo(
+    () => withTopicSuggestions(text, preamble, assetId) + appendix,
+    [text, preamble, assetId, appendix],
+  );
   const doc = useMemo(() => parseAssetDocument(shown), [shown]);
   const view = useUiStore((s) => s.readerView);
   const setView = useUiStore((s) => s.setReaderView);
   const glance = useMemo(() => (view === "visual" ? assetGlance(assetId, doc) : null), [view, assetId, doc]);
+  // What kind of document this is, whether its prose folds, which sections start folded — the same
+  // template the HTML report is built with.
+  const template = templateFor(assetId);
+  const client = usePipelineStore((s) => s.clientProfile.client_name);
   // The same function either way, so a section's heading, id and place in the outline never depend
   // on the view: only how its body is drawn does.
   const Body = view === "visual" ? VisualSectionBody : SectionBody;
@@ -291,6 +307,17 @@ function ReaderContents({
             // Cards, flows and timelines need more room than a line of prose does.
             style={view === "visual" ? ({ "--doc-measure": "62rem" } as React.CSSProperties) : undefined}
           >
+            <VisualOptionsContext.Provider value={{ expandProse: !!template.longForm, staticHtml: false }}>
+            {view === "visual" && (
+              <ReportHero
+                label={label}
+                template={template}
+                stageNumber={stage?.stageNumber}
+                words={doc.words}
+                sections={doc.sections.length}
+                client={client || undefined}
+              />
+            )}
             {glance && <GlanceView glance={glance} onJump={jump} text={shown} label={label} />}
             {doc.structured ? (
               doc.sections.map((section, i) => (
@@ -303,8 +330,14 @@ function ReaderContents({
                   }}
                   className={`scroll-mt-3 ${i > 0 ? "mt-7 border-t border-[var(--border)] pt-6" : ""}`}
                 >
-                  <h2 className="mb-2 text-balance text-[1.02rem] font-semibold">{section.label}</h2>
-                  <Body body={section.body} label={`${label} — ${section.label}`} />
+                  {view === "visual" ? (
+                    <SectionContent section={section} template={template} label={label} />
+                  ) : (
+                    <>
+                      <h2 className="mb-2 text-balance text-[1.02rem] font-semibold">{section.label}</h2>
+                      <Body body={section.body} label={`${label} — ${section.label}`} />
+                    </>
+                  )}
                 </section>
               ))
             ) : (
@@ -312,8 +345,9 @@ function ReaderContents({
                  with any tables or scores in it still drawn in the Visual view. */
               view === "visual" ? <VisualSectionBody body={shown} label={label} /> : <Markdown text={shown} />
             )}
+            </VisualOptionsContext.Provider>
             <div className="mt-8 border-t border-[var(--border)] pt-4">
-              <AssetExportButtons text={text} label={label} stageNumber={stage?.stageNumber} preamble={preamble} assetId={assetId} />
+              <AssetExportButtons text={text} label={label} stageNumber={stage?.stageNumber} preamble={preamble} assetId={assetId} appendix={appendix} />
             </div>
           </div>
         </div>

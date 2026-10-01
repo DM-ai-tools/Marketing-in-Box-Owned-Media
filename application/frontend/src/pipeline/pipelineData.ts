@@ -317,6 +317,62 @@ export const NEW_PAGE_OPTIONS: Record<string, NewPageOption> = {
 /** The sentinel the prompt switches on. Both answers above must contain it. */
 export const NEW_PAGE_MARKER = "NEW PAGE";
 
+/** The Pillar Page's service picker, and its "the page doesn't exist yet" path. Both phases: the
+ * asset id is the same, and so is the field.
+ *
+ * When the walk reaches `servicesFieldId`, the services (Phase 1) or sub-services (Phase 2) linked
+ * from the reference page are scanned (`POST /pipeline/services/scan`) and offered as a checklist
+ * with a box for any others, instead of a cold text question. The selection is the answer. At
+ * generation time the backend reads each selected service's own page, so sections the CRO copy
+ * lacks are written from what the client's site already says (`app/services/service_scan.py`).
+ *
+ * With no reference page, the operator names the main landing page instead. The answer starts with
+ * `NO_REFERENCE_MARKER`, which `service_scan.is_no_reference` and the prompt's "No reference page"
+ * rule both read: take the landing page's brand design, never its markup or section order. The
+ * marker must stay the prefix of `noReferenceAnswer`; `smoke/services.tsx` checks it. */
+export interface ServiceScanOption {
+  referenceFieldId: string;
+  scopeFieldId: string;
+  servicesFieldId: string;
+  /** Filled from the selected services' URLs when the stage has it and it is still unanswered. */
+  internalLinksFieldId?: string;
+}
+
+export const SERVICE_SCAN_OPTIONS: Record<string, ServiceScanOption> = {
+  pillar_page: {
+    referenceFieldId: "reference_design_source",
+    scopeFieldId: "reference_design_scope",
+    servicesFieldId: "services_covered",
+    internalLinksFieldId: "internal_cluster_pages_to_link_optional",
+  },
+};
+
+export const NO_REFERENCE_MARKER = "NO REFERENCE PAGE";
+/** Reference scope written with a no-reference answer: the landing page's whole design system. */
+export const NO_REFERENCE_SCOPE = "FULL SITE STYLE";
+
+export function noReferenceAnswer(landingUrl: string): string {
+  return `${NO_REFERENCE_MARKER}: this page doesn't exist yet. Take the brand design (palette, type, components, logo) from the main landing page, not its layout: ${landingUrl}`;
+}
+
+/** One service picked on the card, or typed. */
+export interface PickedService {
+  name: string;
+  url?: string;
+}
+
+/** The `services_covered` answer: one service per line, with its page URL when it has one, then
+ * the typed extras. `service_scan.parse_selection` reads this shape back. */
+export function composeServicesAnswer(picked: PickedService[], other: string): string {
+  const lines = picked.map((s) => (s.url ? `- ${s.name} — ${s.url}` : `- ${s.name}`));
+  const extras = other
+    .split(/[,;\n]/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+  if (extras.length) lines.push(`- Other (typed by the operator): ${extras.join(", ")}`);
+  return lines.join("\n");
+}
+
 /** Main assets whose competitor analysis runs as its own reviewable step *before* the stage's
  * intake — everything it needs (the client's URL, industry, region) is already in the run-level
  * profile from ICP, so there is nothing to wait for.

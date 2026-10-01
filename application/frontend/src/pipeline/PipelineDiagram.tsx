@@ -4,8 +4,24 @@ import { Hint } from "../components/Hint";
 import { PhaseToggle } from "./PhaseToggle";
 import { PHASE_META, PHASE_ORDER, stagesFor, totalStagesFor } from "./pipelineData";
 import { INDUSTRY_BUCKET_FACT, INDUSTRY_LABEL_FACT } from "./pipelineData";
-import { approvedAssetIds, skippedAssetIds, usePipelineStore } from "./pipelineStore";
+import { approvedAssetIds, messagesInPhase, skippedAssetIds, usePipelineStore } from "./pipelineStore";
+import type { PipelineMessage } from "./pipelineStore";
 import { notRecommendedReason } from "../data/industryProfiles";
+import { useUiStore } from "../store/uiStore";
+
+/** Each stage's saved output card in this leg's transcript: the latest live one, else the latest
+ * superseded one (still a real saved version, and still the thing on screen for that stage). */
+function outputMessageIds(messages: PipelineMessage[]): Map<string, string> {
+  const live = new Map<string, string>();
+  const any = new Map<string, string>();
+  for (const m of messages) {
+    if (m.kind !== "generation" || m.savePhase !== "saved" || !m.assetId) continue;
+    any.set(m.assetId, m.id);
+    if (!m.superseded) live.set(m.assetId, m.id);
+  }
+  for (const [assetId, id] of any) if (!live.has(assetId)) live.set(assetId, id);
+  return live;
+}
 
 type NodeStatus = "idle" | "pending" | "running" | "hitl" | "done";
 
@@ -143,6 +159,11 @@ export function PipelineDiagram() {
   const activePhase2TrackId = usePipelineStore((s) => s.activePhase2TrackId);
   const approved = useMemo(() => approvedAssetIds(messages, phase, activePhase2TrackId), [messages, phase, activePhase2TrackId]);
   const skipped = useMemo(() => skippedAssetIds(messages, phase, activePhase2TrackId), [messages, phase, activePhase2TrackId]);
+  const outputIds = useMemo(
+    () => outputMessageIds(messagesInPhase(messages, phase, activePhase2TrackId)),
+    [messages, phase, activePhase2TrackId],
+  );
+  const focusTranscriptMessage = useUiStore((s) => s.focusTranscriptMessage);
   // Advisory only: a stage the client's industry rarely needs is tagged, never hidden.
   const industryBucket = usePipelineStore((s) => s.clientProfile[INDUSTRY_BUCKET_FACT]);
   const industryLabel = usePipelineStore((s) => s.clientProfile[INDUSTRY_LABEL_FACT] ?? "");
@@ -201,6 +222,10 @@ export function PipelineDiagram() {
           const startable = status === "idle" && activeStatus !== "running";
           const wasSkipped = status === "idle" && skipped.has(stage.asset.asset_id);
           const advisedAgainst = status !== "done" ? notRecommendedReason(industryBucket, stage.asset.asset_id) : undefined;
+          // A saved stage is a way back to its output in the transcript. Done cards carry no
+          // button of their own, so the whole card can be the target without nesting controls.
+          const outputId = status === "done" ? outputIds.get(stage.asset.asset_id) : undefined;
+          const jumpToOutput = outputId ? () => focusTranscriptMessage(outputId) : undefined;
           return (
             <motion.div
               key={stage.asset.asset_id}
@@ -211,7 +236,22 @@ export function PipelineDiagram() {
                 ref={(el) => {
                   nodeRefs.current[i] = el;
                 }}
-                className={`rounded-2xl border-2 bg-[var(--bg-raised)] px-3 py-2.5 transition-[opacity,box-shadow] duration-300 ease-out @[20rem]:px-3.5 @[20rem]:py-3 ${NODE_STYLE[status]}`}
+                role={jumpToOutput ? "button" : undefined}
+                tabIndex={jumpToOutput ? 0 : undefined}
+                aria-label={jumpToOutput ? `Show ${stage.asset.label} output in the transcript` : undefined}
+                title={jumpToOutput ? "Show this stage's output in the transcript" : undefined}
+                onClick={jumpToOutput}
+                onKeyDown={
+                  jumpToOutput
+                    ? (e) => {
+                        if (e.key === "Enter" || e.key === " ") {
+                          e.preventDefault();
+                          jumpToOutput();
+                        }
+                      }
+                    : undefined
+                }
+                className={`rounded-2xl border-2 bg-[var(--bg-raised)] px-3 py-2.5 transition-[opacity,box-shadow] duration-300 ease-out @[20rem]:px-3.5 @[20rem]:py-3 ${NODE_STYLE[status]} ${jumpToOutput ? "cursor-pointer hover:shadow-md focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--color-signal-green)]" : ""}`}
                 // Inline, not a second opacity utility: `NODE_STYLE.idle` already carries
                 // `opacity-40` and which of two same-specificity utilities wins depends on
                 // stylesheet order, not on the order they are written here.

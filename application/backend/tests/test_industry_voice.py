@@ -91,6 +91,14 @@ def test_block_names_the_industry_and_says_inputs_win() -> None:
     assert industry_voice.load_pack("regulated_finance") in block
 
 
+def test_block_tells_the_model_never_to_echo_it() -> None:
+    # The Value Ladder's Step 0 asks for the context "stated" first, and the model printed this
+    # block's markers into a client's Overview. The block has to say it is not an input to report.
+    block = voice_block(FINANCE)
+    assert "not an input to report" in block
+    assert "Never quote, name, summarise or acknowledge it" in block
+
+
 def test_revision_prompt_carries_the_block_and_is_unchanged_without_one() -> None:
     plain = build_revision_prompt("draft", "shorter")
     assert build_revision_prompt("draft", "shorter", DEFAULT) == plain

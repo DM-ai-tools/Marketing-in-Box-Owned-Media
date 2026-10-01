@@ -9,6 +9,7 @@
  */
 
 import type { AssetDocument } from "./assetDocument";
+import { BUSINESS_CHECK_LABEL } from "./businessCheck";
 import { plainCell, parseVisualBlocks, scoreOf, type ShowSlot, type VisualBlock } from "./visualBlocks";
 
 export type Glance =
@@ -42,7 +43,11 @@ interface Located {
 }
 
 function located(doc: AssetDocument): Located[] {
-  return doc.sections.flatMap((s) => parseVisualBlocks(s.body).map((block) => ({ sectionId: s.id, label: s.label, block })));
+  // The business check is a score table about the draft, not part of it. Left in, an asset with no
+  // score of its own (a funnel, a lead magnet) would open on the check's scores as if they were its.
+  return doc.sections
+    .filter((s) => s.label !== BUSINESS_CHECK_LABEL)
+    .flatMap((s) => parseVisualBlocks(s.body).map((block) => ({ sectionId: s.id, label: s.label, block })));
 }
 
 function scoreGlance(all: Located[]): Glance | null {

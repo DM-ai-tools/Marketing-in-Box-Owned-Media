@@ -98,6 +98,7 @@ from app.services import (
     insights,
     keywords as keywords_service,
     media_storage,
+    service_scan as service_scan_service,
     openai_image_client,
     runway_image_client,
     page_replica as page_replica_service,
@@ -2621,19 +2622,84 @@ class SlideDecksResponse(BaseModel):
 
 
 # --------------------------------------------------------------------------------------
+# Which services a site offers — see `app/services/service_scan.py`
+#
+# The Pillar Page stage's service picker. One free fetch plus one Haiku call; stores nothing. The
+# selection comes back as the stage's `services_covered` answer, like any other.
+# --------------------------------------------------------------------------------------
+
+
+class ServiceScanRequest(BaseModel):
+    url: NonBlankStr
+    phase: str = DEFAULT_PHASE
+    #: The service the run is about (Phase 1) or the sub-service (Phase 2), listed first if found.
+    focus: str = ""
+    chat_session_id: str | None = None
+    run_id: str | None = None
+
+
+class ScannedServiceOut(BaseModel):
+    name: str
+    url: str
+    parent: str = ""
+
+
+class ServiceScanResponse(BaseModel):
+    source_url: str
+    services: list[ScannedServiceOut]
+    notes: list[str] = []
+
+
+@router.post("/services/scan", response_model=ServiceScanResponse)
+async def scan_services_route(payload: ServiceScanRequest) -> ServiceScanResponse:
+    """The services (Phase 1) or sub-services (Phase 2) linked from the page at `url`. A page that
+    cannot be read is a 422 the operator can act on (another URL, or type the services)."""
+    try:
+        scan = await service_scan_service.scan_services(
+            payload.url,
+            phase=payload.phase,
+            focus=payload.focus,
+            on_usage=usage_service.recorder(
+                kind="service_scan",
+                chat_session_id=payload.chat_session_id,
+                run_id=payload.run_id,
+                asset_id="pillar_page",
+                phase=payload.phase,
+            ),
+        )
+    except service_scan_service.ServiceScanError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return ServiceScanResponse.model_validate(scan.as_dict())
+
+
+async def _read_selected_service_pages(
+    asset_id: str, answers: dict[str, str]
+) -> tuple[dict[str, str], dict[str, object] | None]:
+    """For `pillar_page`: append each selected service's page content to its `services_covered`
+    answer. Free reads only (see `service_scan.read_selected_pages`). Never fails the stage: a
+    service whose page cannot be read keeps its name and falls back to the CRO copy."""
+    field_id = service_scan_service.SERVICES_FIELD_ID
+    answer = str(answers.get(field_id) or "")
+    if asset_id != "pillar_page" or not answer.strip():
+        return answers, None
+    try:
+        block, report = await service_scan_service.read_selected_pages(answer)
+    except Exception as exc:  # noqa: BLE001 — the selection still stands without the page content
+        logger.warning("Reading the selected service pages failed: %s", exc)
+        return answers, {"type": "service_sources", "pages": [], "error": str(exc)}
+    if not report:
+        return answers, None
+    if block:
+        answers = {**answers, field_id: f"{answer.rstrip()}\n\n{block}"}
+    return answers, {"type": "service_sources", "pages": report}
+
+
+# --------------------------------------------------------------------------------------
 # Checking a draft against the client's business — see `app/services/asset_check.py`
 #
 # Advisory: nothing here blocks approval, and nothing is stored. The report lives on the draft card,
 # like a slide deck is built from the text in the request rather than read off the run.
 # --------------------------------------------------------------------------------------
-
-
-class AssetCheckRequest(BaseModel):
-    text: NonBlankStr
-    run_id: str | None = None
-    phase: str = DEFAULT_PHASE
-    client_profile: dict[str, str] = Field(default_factory=dict)
-    chat_session_id: str | None = None
 
 
 class CheckFindingOut(BaseModel):
@@ -2650,6 +2716,17 @@ class CheckResultOut(BaseModel):
     score: int | None = None
     verdict: str = ""
     findings: list[CheckFindingOut] = []
+
+
+class AssetCheckRequest(BaseModel):
+    text: NonBlankStr
+    run_id: str | None = None
+    phase: str = DEFAULT_PHASE
+    client_profile: dict[str, str] = Field(default_factory=dict)
+    chat_session_id: str | None = None
+    #: The report on the draft this one was refined from, when there was one. Sent back by the
+    #: client (nothing is stored), so the judge re-checks the revision against what was asked of it.
+    previous: list[CheckResultOut] | None = None
 
 
 class AssetCheckResponse(BaseModel):
@@ -2695,6 +2772,8 @@ async def check_asset_route(asset_id: str, payload: AssetCheckRequest) -> AssetC
     draft. A model failure returns the rule findings alone (`judge: "unavailable"`)."""
     if not has_stage(asset_id, payload.phase):
         raise HTTPException(status_code=404, detail=f"Unknown asset_id {asset_id!r} for phase {payload.phase!r}")
+    if not asset_check_service.check_applies(asset_id, payload.phase):
+        raise HTTPException(status_code=422, detail=f"{asset_id!r} is not business-checked in {payload.phase!r}.")
 
     try:
         facts = await _business_facts(payload.run_id, payload.client_profile, asset_id)
@@ -2706,6 +2785,12 @@ async def check_asset_route(asset_id: str, payload: AssetCheckRequest) -> AssetC
         asset_id,
         payload.text,
         facts,
+        previous=[
+            asset_check_service.CheckResult(
+                r.check, r.score, r.verdict, [asset_check_service.Finding(**f.model_dump()) for f in r.findings]
+            )
+            for r in payload.previous
+        ] if payload.previous else None,
         on_usage=usage_service.recorder(
             kind="check",
             chat_session_id=payload.chat_session_id,
@@ -3045,6 +3130,11 @@ async def resolve_page_template(
     """
     url = _design_source_url(answers, profile)
     if not url:
+        return None
+    # "The page does not exist yet; take the brand design from the main landing page." The landing
+    # page's palette, type and logo are wanted; its markup is not. Cloning a home page's structure
+    # would make the new pillar page a home page with different words in it.
+    if service_scan_service.is_no_reference(str(answers.get("reference_design_source") or "")):
         return None
 
     session_factory = get_sessionmaker()
@@ -3628,6 +3718,10 @@ class RefineStageRequest(BaseModel):
     # unattributed, rather than being dropped for want of a foreign key.
     chat_session_id: str | None = None
     run_id: str | None = None
+    #: Set when the note is findings from the business check ("Fix with Refine"). The revision is
+    #: then handed the facts those findings were checked against — see `build_revision_prompt`.
+    business_fix: bool = False
+    client_profile: dict[str, str] = Field(default_factory=dict)
 
 
 # Answers that mean "the operator did not supply a competitor analysis", so the prepass should run.
@@ -4011,6 +4105,12 @@ async def _generation_sse_stream(
                 await _store_social_sample(run_id, social_stats)
             yield _sse(social_prepass_event)
 
+        # Pillar Page, both phases: read each selected service's own page so the sections the CRO
+        # copy does not cover are written from what the client actually says about that service.
+        answers, service_sources_event = await _read_selected_service_pages(asset_id, answers)
+        if service_sources_event is not None:
+            yield _sse(service_sources_event)
+
         # Captured once per run and cached; None when there is no page to read. `build_prompt`
         # simply omits the block then, and the stage's own prompt falls back to asking for brand
         # values rather than inventing a palette. Which view of it a stage sees — the full DESIGN.md
@@ -4117,9 +4217,18 @@ async def _revision_sse_stream(
     phase: str = DEFAULT_PHASE,
     chat_session_id: str | None = None,
     run_id: str | None = None,
+    business_fix: bool = False,
+    client_profile: dict[str, str] | None = None,
 ):
     try:
         voice = await _run_industry(run_id)
+        business_facts: str | None = None
+        if business_fix:
+            try:
+                facts = await _business_facts(run_id, client_profile or {}, asset_id)
+                business_facts = asset_check_service.fix_context(facts)
+            except Exception as exc:  # noqa: BLE001 — a fix without facts is still the fix asked for
+                logger.warning("Refine could not read business facts for run %s: %s", run_id, exc)
         async for delta in generate_revision_stream(
             asset_id,
             previous_draft,
@@ -4133,6 +4242,7 @@ async def _revision_sse_stream(
                 phase=phase,
             ),
             voice=voice,
+            business_facts=business_facts,
         ):
             yield _sse({"type": "delta", "text": delta})
     except Exception as exc:  # noqa: BLE001 - every failure is classified and streamed, never swallowed
@@ -4190,6 +4300,8 @@ async def refine_stage_stream_route(asset_id: str, payload: RefineStageRequest) 
             payload.phase,
             payload.chat_session_id,
             payload.run_id,
+            payload.business_fix,
+            payload.client_profile,
         ),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},

@@ -39,7 +39,8 @@ Docs
 ----
 * Overview             https://docs.sociavault.com/
 * Instagram posts      https://docs.sociavault.com/api-reference/instagram/posts
-* Facebook profile-posts  https://docs.sociavault.com/api-reference/facebook/profile-posts
+* Facebook profile posts  https://docs.sociavault.com/api-reference/facebook/profile-posts
+                           (the docs page slug is `profile-posts`; the endpoint is `/profile/posts`)
 * LinkedIn profile     https://docs.sociavault.com/api-reference/linkedin/profile
 * LinkedIn company     https://docs.sociavault.com/api-reference/linkedin/company
 """
@@ -190,8 +191,49 @@ async def _get(path: str, params: dict[str, Any]) -> dict[str, Any]:
     return payload
 
 
+def _records(value: Any) -> list[dict[str, Any]]:
+    """A post collection as a list, whichever shape it arrives in.
+
+    The live API returns `items` / `posts` as an object keyed `"0"`, `"1"`, ... rather than as the
+    array the docs' prose suggests. Iterated directly, that object yields its keys, every one of
+    which the `isinstance(item, dict)` filter then dropped, so every account came back with zero
+    posts and still cost its credits. A list is still accepted, in case the API settles on one."""
+    if isinstance(value, list):
+        items = value
+    elif isinstance(value, dict):
+        def order(key: str) -> tuple[int, int | str]:
+            return (0, int(key)) if str(key).isdigit() else (1, str(key))
+
+        items = [value[k] for k in sorted(value, key=order)]
+    else:
+        items = []
+    return [item for item in items if isinstance(item, dict)]
+
+
+def _caption(value: Any) -> str | None:
+    """Instagram sends `caption` as an object (`{"text": ...}`); a plain string is accepted too."""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict) and isinstance(value.get("text"), str):
+        return value["text"]
+    return None
+
+
+def instagram_username(handle: str) -> str:
+    """A bare Instagram username from a handle, `@handle` or profile URL.
+
+    The posts endpoint rejects a URL with a 400 ("You must provide a handle, not a url"), and a
+    competitor's handle arrives as the profile URL read off their site, so it is reduced here
+    rather than trusted to every caller."""
+    raw = handle.strip()
+    if "instagram.com/" in raw:
+        raw = raw.split("instagram.com/", 1)[1]
+        raw = raw.split("?", 1)[0].split("#", 1)[0].strip("/").split("/", 1)[0]
+    return raw.lstrip("@").strip("/")
+
+
 async def _instagram_page(handle: str, *, next_max_id: str | None) -> tuple[list[SocialPost], str | None, bool, int]:
-    params: dict[str, Any] = {"handle": handle}
+    params: dict[str, Any] = {"handle": instagram_username(handle)}
     if next_max_id:
         params["next_max_id"] = next_max_id
     payload = await _get("/scrape/instagram/posts", params)
@@ -202,15 +244,14 @@ async def _instagram_page(handle: str, *, next_max_id: str | None) -> tuple[list
             id=str(item.get("pk") or item.get("code") or ""),
             url=f"https://www.instagram.com/p/{item['code']}/" if item.get("code") else None,
             published_at=_as_int(item.get("taken_at")),
-            caption=item.get("caption") if isinstance(item.get("caption"), str) else None,
+            caption=_caption(item.get("caption")),
             like_count=_as_int(item.get("like_count")),
             comment_count=_as_int(item.get("comment_count")),
             share_count=None,  # Instagram's posts endpoint does not publish a share count.
             is_video=bool(item.get("video_duration") or item.get("play_count")),
             raw=item,
         )
-        for item in (data.get("items") or [])
-        if isinstance(item, dict)
+        for item in _records(data.get("items"))
     ]
     return posts, data.get("next_max_id"), bool(data.get("more_available")), int(payload.get("credits_used") or 1)
 
@@ -221,7 +262,7 @@ async def _facebook_page(handle: str, *, cursor: str | None) -> tuple[list[Socia
     params: dict[str, Any] = {"pageId": handle} if handle.strip().isdigit() else {"url": handle}
     if cursor:
         params["cursor"] = cursor
-    payload = await _get("/scrape/facebook/profile-posts", params)
+    payload = await _get("/scrape/facebook/profile/posts", params)
     data = payload.get("data") or {}
     posts = [
         SocialPost(
@@ -236,8 +277,7 @@ async def _facebook_page(handle: str, *, cursor: str | None) -> tuple[list[Socia
             is_video=bool(item.get("videoDetails")),
             raw=item,
         )
-        for item in (data.get("posts") or [])
-        if isinstance(item, dict)
+        for item in _records(data.get("posts"))
     ]
     next_cursor = data.get("cursor")
     # Facebook's docs don't publish a `more_available` flag the way Instagram's do — the practical
@@ -265,8 +305,7 @@ async def _linkedin_posts(url: str) -> tuple[list[SocialPost], int]:
             share_count=None,
             raw=item,
         )
-        for index, item in enumerate(data.get("posts") or [])
-        if isinstance(item, dict)
+        for index, item in enumerate(_records(data.get("posts")))
     ]
     return posts, int(payload.get("credits_used") or 1)
 
@@ -321,7 +360,11 @@ async def fetch_recent_posts(platform: str, handle: str, *, limit: int = 40) -> 
         platform=platform,
         handle=handle,
         posts=tuple(posts[:limit]),
-        more_available=more_available and len(posts) > limit,
+        # More exists if the platform said so when paging stopped (at `limit` or at the page cap),
+        # or if this page overshot `limit` and the extra posts were cut. Requiring both, as this
+        # once did, reported a sample that stopped exactly at `limit` as the account's full
+        # history, which the rendered document then stated as fact.
+        more_available=more_available or len(posts) > limit,
         credits_used=credits_used,
         note=note,
     )

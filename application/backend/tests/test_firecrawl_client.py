@@ -159,3 +159,70 @@ async def test_extract_reference_images_available_is_false_when_the_page_has_non
 
     assert images.available is False
     assert images.all_urls == ()
+
+
+# --------------------------------------------------------------------------------------
+# Rate limits — one wait for the window Firecrawl names, never a stall
+# --------------------------------------------------------------------------------------
+
+
+def _limited(body: str = "", retry_after: str | None = None) -> httpx.Response:
+    request = httpx.Request("POST", "https://api.firecrawl.dev/v2/extract")
+    headers = {"retry-after": retry_after} if retry_after else {}
+    return httpx.Response(429, request=request, headers=headers, text=body)
+
+
+_LIVE_429 = (
+    '{"success":false,"error":"Rate limit exceeded. Consumed (req/min): 3, Remaining (req/min): 0. '
+    'Upgrade your plan at https://firecrawl.dev/pricing for increased rate limits or please retry after 37s"}'
+)
+
+
+def test_the_wait_is_read_from_the_header_or_the_body():
+    assert firecrawl_client._rate_limit_wait(_limited(retry_after="12")) == 12
+    assert firecrawl_client._rate_limit_wait(_limited(_LIVE_429)) == 37
+    assert firecrawl_client._rate_limit_wait(_limited("slow down")) is None
+    assert firecrawl_client._rate_limit_wait(_limited(retry_after="600")) is None  # longer than we wait
+
+
+@pytest.mark.asyncio
+async def test_a_rate_limited_submit_waits_once_then_succeeds(monkeypatch):
+    posts = {"n": 0}
+    slept: list[float] = []
+
+    async def post(path, json):
+        posts["n"] += 1
+        return _limited(_LIVE_429) if posts["n"] == 1 else _Response({"success": True, "id": "job"})
+
+    async def get(path):
+        return _Response({"status": "completed", "data": {"instagramUrl": "https://instagram.com/acme"}})
+
+    async def sleep(seconds):
+        slept.append(seconds)
+
+    monkeypatch.setattr(firecrawl_client, "_client", lambda: types.SimpleNamespace(post=post, get=get))
+    monkeypatch.setattr(firecrawl_client.asyncio, "sleep", sleep)
+
+    links = await firecrawl_client.extract_social_links("https://acme.com")
+
+    assert links.instagram_url == "https://instagram.com/acme"
+    assert posts["n"] == 2 and slept == [37]
+
+
+@pytest.mark.asyncio
+async def test_a_second_rate_limit_is_reported_not_retried_again(monkeypatch):
+    posts = {"n": 0}
+
+    async def post(path, json):
+        posts["n"] += 1
+        return _limited(_LIVE_429)
+
+    async def sleep(_seconds):
+        return None
+
+    monkeypatch.setattr(firecrawl_client, "_client", lambda: types.SimpleNamespace(post=post, get=None))
+    monkeypatch.setattr(firecrawl_client.asyncio, "sleep", sleep)
+
+    with pytest.raises(firecrawl_client.FirecrawlError, match="429"):
+        await firecrawl_client.extract_social_links("https://acme.com")
+    assert posts["n"] == 2

@@ -65,7 +65,35 @@ export type VisualBlock =
   | { kind: "offers"; source: string; offers: OfferItem[] }
   | { kind: "cards"; source: string; cards: { title: string; body: string }[] }
   | { kind: "sequence"; source: string; level: number; steps: SequenceStep[] }
-  | { kind: "runOfShow"; source: string; slots: ShowSlot[] };
+  | { kind: "runOfShow"; source: string; slots: ShowSlot[] }
+  // The shapes below are the ones that used to fall through to plain Markdown in most real outputs:
+  // `**Key:** value` runs, numbered findings with evidence under them, headings that carry a score,
+  // a "**Working:**" lead over a list, lists of verbatim quotes, long prose and ASCII diagrams.
+  | { kind: "fields"; source: string; rows: FieldRow[] }
+  | { kind: "findings"; source: string; items: FindingItem[] }
+  | { kind: "scoredHeading"; source: string; level: number; text: string; value: number; max: number }
+  | { kind: "checklist"; source: string; title: string; body: string; tone: Tone }
+  | { kind: "quotes"; source: string; items: string[] }
+  | { kind: "prose"; source: string; lead: string; rest: string; restWords: number }
+  | { kind: "diagram"; source: string; code: string };
+
+/** A status read off the words of a label — never off colour alone; the label is always rendered. */
+export type Tone = "good" | "warn" | "bad" | "neutral";
+
+export interface FieldRow {
+  key: string;
+  value: string;
+  /** Indented lines under the row (sub-bullets, a wrapped value), dedented Markdown. */
+  extra: string;
+}
+
+export interface FindingItem {
+  number: string;
+  lead: string;
+  /** The indented evidence under the item, dedented Markdown. */
+  body: string;
+  tone: Tone;
+}
 
 // --------------------------------------------------------------------------------------
 // Cells and scores
@@ -288,6 +316,86 @@ function isFence(line: string): boolean {
   return /^\s*(```|~~~)/.test(line);
 }
 
+// The lower-priority recognisers. They run only where none of the ones above claimed the line, so
+// adding them cannot change how an existing block is recognised.
+
+/** `**Key:** value` / `**Key**: value` / `- **Key.** value`. A period lead is a short label only, so
+ * a bolded opening sentence ("**The form has no labels.** It…") is not mistaken for a key. */
+const FIELD_IN = /^\s{0,3}(?:[-*+]\s+)?\*\*([^*\n]{1,60}?)\s*:\s*\*\*\s*(\S.*)$/;
+const FIELD_OUT = /^\s{0,3}(?:[-*+]\s+)?\*\*([^*\n]{1,60}?)\*\*\s*[:—–]\s*(\S.*)$/;
+const FIELD_DOT = /^\s{0,3}(?:[-*+]\s+)?\*\*([^*\n]{1,40}?)\.\*\*\s*(\S.*)$/;
+const NUMBERED = /^(\s{0,3})(\d{1,3})[.)]\s+(\S.*)$/;
+const BULLET = /^\s{0,3}[-*+]\s+(\S.*)$/;
+const LIST_ITEM = /^\s*(?:[-*+]|\d{1,3}[.)])\s+\S/;
+const COLON_LEAD = /^\s{0,3}\*\*([^*\n]+?:)\*\*\s*$|^\s{0,3}\*\*([^*\n]+?)\*\*:\s*$/;
+const RULE = /^\s*(?:-{3,}|\*{3,}|_{3,})\s*$/;
+const HEADING_ANY = /^\s{0,3}#{1,6}\s/;
+const SCORE_IN_TEXT = /(\d+(?:\.\d+)?)\s*\/\s*(5|10|20|25|50|100)\b/;
+const DIAGRAM_CHARS = /[─│┌┐└┘├┤┬┴┼═║╔╗╚╝▼▲►◄▶◀→←↓↑]|-->|==>|<--|\+-{2,}\+/;
+const DIAGRAM_LANGS = new Set(["", "text", "txt", "plaintext", "ascii", "diagram"]);
+
+function fieldOf(line: string): { key: string; value: string } | null {
+  const m = FIELD_IN.exec(line) ?? FIELD_OUT.exec(line) ?? FIELD_DOT.exec(line);
+  return m ? { key: m[1].trim(), value: m[2].trim() } : null;
+}
+
+export function toneOf(label: string): Tone {
+  const t = plainCell(label).toLowerCase();
+  if (/^(✗|❌)|\b(fail(?:ing|s|ed)?|broken|missing|problems?|faults?|critical|blocker|wrong)\b/.test(t)) return "bad";
+  if (/^⚠|\b(partial(?:ly)?|risks?|weak(?:est)?|caution|watch|fix(?:es)?|gaps?|issues?)\b/.test(t)) return "warn";
+  if (/^(✓|✅|✔)|\b(working|works|strengths?|strong(?:est)?|keep|pass(?:es|ed)?|wins?)\b/.test(t)) return "good";
+  return "neutral";
+}
+
+function wordCount(text: string): number {
+  return text.split(/\s+/).filter((w) => /[\p{L}\p{N}]/u.test(w)).length;
+}
+
+/** Remove the common leading indent, so nested bullets parse as a list rather than as code. */
+function dedent(lines: string[]): string {
+  const indents = lines.filter((l) => l.trim()).map((l) => /^\s*/.exec(l)![0].length);
+  const min = indents.length ? Math.min(...indents) : 0;
+  return lines.map((l) => l.slice(Math.min(min, /^\s*/.exec(l)![0].length))).join("\n").trim();
+}
+
+/** A line of ordinary paragraph text — nothing any other rule reads as structure. */
+function isParagraphLine(line: string): boolean {
+  const t = line.trim();
+  if (!t) return false;
+  if (/^\s{4,}/.test(line) || HEADING_ANY.test(line) || LIST_ITEM.test(line) || RULE.test(line)) return false;
+  if (t.startsWith("|") || t.startsWith(">") || t.startsWith("<") || isFence(line)) return false;
+  if (BOLD_LINE.test(t) || COLON_LEAD.test(line) || fieldOf(line) || GAUGE.test(line)) return false;
+  return true;
+}
+
+/** The index past the last non-blank line in `[from, to)` — trailing blank lines are left for
+ * whatever follows, like every other block here. */
+function trimEnd(lines: string[], from: number, to: number): number {
+  let end = to;
+  while (end > from && !lines[end - 1].trim()) end--;
+  return end;
+}
+
+/** Where a numbered item's indented continuation ends. */
+function itemExtent(lines: string[], from: number, indent: number): number {
+  let end = from + 1;
+  while (end < lines.length) {
+    const line = lines[end];
+    if (!line.trim()) {
+      end++;
+      continue;
+    }
+    // Continuation is anything indented past the item's own marker; the next item or any
+    // unindented line ends it.
+    if (/^\s*/.exec(line)![0].length >= indent + 2) {
+      end++;
+      continue;
+    }
+    break;
+  }
+  return trimEnd(lines, from + 1, end);
+}
+
 // --------------------------------------------------------------------------------------
 // The partition
 // --------------------------------------------------------------------------------------
@@ -306,6 +414,19 @@ export function parseVisualBlocks(body: string): VisualBlock[] {
   while (i < lines.length) {
     const line = lines[i];
     if (isFence(line)) {
+      // An ASCII diagram (box-drawing or arrows in a plain fence) is drawn as a panel. Every other
+      // fenced block is never parsed — code stays exactly as written.
+      const open = /^\s*(`{3,}|~{3,})\s*([\w-]*)\s*$/.exec(line);
+      if (!inFence && open && DIAGRAM_LANGS.has(open[2].toLowerCase())) {
+        let close = i + 1;
+        while (close < lines.length && !lines[close].trim().startsWith(open[1])) close++;
+        const code = lines.slice(i + 1, close).join("\n");
+        if (close < lines.length && DIAGRAM_CHARS.test(code)) {
+          claimed.push({ start: i, end: close + 1, block: { kind: "diagram", code } });
+          i = close + 1;
+          continue;
+        }
+      }
       inFence = !inFence;
       i++;
       continue;
@@ -467,6 +588,138 @@ export function parseVisualBlocks(body: string): VisualBlock[] {
         i = tail;
         continue;
       }
+    }
+
+    // A heading that carries a score: "### Layer 2 — Oxytocin: 4/10 — weakest layer".
+    if (heading) {
+      const s = SCORE_IN_TEXT.exec(heading[2]);
+      if (s) {
+        claimed.push({
+          start: i,
+          end: i + 1,
+          block: { kind: "scoredHeading", level: heading[1].length, text: heading[2].trim(), value: Number(s[1]), max: Number(s[2]) },
+        });
+        i++;
+        continue;
+      }
+    }
+
+    // `**Key:** value` rows: two or more, blank lines between allowed, indented lines under a row kept
+    // with it.
+    if (fieldOf(line)) {
+      const rows: FieldRow[] = [];
+      let cursor = i;
+      let end = i;
+      while (cursor < lines.length) {
+        const f = fieldOf(lines[cursor]);
+        if (!f || GAUGE.test(lines[cursor])) break;
+        let stop = cursor + 1;
+        while (stop < lines.length && (!lines[stop].trim() || /^\s{2,}\S/.test(lines[stop])) && !fieldOf(lines[stop])) stop++;
+        stop = trimEnd(lines, cursor + 1, stop);
+        rows.push({ ...f, extra: dedent(lines.slice(cursor + 1, stop)) });
+        end = stop;
+        cursor = stop;
+        while (cursor < lines.length && !lines[cursor].trim()) cursor++;
+      }
+      if (rows.length >= 2) {
+        claimed.push({ start: i, end, block: { kind: "fields", rows } });
+        i = end;
+        continue;
+      }
+    }
+
+    // "**Working:**" / "**Failing — five faults:**" over a list.
+    const colon = COLON_LEAD.exec(line);
+    if (colon) {
+      let start = i + 1;
+      while (start < lines.length && !lines[start].trim()) start++;
+      if (start < lines.length && LIST_ITEM.test(lines[start]) && start - i <= 2) {
+        let end = start;
+        while (end < lines.length) {
+          const l = lines[end];
+          if (LIST_ITEM.test(l) || /^\s{2,}\S/.test(l)) end++;
+          else if (!l.trim() && end + 1 < lines.length && (LIST_ITEM.test(lines[end + 1]) || /^\s{2,}\S/.test(lines[end + 1]))) end++;
+          else break;
+        }
+        const title = (colon[1] ?? colon[2]).trim();
+        claimed.push({ start: i, end, block: { kind: "checklist", title, body: dedent(lines.slice(start, end)), tone: toneOf(title) } });
+        i = end;
+        continue;
+      }
+    }
+
+    // Numbered findings: items with a bold lead or indented evidence under them.
+    const numbered = NUMBERED.exec(line);
+    if (numbered && !OFFER_LEAD.test(line)) {
+      const indent = numbered[1].length;
+      const items: FindingItem[] = [];
+      let cursor = i;
+      let end = i;
+      while (cursor < lines.length) {
+        const n = NUMBERED.exec(lines[cursor]);
+        if (!n || n[1].length !== indent || OFFER_LEAD.test(lines[cursor])) break;
+        const stop = itemExtent(lines, cursor, indent);
+        const body = dedent(lines.slice(cursor + 1, stop));
+        if (!n[3].startsWith("**") && !body) break;
+        items.push({ number: n[2], lead: n[3].trim(), body, tone: toneOf(n[3]) });
+        end = stop;
+        cursor = stop;
+        while (cursor < lines.length && !lines[cursor].trim()) cursor++;
+      }
+      if (items.length >= 2) {
+        claimed.push({ start: i, end, block: { kind: "findings", items } });
+        i = end;
+        continue;
+      }
+    }
+
+    // A list of verbatim quotes.
+    if (BULLET.test(line)) {
+      let end = i;
+      while (end < lines.length && BULLET.test(lines[end])) end++;
+      const items = lines.slice(i, end).map((l) => BULLET.exec(l)![1].trim());
+      const quoted = items.filter((t) => /^[*_]*\s*["“‘']/.test(t)).length;
+      if (items.length >= 3 && quoted / items.length >= 0.6) {
+        claimed.push({ start: i, end, block: { kind: "quotes", items } });
+        i = end;
+        continue;
+      }
+    }
+
+    // Long prose: two or more paragraphs, collapsed after the first once the rest is long enough to
+    // be worth folding.
+    if (isParagraphLine(line)) {
+      const paragraphs: number[] = [i];
+      let cursor = i;
+      let end = i;
+      while (cursor < lines.length) {
+        if (isParagraphLine(lines[cursor])) {
+          end = cursor + 1;
+          cursor++;
+          continue;
+        }
+        if (!lines[cursor].trim()) {
+          let next = cursor;
+          while (next < lines.length && !lines[next].trim()) next++;
+          if (next < lines.length && isParagraphLine(lines[next])) {
+            paragraphs.push(next);
+            cursor = next;
+            continue;
+          }
+        }
+        break;
+      }
+      if (paragraphs.length >= 2) {
+        const rest = text(paragraphs[1], end);
+        const restWords = wordCount(rest);
+        if (restWords >= 80) {
+          claimed.push({ start: i, end, block: { kind: "prose", lead: text(i, paragraphs[1]).trim(), rest, restWords } });
+          i = end;
+          continue;
+        }
+      }
+      i = end > i ? end : i + 1;
+      continue;
     }
 
     i++;

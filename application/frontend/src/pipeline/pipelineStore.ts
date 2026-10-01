@@ -1,4 +1,6 @@
 import { create } from "zustand";
+import { checkAppliesTo } from "../lib/businessCheck";
+import { stripPromptEchoes } from "../lib/promptEcho";
 import { ASSET_BY_ID, producerAssetIdFor } from "../data/assetCatalog";
 import type { AssetDefinition, FieldDef } from "../data/types";
 import { findNextAskable, resolveContext } from "../lib/fieldResolution";
@@ -24,6 +26,7 @@ import {
   scrapePage,
   seedRunContext,
   streamGenerateStage,
+  scanServices,
   streamRefineStage,
   suggestHeadlines,
   updateChatSession,
@@ -38,6 +41,7 @@ import type {
   HeadlineCandidate,
   IndustryProfileResult,
   PrepassEvent,
+  ScannedService,
   SourceRunSummary,
 } from "./pipelineApi";
 import {
@@ -53,20 +57,24 @@ import {
   INDUSTRY_OTHER_CHOICE,
   INDUSTRY_TEXT_FIELD,
   NEW_PAGE_OPTIONS,
+  NO_REFERENCE_SCOPE,
   PHASE2_AUDIENCE_INDUSTRY_FACT,
   PHASE2_AUDIENCE_INDUSTRY_FIELDS,
   PHASE_META,
   PREPASS_BY_MAIN_ASSET_BY_PHASE,
   SCRAPE_SOURCES,
+  SERVICE_SCAN_OPTIONS,
   SUB_SERVICE_FIELD,
   competitorStageFor,
+  composeServicesAnswer,
+  noReferenceAnswer,
   industryBucketForLabel,
   phase2AudienceIndustryKey,
   stageAt,
   stagesFor,
   totalStagesFor,
 } from "./pipelineData";
-import type { PipelinePhase } from "./pipelineData";
+import type { PickedService, PipelinePhase } from "./pipelineData";
 import { SUB_SERVICE_FACT, phase2StartingContext } from "../data/phase2Catalog";
 import { SERVER_COMPOSED_CONTEXT_KEYS } from "../data/assetCatalog";
 import { INDUSTRY_PROFILES, isIndustryBucket, notRecommendedReason } from "../data/industryProfiles";
@@ -95,13 +103,32 @@ export type PipelineMessageKind =
   /** A stage the operator stopped part-way, and what they can do next. */
   | "stage-stopped"
   /** The next stage is one the client's industry rarely needs: skip it (the default) or build it. */
-  | "stage-advisory";
+  | "stage-advisory"
+  /** The services (Phase 1) or sub-services (Phase 2) found on the reference page, to pick from. */
+  | "service-choice";
 
 /** A draft's check against the client's business (`POST /pipeline/check/{asset}`). Advisory only. */
 export interface AssetCheckState {
   status: "running" | "done" | "error";
   report?: AssetCheckReport;
   error?: string;
+}
+
+/** A `kind: "service-choice"` card: what the scan of the reference page found, and what was picked.
+ * See `SERVICE_SCAN_OPTIONS`. "loading" while the scan runs; "error" offers a retry and still lets
+ * the operator type services; "done" / "skipped" are history. */
+export interface ServiceScanState {
+  status: "loading" | "ready" | "error" | "done" | "skipped";
+  /** The page scanned, or null when there was none to scan. */
+  url: string | null;
+  services: ScannedService[];
+  /** URLs ticked when the card opens: the ones matching the run's own service or sub-service. */
+  preselected: string[];
+  notes: string[];
+  error?: string;
+  /** What was submitted, for the history view. */
+  chosen?: PickedService[];
+  other?: string;
 }
 
 /** A `kind: "stage-advisory"` card. Advice, never removal — see `data/industryProfiles.ts`.
@@ -345,6 +372,12 @@ export interface PipelineMessage {
    * real answer — see `NEW_PAGE_OPTIONS`. Carries the subject so the offer can name the service the
    * page would be for rather than asking in the abstract. */
   pageSource?: { assetId: string; subject?: string };
+  /** Set on the Pillar Page's reference question, which offers "this page doesn't exist yet" — see
+   * `SERVICE_SCAN_OPTIONS`. `landing` marks the follow-up asking for the main landing page, whose
+   * answer is written as the no-reference sentinel rather than as a plain URL. */
+  referenceSource?: { assetId: string; landing?: boolean; suggestedUrl?: string };
+  /** Populated on `kind: "service-choice"`. */
+  serviceScan?: ServiceScanState;
   /** Set on the industry confirm question: what the classifier guessed, offered as the one-click
    * answer. Absent on the typed-answer question and on a re-ask from "change". */
   industryGuess?: IndustryProfileResult;
@@ -490,11 +523,20 @@ interface PipelineState {
 
   start: () => void;
   submitAnswer: (value: string | number | boolean) => void;
+  /** Pillar Page: the reference page doesn't exist yet, so ask for the main landing page instead. */
+  declareNoReferencePage: (messageId: string) => void;
+  /** Pillar Page: answer the landing-page question with a suggested URL in one click. */
+  chooseLandingPage: (messageId: string, url: string) => void;
+  /** Pillar Page: the services picked on a `service-choice` card, plus any typed. */
+  confirmServices: (messageId: string, picked: PickedService[], other: string) => void;
+  skipServices: (messageId: string) => void;
+  retryServiceScan: (messageId: string) => void;
   submitFreeform: (raw: string) => void;
   skipField: () => void;
   requestRefine: (messageId: string) => void;
   cancelRefine: (messageId: string) => void;
-  submitRefine: (messageId: string, note: string) => Promise<void>;
+  /** `businessFix` marks a note composed from business-check findings ("Fix with Refine"). */
+  submitRefine: (messageId: string, note: string, opts?: { businessFix?: boolean }) => Promise<void>;
   saveStage: (messageId: string) => Promise<void>;
   retryGeneration: (messageId: string) => Promise<void>;
   /** Re-run one asset from the top: re-ask its own questions, then regenerate it.
@@ -788,6 +830,15 @@ function repairInterruptedMessages(messages: PipelineMessage[]): PipelineMessage
       return { ...m, prepass, headlines: { ...m.headlines, reloading: false } };
     }
 
+    // A service scan still running when the tab closed: the request is gone, so offer the retry.
+    if (m.kind === "service-choice" && m.serviceScan?.status === "loading") {
+      return {
+        ...m,
+        prepass,
+        serviceScan: { ...m.serviceScan, status: "error" as const, error: "The scan was still running when the chat was closed." },
+      };
+    }
+
     // The Phase 1 run listing was still loading, so the card would spin with nothing to click. Its
     // retry is the same call, so it is restored as the retryable failure it is.
     if (m.kind === "source-run" && m.sourceRunStatus === "loading") {
@@ -882,6 +933,7 @@ function deriveResumeActivity(
     // A suggestion gate is waiting on the operator whether the batch has arrived or not: while
     // it loads there is nothing else for them to do, and once it has they have to choose.
     if (m.kind === "headline-choice" && m.headlines?.status !== "chosen") return awaitingInput;
+    if (m.kind === "service-choice" && isServiceScanOpen(m)) return awaitingInput;
     if (m.kind === "competitor-consent" && m.consent?.status === "pending") return awaitingInput;
     // A Phase 2 chat closed on its opening question is parked on it, exactly like any other question.
     if (m.kind === "source-run" && (m.sourceRunStatus === "pending" || m.sourceRunStatus === "error")) {
@@ -925,6 +977,7 @@ export function selectNeedsResume(s: PipelineState): boolean {
     if (m.kind === "stage-stopped") return true;
     if (m.kind === "stage-advisory") return m.advisory?.status === "pending";
     if (m.kind === "headline-choice") return m.headlines?.status !== "chosen";
+    if (m.kind === "service-choice") return isServiceScanOpen(m);
     if (m.kind === "competitor-consent") return m.consent?.status === "pending";
     if (m.kind === "source-run") return m.sourceRunStatus === "pending" || m.sourceRunStatus === "error";
     if (m.kind === "competitor") return m.savePhase !== "saved";
@@ -1226,6 +1279,7 @@ export function selectCanRerun(s: PipelineState): boolean {
   if (s.messages.some((m) => m.kind === "competitor-consent" && m.consent?.status === "pending")) return false;
   // A suggestion gate mid-flight owns the input bar; re-entering a stage under it would strand it.
   if (s.messages.some((m) => m.kind === "headline-choice" && m.headlines?.status === "loading")) return false;
+  if (s.messages.some((m) => m.kind === "service-choice" && m.serviceScan?.status === "loading")) return false;
   return s.started;
 }
 
@@ -1456,7 +1510,11 @@ async function streamIntoMessage(
       const current = get().messages.find((m) => m.id === messageId);
       patchMessage(get, set, messageId, { text: (current?.text ?? "") + chunk });
     }, controller.signal);
-    patchMessage(get, set, messageId, { streaming: false });
+    // A model that echoed the prompt's private blocks ("===== BEGIN INDUSTRY_VOICE =====…") has
+    // that removed here, before the draft can be approved into the Context Store or checked.
+    const finished = get().messages.find((m) => m.id === messageId)?.text ?? "";
+    const cleaned = stripPromptEchoes(finished);
+    patchMessage(get, set, messageId, cleaned === finished ? { streaming: false } : { streaming: false, text: cleaned });
     set({ activeStatus: "hitl", progress: 100, navStatus: "Awaiting Review" });
     // Only a clean finish: a truncated or failed draft is not worth checking until it is complete.
     void runAssetCheck(get, set, messageId);
@@ -1489,11 +1547,17 @@ async function streamIntoMessage(
 async function runAssetCheck(get: () => PipelineState, set: (partial: Partial<PipelineState>) => void, messageId: string) {
   const message = get().messages.find((m) => m.id === messageId);
   if (!message || message.kind !== "generation" || !message.assetId || !message.text?.trim()) return;
+  // Some stages are not checked in some phases (Phase 2's ICP): no request, no cost, no panel.
+  if (!checkAppliesTo(message.phase, message.assetId)) return;
+  // Read before this card's own check goes to "running", so a re-check of a refined draft is
+  // judged against the report on the draft it was refined from rather than from zero.
+  const previous = earlierCheckReport(get().messages, message)?.checks;
   patchMessage(get, set, messageId, { check: { status: "running" } });
   try {
     const report = await checkAsset(message.assetId, message.text, {
       phase: get().phase,
       clientProfile: get().clientProfile,
+      previous,
       ...attribution(get),
     });
     patchMessage(get, set, messageId, { check: { status: "done", report } });
@@ -1502,6 +1566,20 @@ async function runAssetCheck(get: () => PipelineState, set: (partial: Partial<Pi
       check: { status: "error", error: err instanceof Error ? err.message : String(err) },
     });
   }
+}
+
+/** The report of the draft `message` was refined from, when it had one. The panel shows it as
+ * "was N" and the re-check sends it to the judge — one rule, so the two cannot disagree about
+ * which draft came before. */
+export function earlierCheckReport(messages: PipelineMessage[], message: PipelineMessage): AssetCheckReport | undefined {
+  const at = messages.findIndex((m) => m.id === message.id);
+  for (let i = at - 1; i >= 0; i--) {
+    const m = messages[i];
+    if (m.kind !== "generation" || m.assetId !== message.assetId) continue;
+    if (m.phase !== message.phase || m.trackId !== message.trackId) continue;
+    return m.refineSubmitted ? m.check?.report : undefined;
+  }
+  return undefined;
 }
 
 /** The Refine note for the findings the operator chose to fix: each one quoted, with why and how. */
@@ -2145,6 +2223,121 @@ function subjectOf(
   return value;
 }
 
+// --------------------------------------------------------------------------------------
+// The Pillar Page's service picker — see `SERVICE_SCAN_OPTIONS`
+// --------------------------------------------------------------------------------------
+
+function isServiceScanOpen(m: PipelineMessage): boolean {
+  const status = m.serviceScan?.status;
+  return status === "loading" || status === "ready" || status === "error";
+}
+
+/** The newest question still being asked for `fieldId`. */
+function openQuestionFor(state: PipelineState, fieldId: string): PipelineMessage | undefined {
+  return [...state.messages]
+    .reverse()
+    .find((m) => m.kind === "question" && m.field?.field_id === fieldId && !m.answered && !m.superseded);
+}
+
+/** A URL anywhere in an answer — the reference field holds a URL, or the no-reference sentence
+ * that ends with one — falling back to the whole answer read as a URL. */
+function urlInAnswer(raw: unknown): string | null {
+  if (typeof raw !== "string") return null;
+  const found = raw.match(/https?:\/\/[^\s<>()"'`]+/i);
+  if (found) return pageUrlFromAnswer(found[0].replace(/[.,;:]+$/, ""));
+  return pageUrlFromAnswer(raw);
+}
+
+/** Which page to scan: the reference (or landing) page, else the client's site. */
+function serviceScanUrl(state: PipelineState, answers: Record<string, unknown>, option: { referenceFieldId: string }): string | null {
+  return (
+    urlInAnswer(answers[option.referenceFieldId]) ??
+    pageUrlFromAnswer(answers.client_website_url) ??
+    pageUrlFromAnswer(state.clientProfile.website_url)
+  );
+}
+
+/** The run's own service (Phase 1) or sub-service (Phase 2): listed first and pre-ticked. */
+function serviceScanFocus(state: PipelineState): string {
+  const profile = state.clientProfile;
+  return (state.phase === "phase2" ? profile[SUB_SERVICE_FACT] : profile.target_service) ?? "";
+}
+
+function matchesFocus(name: string, focus: string): boolean {
+  const a = name.trim().toLowerCase();
+  const b = focus.trim().toLowerCase();
+  return !!a && !!b && (a === b || a.includes(b) || b.includes(a));
+}
+
+async function loadServiceScan(get: () => PipelineState, set: (partial: Partial<PipelineState>) => void, messageId: string) {
+  const message = get().messages.find((m) => m.id === messageId);
+  const scan = message?.serviceScan;
+  if (!message || !scan) return;
+  if (!scan.url) {
+    patchMessage(get, set, messageId, {
+      serviceScan: { ...scan, status: "error", error: "There is no page URL to scan. Type the services below instead." },
+    });
+    return;
+  }
+  const focus = serviceScanFocus(get());
+  try {
+    const result = await scanServices(scan.url, { phase: get().phase, focus, ...attribution(get) });
+    const current = get().messages.find((m) => m.id === messageId);
+    if (!current?.serviceScan || current.serviceScan.status !== "loading") return;
+    patchMessage(get, set, messageId, {
+      serviceScan: {
+        ...current.serviceScan,
+        status: "ready",
+        url: result.source_url || scan.url,
+        services: result.services,
+        notes: result.notes,
+        preselected: result.services.filter((s) => matchesFocus(s.name, focus)).map((s) => s.url),
+      },
+    });
+  } catch (err) {
+    const current = get().messages.find((m) => m.id === messageId);
+    if (!current?.serviceScan) return;
+    patchMessage(get, set, messageId, {
+      serviceScan: { ...current.serviceScan, status: "error", error: err instanceof Error ? err.message : String(err) },
+    });
+  }
+}
+
+/** Answer the landing-page follow-up: the reference becomes the no-reference sentinel, and the
+ * scope is the landing page's whole design system, so neither question is asked again. */
+function answerLandingPage(
+  get: () => PipelineState,
+  set: (partial: Partial<PipelineState>) => void,
+  intake: IntakeFlow,
+  field: FieldDef,
+  raw: string,
+) {
+  const url = urlInAnswer(raw.trim());
+  if (!url) {
+    push(get, set, {
+      role: "assistant",
+      kind: "text",
+      text: "That doesn't look like a web address. Type the main landing page's URL, e.g. https://www.example.com.au",
+    });
+    return;
+  }
+  const option = SERVICE_SCAN_OPTIONS[intake.asset.asset_id];
+  intake.answers[field.field_id] = noReferenceAnswer(url);
+  if (option && intake.asset.fields.some((f) => f.field_id === option.scopeFieldId)) {
+    intake.answers[option.scopeFieldId] = NO_REFERENCE_SCOPE;
+  }
+  markQuestionAnswered(get, set, field.field_id);
+  push(get, set, { role: "user", kind: "text", text: url });
+  push(get, set, {
+    role: "assistant",
+    kind: "text",
+    text: `No reference page, so the brand design (palette, type, buttons, logo) comes from ${url} and the layout is built as a pillar page of its own. Next, the services this page covers, read from that page's menu.`,
+    editableFields: [{ fieldId: field.field_id, label: "Reference Design Source" }],
+  });
+  set({ editSeed: null });
+  applyAnswerAndAdvance(get, set, intake, field);
+}
+
 function advanceIntake(
   get: () => PipelineState,
   set: (partial: Partial<PipelineState>) => void,
@@ -2194,6 +2387,21 @@ function advanceIntake(
 
     set({ intake: { asset, answers, awaitingFieldId: result.field.field_id } });
 
+    // The services the page will cover, picked from what the reference page links to rather than
+    // typed cold. See `SERVICE_SCAN_OPTIONS`.
+    const serviceScan = SERVICE_SCAN_OPTIONS[asset.asset_id];
+    if (serviceScan && result.field.field_id === serviceScan.servicesFieldId) {
+      const card = push(get, set, {
+        role: "assistant",
+        kind: "service-choice",
+        assetId: asset.asset_id,
+        field: result.field,
+        serviceScan: { status: "loading", url: serviceScanUrl(get(), answers, serviceScan), services: [], preselected: [], notes: [] },
+      });
+      void loadServiceScan(get, set, card.id);
+      return;
+    }
+
     // A topic the operator would otherwise type cold: offer suggestions first. The gate sits here
     // rather than inside the question card because it has to be able to *not* appear — a field with
     // no slot, or a run with no service anchored yet, falls straight through to the normal
@@ -2234,12 +2442,17 @@ function advanceIntake(
         ? { assetId: asset.asset_id, subject: subjectOf({ asset, answers }, newPage) }
         : undefined;
 
+    // The reference question offers "this page doesn't exist yet", like `pageSource` above.
+    const referenceSource =
+      serviceScan && result.field.field_id === serviceScan.referenceFieldId ? { assetId: asset.asset_id } : undefined;
+
     push(get, set, {
       role: "assistant",
       kind: "question",
       assetId: asset.asset_id,
       field: result.field,
       pageSource,
+      referenceSource,
     });
     return;
   }
@@ -3005,6 +3218,7 @@ function resurfacePendingCard(
     if (m.superseded || !ownsIt(m)) return false;
     if (m.kind === "question") return !m.answered;
     if (m.kind === "headline-choice") return m.headlines?.status !== "chosen";
+    if (m.kind === "service-choice") return isServiceScanOpen(m);
     if (m.kind === "context-choice") return m.contextChoiceStatus === "pending";
     if (m.kind === "stage-gate") return !!m.gate && m.gate.status !== "entered";
     if (m.kind === "stage-stopped") return true;
@@ -3374,12 +3588,115 @@ export const usePipelineStore = create<PipelineState>((set, get) => ({
     const field = intake.asset.fields.find((f) => f.field_id === intake.awaitingFieldId);
     if (!field) return;
 
+    // The landing-page follow-up to "this page doesn't exist yet": the URL typed is written as the
+    // no-reference sentinel, so the brand design is taken from it but its layout is not.
+    const asking = openQuestionFor(get(), field.field_id);
+    if (asking?.referenceSource?.landing) {
+      answerLandingPage(get, set, intake, field, String(value));
+      return;
+    }
+
     intake.answers[field.field_id] = value;
     markQuestionAnswered(get, set, field.field_id);
     push(get, set, { role: "user", kind: "text", text: formatUserAnswer(value) });
     set({ editSeed: null });
 
     applyAnswerAndAdvance(get, set, intake, field);
+  },
+
+  declareNoReferencePage: (messageId) => {
+    const state = get();
+    const message = liveMessage(state, messageId);
+    const intake = state.intake;
+    if (!message?.referenceSource || message.answered || message.superseded || !intake) return;
+    const option = SERVICE_SCAN_OPTIONS[intake.asset.asset_id];
+    if (!option || intake.awaitingFieldId !== option.referenceFieldId || !message.field) return;
+
+    patchMessage(get, set, messageId, { superseded: true });
+    push(get, set, { role: "user", kind: "text", text: "This page doesn't exist yet." });
+    const suggestedUrl =
+      pageUrlFromAnswer(state.clientProfile.website_url) ?? pageUrlFromAnswer(intake.answers.client_website_url) ?? undefined;
+    push(get, set, {
+      role: "assistant",
+      kind: "question",
+      assetId: intake.asset.asset_id,
+      field: {
+        ...message.field,
+        label: "Main landing page URL",
+        helpText:
+          "The page whose brand design (palette, type, buttons, logo) the new pillar page should use. Its layout is not copied: the new page gets a pillar-page structure of its own. Its menu is also where the services are found.",
+        placeholder: suggestedUrl ?? "e.g. https://www.example.com.au",
+      },
+      referenceSource: { assetId: intake.asset.asset_id, landing: true, suggestedUrl },
+    });
+  },
+
+  chooseLandingPage: (messageId, url) => {
+    const state = get();
+    const message = liveMessage(state, messageId);
+    const intake = state.intake;
+    if (!message?.referenceSource?.landing || message.answered || message.superseded || !intake) return;
+    const field = intake.asset.fields.find((f) => f.field_id === intake.awaitingFieldId);
+    if (!field) return;
+    answerLandingPage(get, set, intake, field, url);
+  },
+
+  confirmServices: (messageId, picked, other) => {
+    const state = get();
+    const message = liveMessage(state, messageId);
+    const intake = state.intake;
+    const scan = message?.serviceScan;
+    if (!message || !scan || !isServiceScanOpen(message) || !intake || !message.field) return;
+    const option = SERVICE_SCAN_OPTIONS[intake.asset.asset_id];
+    if (!option || intake.awaitingFieldId !== option.servicesFieldId) return;
+
+    const answer = composeServicesAnswer(picked, other);
+    if (!answer) {
+      get().skipServices(messageId);
+      return;
+    }
+    intake.answers[option.servicesFieldId] = answer;
+    patchMessage(get, set, messageId, { serviceScan: { ...scan, status: "done", chosen: picked, other } });
+    const names = [...picked.map((s) => s.name), ...(other.trim() ? [other.trim()] : [])];
+    push(get, set, { role: "user", kind: "text", text: `Cover: ${names.join(", ")}` });
+
+    // The selected pages are the cluster this pillar links down to. Offered as an answer the
+    // operator can still edit, not decided silently, and never over one they already gave.
+    const links = picked.filter((s) => s.url);
+    const linksField = option.internalLinksFieldId
+      ? intake.asset.fields.find((f) => f.field_id === option.internalLinksFieldId)
+      : undefined;
+    if (linksField && links.length && !String(intake.answers[linksField.field_id] ?? "").trim()) {
+      intake.answers[linksField.field_id] = links.map((s) => `${s.url} — ${s.name}`).join("\n");
+      push(get, set, {
+        role: "assistant",
+        kind: "text",
+        text: `${linksField.label}: the ${links.length} selected service page${links.length === 1 ? "" : "s"}.`,
+        editableFields: [{ fieldId: linksField.field_id, label: linksField.label }],
+      });
+    }
+    set({ editSeed: null });
+    applyAnswerAndAdvance(get, set, intake, message.field);
+  },
+
+  skipServices: (messageId) => {
+    const state = get();
+    const message = liveMessage(state, messageId);
+    const intake = state.intake;
+    const scan = message?.serviceScan;
+    if (!message || !scan || !isServiceScanOpen(message) || !intake || !message.field) return;
+    intake.answers[message.field.field_id] = "NONE";
+    patchMessage(get, set, messageId, { serviceScan: { ...scan, status: "skipped" } });
+    push(get, set, { role: "user", kind: "text", text: "No specific services: cover what the page copy covers." });
+    set({ editSeed: null });
+    applyAnswerAndAdvance(get, set, intake, message.field);
+  },
+
+  retryServiceScan: (messageId) => {
+    const message = liveMessage(get(), messageId);
+    if (!message?.serviceScan || message.serviceScan.status !== "error") return;
+    patchMessage(get, set, messageId, { serviceScan: { ...message.serviceScan, status: "loading", error: undefined } });
+    void loadServiceScan(get, set, messageId);
   },
 
   submitFreeform: (raw) => {
@@ -3419,7 +3736,7 @@ export const usePipelineStore = create<PipelineState>((set, get) => ({
     patchMessage(get, set, messageId, { refining: false });
   },
 
-  submitRefine: async (messageId, note) => {
+  submitRefine: async (messageId, note, opts) => {
     const trimmed = note.trim();
     if (!trimmed) return;
     const message = liveMessage(get(), messageId);
@@ -3441,7 +3758,16 @@ export const usePipelineStore = create<PipelineState>((set, get) => ({
     const assetId = message.assetId;
     const previousDraft = message.text;
     await streamIntoMessage(get, set, newMessage.id, (onChunk, signal) =>
-      streamRefineStage(assetId, previousDraft, trimmed, onChunk, signal, get().phase, attribution(get)),
+      streamRefineStage(
+        assetId,
+        previousDraft,
+        trimmed,
+        onChunk,
+        signal,
+        get().phase,
+        attribution(get),
+        opts?.businessFix ? { clientProfile: get().clientProfile } : undefined,
+      ),
     );
   },
 
@@ -3484,7 +3810,7 @@ export const usePipelineStore = create<PipelineState>((set, get) => ({
         }
         // Intake history: these questions are about to be asked again, so the old cards must stop
         // offering their own edit affordances.
-        if (m.kind === "headline-choice" || m.kind === "question") {
+        if (m.kind === "headline-choice" || m.kind === "question" || m.kind === "service-choice") {
           return { ...m, superseded: true };
         }
         return m;
@@ -4641,7 +4967,7 @@ chooseHeadlines: async (messageId, ids) => {
 
   fixCheckFindings: async (messageId, findings) => {
     if (!findings.length) return;
-    await get().submitRefine(messageId, composeFixNote(findings));
+    await get().submitRefine(messageId, composeFixNote(findings), { businessFix: true });
   },
 
   skipAdvisedStage: (messageId) => {
@@ -4715,6 +5041,7 @@ chooseHeadlines: async (messageId, ids) => {
         if (
           m.kind === "question" ||
           m.kind === "headline-choice" ||
+          m.kind === "service-choice" ||
           m.kind === "context-choice" ||
           m.kind === "competitor-consent" ||
           m.kind === "scrape" ||

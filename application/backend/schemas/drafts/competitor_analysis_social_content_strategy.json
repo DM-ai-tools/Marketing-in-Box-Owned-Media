@@ -18,9 +18,8 @@
       "kind": "text",
       "required": false,
       "source": "user_input",
-      "default": "social content strategy and social media post creation",
-      "fallback_instruction": "Fixed to the operational execution service (content pillars, editorial/content calendar, post copywriting, graphic design, scheduling/publishing). Only include companies with a genuine strategy-to-execution pipeline: pillar/calendar planning AND actual post creation (copy, design, video) AND ideally scheduling/publishing. Paid-social-ads-only pages do not count.",
-      "raw_explanation": "service: \"social content strategy\" and \"social media post creation\" — the operational execution service."
+      "fallback_instruction": "Inferred from {TARGET_URL}: the target's own core services/products. A competitor must sell the same or substitutable services to the same buyers. Marketing/social agencies that serve the target's industry are suppliers to that market, not competitors in it, unless the target is itself such an agency.",
+      "raw_explanation": "service: the target's own core services/products, inferred from {TARGET_URL} — what the target actually sells, and therefore what a competitor must also sell."
     },
     {
       "field_id": "niche",
@@ -52,7 +51,7 @@
         "full_stack_niche"
       ],
       "fallback_instruction": "If missing or empty, include both types.",
-      "raw_explanation": "\"niche_specialist\" = a company specialised in social content strategy and post creation as its core offer. \"full_stack_niche\" = a full-service company in the same industry as the target that prominently offers social content strategy and post creation as a distinct, structured service."
+      "raw_explanation": "\"niche_specialist\" = a company specialised in the target's core service as its main offer. \"full_stack_niche\" = a broader company in the same industry that offers the target's core service as a distinct line of business."
     },
     {
       "field_id": "excluded_competitors",

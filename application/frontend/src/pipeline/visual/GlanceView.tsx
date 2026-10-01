@@ -1,16 +1,12 @@
 import type { Glance } from "../../lib/assetGlance";
 import { PlanMindMap } from "../PlanMindMap";
 import { Gauge } from "./VisualBlocks";
+import { ratioTone as tone } from "./tone";
 
 /* The "at a glance" picture of an asset: large at the top of the reader, small on a Deliverables
  * card. Both draw the same `Glance`, so the card and the document it opens never disagree. Every
  * number is printed, not only drawn. */
 
-function tone(ratio: number): string {
-  if (ratio >= 0.75) return "var(--color-signal-green)";
-  if (ratio >= 0.5) return "var(--color-electric-blue)";
-  return "var(--color-signal-orange)";
-}
 
 /** "Free", "$297", or "$197 – $497": the lowest and highest headline prices on a rung. */
 function priceRange(prices: string[]): string {

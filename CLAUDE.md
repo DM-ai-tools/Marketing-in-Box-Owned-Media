@@ -476,6 +476,55 @@ served HTML is a JS shell. Cached once per run under the `page_replica_template`
 
 ---
 
+## The Pillar Page's service picker, and building without a reference page
+
+The pillar page used to cover whatever the CRO copy covered, which is one service. Now the operator
+picks the services (Phase 1) or sub-services (Phase 2) from the client's own site, and one combined
+pillar page covers them all. Same asset and field in both phases: `SERVICE_SCAN_OPTIONS` in
+`pipeline/pipelineData.ts`, `app/services/service_scan.py` on the server.
+
+### The flow
+
+1. **Reference question.** Under the normal answer line: "This page doesn't exist yet". That asks
+   for the main landing page, with the client's own site as the one-click answer. The answer is
+   written as `noReferenceAnswer(url)`, which starts with `NO_REFERENCE_MARKER`. The scope is set to
+   FULL SITE STYLE, so neither question is asked again.
+2. **Service picker** (`kind: "service-choice"`, `ServiceChoiceCard`). When the walk reaches
+   `services_covered`, the reference (or landing) page is scanned and its services are offered as a
+   checklist, grouped by the site's own menu. The run's service or sub-service is pre-ticked. There
+   is a box for any others, and a skip. The answer is `composeServicesAnswer`'s shape, one service
+   per line with its URL; `service_scan.parse_selection` reads it back.
+3. **Downstream.** Phase 1's internal cluster links are filled from the picked URLs, as an editable
+   answer. The head-term suggestions anchor on the picked names (`SERVICE_FIELD_BY_ASSET`).
+4. **Generation.** `_read_selected_service_pages` reads each picked service's own page and appends
+   it to the answer as SOURCE CONTENT. The prompt's "SERVICES TO COVER" section says how to use it.
+
+### Rules
+
+- **The scan is measure-then-judge.** One free fetch gives same-site links, each with the menu item
+  it is nested under (`_menu_parent`). One Haiku call sorts them. `_parse_reply` drops any item
+  whose URL is not one of the page's links, so a service the site does not link to cannot appear.
+  Without the nesting, the model guessed the grouping and listed menu headings as sub-services.
+- **Headings mean different things per phase.** In Phase 1 a menu heading with its own page is a
+  top-level service ("Business & Commercial" is ARG Finance's Commercial Loans page). In Phase 2 it
+  is only a `parent`.
+- **Reading the picked pages is free-only.** `scraper.read_direct`, capped at `MAX_SOURCE_PAGES`
+  pages of `_SOURCE_CHARS` characters each. It loops over URLs, so a paid reader there would break
+  "credits are money". A page that fails is reported, and that service falls back to the CRO copy.
+- **Copy order is fixed by the prompt.** The Improved Page Content wins wherever it covers a
+  service. A picked service it does not cover is written from that service's SOURCE CONTENT, using
+  only facts the content states. A typed service with no page gets a short section with
+  `[CLIENT TO CONFIRM]`. Sections written from source content are listed in the delivery notes.
+- **No-reference mode takes the brand, never the markup.** `resolve_page_template` returns None for
+  a `NO REFERENCE PAGE` answer, so the landing page is never cloned as a pillar page template.
+  `_design_source_url` still reads the URL out of the sentence, so DESIGN.md is captured from it.
+- **Four places have to agree:** the marker and the answer shape in `pipelineData.ts`, the schema
+  field's position (after the reference questions), both phases' prompt sections, and the
+  catalog. `tests/test_service_scan.py` reads all of them; `smoke/services.tsx` drives the store
+  through both paths in both phases.
+
+---
+
 ## Slide decks — the webinar's Step 5, as a file
 
 `universal-webinar-prompt.md` Step 5 writes a slide-by-slide brief "for the designer or presenter",
@@ -572,6 +621,20 @@ different raw shapes into one `SocialPost`. A field a platform genuinely does no
 has no documented like/comment count — is left `None`, never `0`; printing `0` would claim a real
 measurement of zero engagement, which is a different, false claim.
 
+**Code against the live responses, not the docs' prose. This has broken once.** On the first live
+run every platform returned nothing while the mocked tests passed. Three causes:
+
+- `items` / `posts` arrive as objects keyed `"0"`, `"1"`, … rather than as arrays. Iterating one
+  yields only its keys, so every account came back empty and still cost its credits. `_records`
+  reads either shape.
+- The Facebook path is `/scrape/facebook/profile/posts`. The docs page slug is `profile-posts`,
+  which is not the route.
+- Instagram wants a bare username and 400s on a profile URL, which is what a competitor's site
+  links to. `instagram_username` reduces both forms, and Instagram's `caption` is an object
+  (`{"text": …}`).
+
+`tests/test_sociavault_client.py` pins the real shapes.
+
 Pagination is capped at `_MAX_PAGES_PER_ACCOUNT` regardless of `limit` or platform: Facebook returns
 3 posts/page against Instagram's ~12, so a same-sized sample costs roughly 4x the credits, and the
 cap bounds worst-case spend either way rather than looping until a very long history runs out.
@@ -621,6 +684,20 @@ Context.dev's `retrieve_brand` — 10 credits, already used elsewhere in this co
 brand record — only runs for platforms Firecrawl didn't find, and never overrides one it did; same
 "each tier only fills what the one before it left open" rule `design_md._capture_brand_fallback`
 already follows for brand tokens.
+
+**The competitors are the client's own market rivals, not social media agencies.** The
+Stage 10 audit compares each competitor's posts and service coverage with the client's, so a
+competitor has to sell what the client sells. `07_Social_Content_Strategy_and_Posts.md` used to
+search for companies that *sell* social content strategy. For ARG Finance, a commercial broker,
+that returned three social media agencies, which supply its market rather than compete in it. The
+prompt now selects competitors on service and buyer overlap and requires an active social account
+linked from their own site. `test_the_social_audit_searches_the_clients_own_market_not_social_
+agencies` pins this.
+
+**Firecrawl's per-minute limit is waited out once.** A low plan allows a few requests a minute,
+and a run resolves up to five competitors. `_post_extract` and `_poll` wait for the reset time a
+429 names, if it is under `_MAX_RATE_LIMIT_WAIT_SECONDS`, and retry once. A second 429 is reported
+as a failure, not retried again.
 
 **Automatic, but bounded — `_MAX_AUTO_COMPETITORS` (5), independent of what the operator typed
 into `number_of_competitors_to_audit`.** Every competitor resolved this way costs a real Firecrawl
@@ -884,6 +961,13 @@ Webinar included, whatever it sold.
   industry sends every prompt byte-for-byte as before;
   `test_default_bucket_and_no_profile_leave_every_prompt_byte_identical` pins that for every stage
   in both phases. It has no pack file, on purpose.
+- **The block says it is private, and the UI strips it if echoed anyway.** A prompt that asks for
+  "the context you used" to be stated first (the Value Ladder's Step 0) once had the model print
+  `===== BEGIN INDUSTRY_VOICE ===== (applied — not reproduced here) =====…` into a client's Overview.
+  - `_PRECEDENCE` now tells the model never to quote, name or acknowledge the block.
+  - `lib/promptEcho.ts` removes any echo of this backend's block markers. It runs when a stream
+    finishes, before the draft can be saved, and again in the card, the reader and both exports.
+  - It only removes short acknowledgements. A long block keeps its text and loses the markers.
 - **Never fork prompt files per industry.** Phase 2's SCOPE LOCK is the lesson: two files that
   start identical drift silently. One block composed in one place cannot drift.
 
@@ -952,9 +1036,22 @@ fails there, whichever document it happens on.
   - Value Ladder offer items (drawn as offer cards);
   - runs of three or more timed slots (`- 0:00–0:03 — …`, drawn as a run of show);
   - runs of same-level headings that are all timed (drawn as a sequence);
-  - runs of three or more whole-line bold leads with content (drawn as cards).
+  - runs of three or more whole-line bold leads with content (drawn as cards);
 
-  Fenced code is never parsed, so the funnel's ASCII flow stays as written.
+  then, only where none of those claimed the line (so they cannot change an existing recognition):
+
+  - a heading carrying a score (`### Layer 2 — Oxytocin: 4/10`, a bar under the heading text);
+  - two or more `**Key:** value` / `- **Key.** value` rows (a definition grid). A period lead is at
+    most 40 characters, so a bolded opening sentence is not read as a label;
+  - a `**Working:**`-style bold-colon lead over a list (a card whose edge colour comes from the
+    label's words, `toneOf`);
+  - numbered items with a bold lead or indented evidence (finding cards);
+  - a bullet list that is at least 60% quoted strings (quote cards);
+  - two or more paragraphs whose remainder is 80+ words (the first paragraph shown, the rest in
+    `<details>`, which stays in the DOM for find, print and the checks).
+
+  Fenced code is never parsed, with one exception: a plain (or `text`) fence holding box-drawing
+  characters or arrows is an ASCII diagram, drawn as a panel with its text untouched.
 - **`classifyTable` decides a table's visual. The order is the specification:**
   1. kanban, when at least 70% of rows are P0–P4 or a tier. "Ongoing" becomes its own column, and a
      priority table with a Timeline column is still a kanban;
@@ -963,7 +1060,7 @@ fails there, whichever document it happens on.
   4. a time column, drawn as a timeline;
   5. Stage/Page plus goal or source columns, drawn as a flow;
   6. Metric/KPI plus Target/Baseline, drawn as KPI tiles;
-  7. anything else is a plain table, rendered exactly as the Text view does.
+  7. anything else is a data table: banded rows, the first column carrying the row's name.
 
 **"At a glance"** (`lib/assetGlance.ts`) is derived and additive. It picks one picture per asset from
 the same blocks: a CRO score with layer bars, ladder rungs with offer counts and headline price
@@ -972,14 +1069,45 @@ or the Plan of Action's existing `PlanMindMap`. Each item jumps to the section i
 Deliverables cards show the same glance, card-sized (`MiniGlance`), so a card and the document it
 opens never disagree.
 
+### Templates, and the HTML report
+
+`lib/assetTemplates.ts` gives each asset a **template**. A template sets three things:
+
+- the hero's kicker, the line that says what kind of document this is;
+- `longForm`: a blog or book never folds its prose, because folding an article hides the article;
+- which sections start folded. Topic suggestions and Competitors scanned always do.
+
+It never reorders, drops or rewrites a section. `pipeline/visual/AssetReport.tsx` holds the shared
+pieces: `ReportHero`, `SectionContent`, and `AssetReport` for the whole static document. The reader's
+Visual view is built from those pieces, and so is the exported file.
+
+**"Report (.html)"** is the exported file (`lib/assetReportHtml.ts`). It sits beside the Markdown
+download, which stays verbatim.
+
+- **How it is built.** `AssetReport` is rendered with `renderToStaticMarkup`, loaded on click so the
+  app's first load does not carry it. The running app's own compiled CSS is inlined, read from
+  `document.styleSheets`, so every class resolves offline.
+- **How it behaves offline.** `<details>` does the folding. A `beforeprint` hook opens every fold
+  before printing.
+- **Embedded pages.** A page inside the document is shown in a sandboxed `<iframe srcdoc>`, with its
+  source under it.
+- **HTML-only documents.** A document that is only an HTML page is not offered the report. Its
+  download is already that page.
+- **What `smoke/report.tsx` checks.** It builds the report for every real output and requires every
+  word of the document to be in it. Link targets count on both sides. It also prints each file's
+  plain-Markdown share, so a recogniser that stops matching shows up as a number.
+
 ### Rules
 
-- **Exports never see any of this.** They read raw `message.text`.
+- **The Markdown export never sees any of this.** It reads raw `message.text`. The HTML report is
+  the designed format, and its containment is checked like the reader's.
 - **No chart library.** Everything is hand-built divs and SVG on the `var(--…)` tokens, so dark mode
   needs nothing of its own.
 - **Adding a recogniser.** Claim contiguous lines only, keep every word in what you render, and add
-  a real-sample recognition assertion to `smoke/visual.tsx`. The corpus checks will then tell you if
-  it loses anything.
+  a real-sample recognition assertion to `smoke/visual.tsx` or `smoke/report.tsx`. The corpus checks
+  will then tell you if it loses anything. Put new recognisers **after** the existing ones.
+- **Colours come from `pipeline/visual/tone.ts`**, not from a hex in a component.
+  `--color-signal-amber` is the "partial" state.
 
 ## Checking a draft against the business — offers, funnel, business rules, virality
 
@@ -1055,11 +1183,66 @@ that data: keyword volume for terms the draft uses, and the real top posts' open
   (generation, retry, refine). A truncated or failed draft is not checked, and a retry clears the
   old report.
 - **What the panel shows.** `AssetCheckPanel` sits **above** the Approve row and never disables it.
-  It opens only when something is an error.
+  - **While it runs:** a scan animation (`bc-*` keyframes in `index.css`, stopped under reduced
+    motion) and the four stages in words. The request reports no progress, so the current step is
+    paced by elapsed time and never claims a count of findings.
+  - **When it finishes:** a card per check, each with its score, the question it answers, its band
+    (Good / Needs work / At risk) and, after a Refine, the score it had before ("was 58").
+  - **Findings:** listed must-fix first, and open by default only when something must be fixed.
 - **Fixing.** "Fix N with Refine" sends the chosen findings to `submitRefine` as one quoted note
   (`composeFixNote`). Errors and warnings are pre-selected; info is opt-in.
+  - The refine request carries `business_fix: true`, so `build_revision_prompt` is handed
+    `asset_check.fix_context(facts)`, the same facts and ICP excerpt the judge used. Without them
+    a "price not on the ladder" finding can only be fixed by guessing a price or deleting the line.
+    An ordinary Refine note gets no facts block.
+  - The re-check sends the report on the draft it was refined from (`earlierCheckReport`, which is
+    also what the panel's "was N" reads) as `previous`. The judge is told to re-report only
+    unfixed findings and to score relative to before. `_hold_unexplained_drops` keeps the old
+    score when the judge scores lower but reports no error or warning in that check, because
+    that drop is run-to-run noise, not a regression.
+  - **A missing score must never be shown to the judge as "n/a".** It copies what it is shown:
+    one unscored check made every re-check after it unscored too, which the panel displayed as 0.
+    `_previous_block` writes "not scored", the prompt requires an integer, and `_score_of` also
+    accepts `"80"` / `"80/100"`.
+  - **The social audit is not scored for virality.** It is an audit of posts, not posts, and the
+    judge scored it about 20 on every run, a score no Refine could raise.
 - **The route.** `POST /pipeline/check/{asset_id}` stores nothing and records its cost as
   `kind="check"`. A judge failure returns the rule findings alone, with `judge: "unavailable"`.
+
+### The check in the deliverable
+
+The finished check is the last section of the reader's document and of every exported file: a
+**Business check** section after the asset (and after "Competitors scanned"), built by
+`lib/businessCheck.ts` and joined to the competitors appendix by `lib/assetAppendix.ts`. Deliverables
+opens the reader, the reader and the `⋯` menu both call `assetAppendixFor`, so the cards, the `.md`
+download and the HTML report are the same document.
+
+- **What it holds.** An intro saying whether this is the approved version or an unapproved draft, a
+  score table (score /100, band, must fix / should fix / notes), and per check: the question it
+  asks, the verdict and the finding counts. The list of findings still open (quote and fix) appears
+  only on an unapproved draft: an approved file carries the counts and what was fixed, not the
+  working list. Virality repeats that it is a prediction and states its basis. Facts not on record, an
+  unavailable reviewer and discarded quotes are stated, not left out.
+- **After a Refine it shows the movement.** The report on the draft it was refined from
+  (`earlierCheckReport`, the same lookup the panel's "was N" uses) adds a "since earlier draft"
+  column and a Fixed count. *Fixed* means a finding the earlier draft had that this one does not,
+  matched on check and quoted words, for the checks this report ran. A check that was not run is
+  neither fixed nor open.
+- **Same words as the panel.** Bands (a must-fix finding is always "At risk"), "Must fix / Should
+  fix / Note" and each check's question mirror `AssetCheckPanel.tsx`. That file exports only a
+  component, so they are restated in `businessCheck.ts`; change one, change the other.
+  `smoke/businessCheck.tsx` pins the band rule and the wording.
+- **Never part of the asset.** Like topic suggestions and competitor sources it is appended at read
+  and export time and never written into `message.text`, so the Context Store and the next stage
+  read only what the stage wrote. A standalone HTML page export does not get it.
+- **It is not the asset's score.** `assetGlance` skips the section, otherwise an asset with no score of
+  its own (a funnel, a lead magnet) would open on the check's scores as if they were its own.
+- **Only a finished check.** A running or failed check, or none, adds nothing.
+- **Phase 2's ICP is not checked at all.** It is built for one sub-service's buyer, with no
+  business-side document yet to hold it against. `checkAppliesTo` (`lib/businessCheck.ts`) is the
+  one rule: the store does not run the check (no request, no cost), the card shows no panel, and a
+  report stored on an older card never reaches the file. The route refuses with a 422 as well
+  (`asset_check.NO_CHECK`), so a stale client cannot spend a judge call. Keep the two lists in step.
 
 ## Running a stage out of order
 

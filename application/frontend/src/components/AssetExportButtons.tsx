@@ -15,6 +15,20 @@ function DownloadIcon() {
   );
 }
 
+function ReportIcon() {
+  return (
+    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" aria-hidden>
+      <path
+        d="M7 3h7l5 5v12a1 1 0 01-1 1H7a1 1 0 01-1-1V4a1 1 0 011-1zm7 0v5h5M9 13h6M9 17h4"
+        stroke="currentColor"
+        strokeWidth="1.9"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
 function ShareIcon() {
   return (
     <svg width="13" height="13" viewBox="0 0 24 24" fill="none" aria-hidden>
@@ -58,14 +72,27 @@ function QuietButton({
  * Deliberately available before *and* after the asset is saved. Saving files it to the Context
  * Store for the next stage to read, which is a different job from getting it out to a client — and
  * an operator who wants the file is just as likely to want it from an approved asset as a draft. */
-export function AssetExportButtons({ text, label, stageNumber, preamble, assetId }: AssetExportTarget) {
-  const { download, share, downloadFlash, shareFlash } = useAssetExport({ text, label, stageNumber, preamble, assetId });
+export function AssetExportButtons({ text, label, stageNumber, preamble, assetId, appendix }: AssetExportTarget) {
+  const { download, share, downloadReport, canReport, downloadFlash, shareFlash, reportFlash } = useAssetExport({
+    text,
+    label,
+    stageNumber,
+    preamble,
+    assetId,
+    appendix,
+  });
 
   return (
     <>
+      {canReport && (
+        <QuietButton onClick={downloadReport} label={`Download ${label} as a designed HTML report`}>
+          <ReportIcon />
+          {reportFlash ?? "Report (.html)"}
+        </QuietButton>
+      )}
       <QuietButton onClick={download} label={`Download ${label}`}>
         <DownloadIcon />
-        {downloadFlash ?? "Download"}
+        {downloadFlash ?? "Markdown"}
       </QuietButton>
       <QuietButton onClick={share} label={`Share ${label}`}>
         <ShareIcon />
@@ -87,12 +114,31 @@ export function AssetExportMenuItems({
   stageNumber,
   preamble,
   assetId,
+  appendix,
   onDone,
 }: AssetExportTarget & { onDone?: () => void }) {
-  const { download, share, downloadFlash, shareFlash } = useAssetExport({ text, label, stageNumber, preamble, assetId });
+  const { download, share, downloadReport, canReport, downloadFlash, shareFlash, reportFlash } = useAssetExport({
+    text,
+    label,
+    stageNumber,
+    preamble,
+    assetId,
+    appendix,
+  });
 
   return (
     <>
+      {canReport && (
+        <button
+          type="button"
+          role="menuitem"
+          onClick={downloadReport}
+          className="flex w-full cursor-pointer items-center gap-2 rounded-lg px-2.5 py-2 text-left text-[0.8rem] font-medium hover:bg-[var(--hover)]"
+        >
+          <ReportIcon />
+          {reportFlash ?? "Download report (.html)"}
+        </button>
+      )}
       <button
         type="button"
         role="menuitem"

@@ -65,7 +65,7 @@ def _resolve_handle(platform: str, raw: str) -> str:
     """
     raw = raw.strip()
     if platform == "instagram":
-        return raw.lstrip("@")
+        return sociavault_client.instagram_username(raw)
     if raw.startswith("http://") or raw.startswith("https://") or raw.isdigit():
         return raw
     path = raw.lstrip("/")
@@ -145,7 +145,9 @@ async def resolve_competitor_handles(domain: str) -> tuple[SocialAccount, ...]:
         except context_dev.ContextDevError as exc:
             logger.info("Competitor handle resolution: context.dev failed for %r: %s", domain, exc)
 
-    return tuple(SocialAccount(platform=platform, handle=handle) for platform, handle in links.items())
+    # Read off the competitor's own site, so these are profile URLs. Instagram's endpoint wants a
+    # bare username and 400s on a URL; Facebook and LinkedIn take the URL as it is.
+    return tuple(SocialAccount(platform=platform, handle=_resolve_handle(platform, handle)) for platform, handle in links.items())
 
 
 async def fetch_account_snapshot(

@@ -13,6 +13,7 @@ normally that prompt's Part 2 output, but this prompt also runs standalone on an
 - Client Website URL: `[YOUR ANSWER]`
 - Reference Design Source: `[UPLOAD / URL / SCREENSHOT of the page whose visual design to replicate]`
 - Reference Design Scope: `[FULL SITE STYLE / THIS ONE PAGE ONLY / A DIFFERENT PAGE ON THE SAME SITE]`
+- Services / Sub-Services to Cover (optional): `[LIST — one per line, with each service's existing page URL where it has one / NONE]`
 - Improved Page Content: `[UPLOAD OR PASTE — the full rewritten page copy. If a CRO audit or mode-resolution table is included, ignore it. Design the final page copy only.]`
 - Page Architecture / Section Order: `[LIST ALL SECTIONS IN ORDER, or write "USE CONTENT ORDER" to follow the content file's own structure, or "USE DEFAULT" for the 13-section universal architecture]`
 - New Sections to Add (optional): `[LIST / NONE]`
@@ -52,6 +53,39 @@ industry-specific; all industry vocabulary comes from the terminology map and th
 
 ---
 
+## SERVICES TO COVER, AND A REFERENCE PAGE THAT DOES NOT EXIST
+
+**Services / Sub-Services to Cover.** When this input lists services (or sub-services), the page is
+**one combined pillar page covering every one of them**: each listed service gets its own clearly
+headed section, in the order listed, and links to that service's existing page where a URL is given.
+The copy for each section comes from, in this order:
+
+1. **The Improved Page Content**, wherever it already covers that service. It always wins.
+2. **The SOURCE CONTENT block** appended to this input, for a listed service the Improved Page
+   Content does not cover. That block is the text of the service's own existing page on the
+   client's site. Write the section from it: restate and tighten what it says, in the terminology
+   map's words and the content file's voice. Use only facts the block states. Never add a claim,
+   figure, rate, price, guarantee, credential or testimonial it does not contain.
+3. **A service with no source content** (one the operator typed, or whose page could not be read)
+   gets a short section limited to what the Improved Page Content and the other sources already
+   establish, with `[CLIENT TO CONFIRM: details for this service]` where specifics belong. Never
+   invent them.
+
+This is the one exception to "all vocabulary comes from the content file": the source content is
+the client's own published copy, so writing from it is still not inventing. In the delivery notes,
+list which sections were written from source content and which carry a `[CLIENT TO CONFIRM]` gap,
+so they can be reviewed before publishing. When this input is blank or NONE, the page covers what
+the Improved Page Content covers, exactly as before.
+
+**No reference page.** When Reference Design Source begins `NO REFERENCE PAGE`, the page being built
+does not exist yet and the URL given is the client's main landing page. Take the **brand design
+system** from it: palette, typography, buttons, cards, spacing, header, footer and logo. Do **not**
+copy the landing page's section sequence. A home page is not a pillar page, so build the section
+order from the Page Architecture input (or the default architecture), using the landing page's
+components to render each section. Treat Reference Design Scope as FULL SITE STYLE.
+
+---
+
 ## STEP 0 — MODE RESOLUTION (output this first, before any design work)
 
 State in a short table:
@@ -65,6 +99,10 @@ State in a short table:
 5. The resolved terminology (reader, offer unit, commitment step) that headings and labels will use
 6. The final section list this page will build, after reconciling the Page Architecture input
    with what's actually present in the Improved Page Content
+7. **Services to cover** — the sub-services listed in Services / Sub-Services to Cover (or "none
+   listed"), which of them the Improved Page Content covers, which will be written from their
+   SOURCE CONTENT, and which carry a `[CLIENT TO CONFIRM]` gap. Also state whether this is a
+   NO REFERENCE PAGE run, and if so that only the landing page's design system is being used.
 
 Do not proceed until this table is stated.
 

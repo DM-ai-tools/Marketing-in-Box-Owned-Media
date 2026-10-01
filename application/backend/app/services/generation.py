@@ -164,12 +164,16 @@ STAGE_CONFIGS: dict[str, StageConfig] = {
         SONNET,
         40000,
     ),
+    # 64k, not the 10k this started at: the deliverable is one workbook per account (the client plus
+    # up to five competitors) and a narrative, and thinking bills against the same ceiling. At 10k,
+    # 4 of its last 7 generations stopped at `max_tokens` mid-document, and each was handed to the
+    # business check and to Refine as if complete. The cap costs nothing when unused (see above).
     "social_content_strategy_audit": StageConfig(
         "social_content_strategy_audit",
         "Social-Content-Strategy-Audit-Architect-Prompt.md",
         "social_content_strategy_audit.json",
         SONNET,
-        10000,
+        64000,
     ),
     # 128k, same reason as `lead_magnet` and `blog` above: the deliverable went plural. The operator
     # picks topics at the suggestion gate (`webinar_topic` in `app/services/headlines.py`) — around
@@ -964,19 +968,39 @@ def _stream_kwargs(
     return kwargs
 
 
-def build_revision_prompt(previous_draft: str, note: str, voice: IndustryProfile | None = None) -> str:
+def build_revision_prompt(
+    previous_draft: str,
+    note: str,
+    voice: IndustryProfile | None = None,
+    business_facts: str | None = None,
+) -> str:
     """A deliberately different, much smaller prompt for the "Refine / Request Changes" path:
     hands Claude the exact previous draft plus the operator's requested change, rather than
     re-running the entire master prompt from scratch (which would ignore the previous output
     and likely produce a different document, not a revision of the one being reviewed).
 
     The industry voice block still leads it: a revision written without it drifts back to the
-    pipeline's default voice on exactly the paragraphs the operator asked to change."""
+    pipeline's default voice on exactly the paragraphs the operator asked to change.
+
+    `business_facts` is set when the note is a set of findings from the business check. Those
+    findings say a price is off the ladder or an offer does not exist; without the facts they were
+    checked against, the only fixes available are guessing a price or deleting the line."""
+    facts = (
+        "----- THE CLIENT'S BUSINESS (the only source of truth) -----\n"
+        f"{business_facts.strip()}\n"
+        "----- END THE CLIENT'S BUSINESS -----\n\n"
+        "When a requested fix needs an offer, a price, a claim or a word, take it from the client's "
+        "business above. If what is needed is not on record there, remove or soften the statement "
+        "rather than inventing a replacement.\n\n"
+        if business_facts and business_facts.strip()
+        else ""
+    )
     return voice_block(voice) + (
         "You previously produced the following document:\n\n"
         "----- PREVIOUS DRAFT -----\n"
         f"{previous_draft}\n"
         "----- END PREVIOUS DRAFT -----\n\n"
+        f"{facts}"
         "The operator reviewed this draft and requested the following change:\n"
         f'"{note.strip()}"\n\n'
         "Apply the requested change and return the FULL revised document in the same format and "
@@ -1061,12 +1085,13 @@ async def generate_revision_stream(
     phase: str = DEFAULT_PHASE,
     on_usage: OnUsage | None = None,
     voice: IndustryProfile | None = None,
+    business_facts: str | None = None,
 ) -> AsyncIterator[str]:
     """Stream a revision of `previous_draft` per the operator's `note`, using the same model
     tier as the stage's original generation."""
     cfg = _config(asset_id, phase)
     client = get_client()
-    prompt = build_revision_prompt(previous_draft, note, voice)
+    prompt = build_revision_prompt(previous_draft, note, voice, business_facts)
 
     logger.info("Streaming revision stage=%s model=%s effort=%s", asset_id, cfg.model, cfg.effort)
     started = time.monotonic()

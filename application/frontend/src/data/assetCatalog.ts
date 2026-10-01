@@ -549,6 +549,12 @@ export const ASSET_CATALOG: AssetDefinition[] = [
             "How much of the reference to take: its whole design system, only that one page's layout, or a different page on the same site.",
         },
       ),
+      txt("services_covered", "Services / Sub-Services to Cover", {
+        required: false,
+        helpText:
+          "Picked from the services the reference page links to, plus any you type. One combined pillar page covers them all; each one's existing page is read for its section's content.",
+        placeholder: "e.g. Commercial Loans, Asset Finance, Property Development Finance",
+      }),
       ctx("improved_page_content", "Improved Page Content", "cro_rewritten_copy"),
       ctx("cro_locked_sections", "Locked Sections (from CRO)", "cro_locked_sections"),
       txt("page_architecture_section_order", "Page Architecture / Section Order", { default: "USE DEFAULT" }),

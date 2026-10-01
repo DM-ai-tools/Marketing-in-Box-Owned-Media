@@ -59,6 +59,12 @@ interface UiState {
    * client. */
   hintsOn: boolean;
   workTab: WorkTab;
+  /** A transcript message the pipeline diagram asked to be brought into view, or null.
+   *
+   * A request rather than a scroll position: the diagram and the transcript are sibling panes, and
+   * only the transcript knows where its cards are. `nonce` makes a second click on the same stage
+   * scroll again after the operator has scrolled away. */
+  transcriptFocus: { messageId: string; nonce: number } | null;
   /** Replaces the transcript with a self-contained sample one.
    *
    * Deliberately *not* remembered: it is a look at the interface, not a way of working, and a
@@ -89,6 +95,7 @@ interface UiState {
   setHints: (on: boolean) => void;
   toggleHints: () => void;
   setWorkTab: (tab: WorkTab) => void;
+  focusTranscriptMessage: (messageId: string) => void;
   toggleDemoMode: () => void;
   askDeleteChat: (target: { id: string; title: string }) => void;
   cancelDeleteChat: () => void;
@@ -109,6 +116,7 @@ export const useUiStore = create<UiState>((set) => ({
   readerView: readPref<ReaderView>("readerView", ["visual", "text"], "visual"),
   hintsOn: readFlag("hints", true),
   workTab: "transcript",
+  transcriptFocus: null,
   demoMode: false,
   pendingChatDelete: null,
   openSidebar: () => set({ sidebarOpen: true }),
@@ -145,6 +153,14 @@ export const useUiStore = create<UiState>((set) => ({
     return { hintsOn: !s.hintsOn };
   }),
   setWorkTab: (workTab) => set({ workTab }),
+  // Onto the transcript tab and, below `lg`, onto the chat pane: the card being asked for is on
+  // neither the Deliverables grid nor the diagram the click came from.
+  focusTranscriptMessage: (messageId) =>
+    set((s) => ({
+      transcriptFocus: { messageId, nonce: (s.transcriptFocus?.nonce ?? 0) + 1 },
+      workTab: "transcript",
+      mobilePane: "chat",
+    })),
   // Closes the reader with it: the reader is pointed at a real message id, and a sample transcript
   // behind an open sheet showing a real document reads as the two being related.
   toggleDemoMode: () => set((s) => ({ demoMode: !s.demoMode, readerMessageId: null })),

@@ -26,6 +26,8 @@
   --color-electric-blue: #0b5fff;
   --color-signal-orange: #ff6a00;
   --color-signal-green: #16a34a;
+  /* "Partial" in a score or status — between the green and the orange. */
+  --color-signal-amber: #d9a400;
 
   --electric-blue-fg: #ffffff;
   --signal-orange-fg: #ffffff;
@@ -323,6 +325,39 @@ body {
   .skeleton-line {
     animation: none !important;
   }
+}
+
+/* The business check's scan (`AssetCheckPanel`): a beam sweeping an outline of the draft, an
+   indeterminate bar, the current step pulsing and a line of the outline being "read". Motion is
+   decoration here — the step list says in words what is happening — so it simply stops when motion
+   is reduced. */
+@keyframes bc-sweep {
+  0% { transform: translateY(-40px); }
+  100% { transform: translateY(170px); }
+}
+@keyframes bc-slide {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(270%); }
+}
+@keyframes bc-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--color-electric-blue) 45%, transparent); }
+  50% { box-shadow: 0 0 0 6px transparent; }
+}
+@keyframes bc-read {
+  0%, 100% { background-color: var(--border); }
+  50% { background-color: color-mix(in srgb, var(--color-electric-blue) 25%, var(--bg-sunken)); }
+}
+.bc-beam { animation: bc-sweep 1.8s cubic-bezier(0.45, 0, 0.55, 1) infinite alternate; }
+.bc-bar { animation: bc-slide 1.4s ease-in-out infinite; }
+.bc-pulse { animation: bc-pulse 1.2s ease-out infinite; }
+.bc-read { animation: bc-read 1.8s ease-in-out infinite; }
+.bc-spin { animation: icon-rotate 0.9s linear infinite; }
+
+@media (prefers-reduced-motion: reduce) {
+  .bc-beam, .bc-bar, .bc-pulse, .bc-read, .bc-spin {
+    animation: none !important;
+  }
+  .bc-beam { display: none; }
 }
 
 /* With motion off, the skeleton must still read as "pending" rather than as empty rows that look

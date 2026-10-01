@@ -1,4 +1,4 @@
-import { Fragment, useMemo } from "react";
+import { createContext, Fragment, useContext, useMemo } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { Markdown } from "../../components/Markdown";
@@ -8,12 +8,16 @@ import {
   parseVisualBlocks,
   plainCell,
   scoreOf,
+  type FieldRow,
+  type FindingItem,
   type OfferItem,
   type ScoreValue,
   type SequenceStep,
   type ShowSlot,
+  type Tone,
   type VisualBlock,
 } from "../../lib/visualBlocks";
+import { ratioTone as tone, toneColor } from "./tone";
 
 /* The reader's Visual view. Every component here draws one block from `lib/visualBlocks.ts` and
  * renders **every word of its source** — the bar next to "6/10" is added, never substituted for it,
@@ -24,6 +28,18 @@ import {
 // --------------------------------------------------------------------------------------
 // Primitives
 // --------------------------------------------------------------------------------------
+
+/** How the blocks are being drawn: set by the asset's template (`lib/assetTemplates.ts`) and by the
+ * HTML report, which has no JavaScript and no app around it. */
+export interface VisualOptions {
+  /** Long-form reading (a blog, a book): prose is shown in full rather than folded. */
+  expandProse: boolean;
+  /** A standalone file: HTML page blocks are embedded as a sandboxed frame plus their source,
+   * rather than through the app's interactive preview. */
+  staticHtml: boolean;
+}
+
+export const VisualOptionsContext = createContext<VisualOptions>({ expandProse: false, staticHtml: false });
 
 /** One cell or title of Markdown, rendered inline — bold, code and links kept, no paragraph box. */
 export function Inline({ text }: { text: string }) {
@@ -40,11 +56,6 @@ export function Inline({ text }: { text: string }) {
   );
 }
 
-function tone(ratio: number): string {
-  if (ratio >= 0.75) return "var(--color-signal-green)";
-  if (ratio >= 0.5) return "var(--color-electric-blue)";
-  return "var(--color-signal-orange)";
-}
 
 /** A score's picture: a bar for "6/10", pips for stars, a heat chip for HIGH/MED/LOW. The cell's own
  * text is rendered beside it by the caller. */
@@ -61,7 +72,7 @@ function ScoreMark({ score }: { score: ScoreValue }) {
     const bg = ["var(--bg-sunken)", "color-mix(in srgb, var(--color-electric-blue) 18%, transparent)", "color-mix(in srgb, var(--color-electric-blue) 40%, transparent)", "var(--color-electric-blue)"][score.level];
     return <span className="mr-1.5 inline-block h-2.5 w-2.5 rounded-sm align-middle" style={{ backgroundColor: bg }} aria-hidden />;
   }
-  const color = score.state === "yes" ? "var(--color-signal-green)" : score.state === "partial" ? "#d9a400" : "var(--color-signal-orange)";
+  const color = score.state === "yes" ? "var(--color-signal-green)" : score.state === "partial" ? "var(--color-signal-amber)" : "var(--color-signal-orange)";
   return <span className="mr-1 inline-block h-2 w-2 rounded-full align-middle" style={{ backgroundColor: color }} aria-hidden />;
 }
 
@@ -341,9 +352,40 @@ function TableView({ block }: { block: TableBlock }) {
     case "kpi":
       return <KpiTiles block={block} />;
     default:
-      // A table with no recognisable shape is still a table — rendered exactly as the text view does.
-      return <Markdown text={block.source} />;
+      return <DataTable block={block} />;
   }
+}
+
+/** A table with no recognisable shape: still a table, with a banded body and the first column
+ * carrying the row's name. */
+function DataTable({ block }: { block: TableBlock }) {
+  const { headers, rows } = block.table;
+  return (
+    <div className="md-scroll my-3 rounded-xl border border-[var(--border)]">
+      <table className="w-full border-collapse text-[0.82rem]">
+        <thead className="bg-[var(--bg-sunken)]">
+          <tr>
+            {headers.map((h, i) => (
+              <th key={i} className="border-b border-[var(--border-strong)] px-3 py-2 text-left align-bottom text-[0.72rem] font-semibold uppercase tracking-wide text-[var(--fg-muted)]">
+                <Inline text={h} />
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((r, ri) => (
+            <tr key={ri} className="even:bg-[var(--bg-sunken)]">
+              {r.map((cell, ci) => (
+                <td key={ci} className={`border-b border-[var(--border)] px-3 py-2 align-top ${ci === 0 ? "font-semibold" : ""}`}>
+                  <Inline text={cell} />
+                </td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
 }
 
 // --------------------------------------------------------------------------------------
@@ -476,6 +518,139 @@ function RunOfShow({ slots }: { slots: ShowSlot[] }) {
   );
 }
 
+function ToneDot({ tone: t }: { tone: Tone }) {
+  if (t === "neutral") return null;
+  return <span className="mr-1.5 inline-block h-2 w-2 shrink-0 rounded-full align-middle" style={{ backgroundColor: toneColor(t) }} aria-hidden />;
+}
+
+/** `**Key:** value` rows as a definition grid: labels in a column, values beside them. */
+function FieldGrid({ rows }: { rows: FieldRow[] }) {
+  return (
+    <dl className="my-3 grid grid-cols-1 overflow-hidden rounded-xl border border-[var(--border)] sm:grid-cols-[minmax(8rem,15rem)_1fr]">
+      {rows.map((row, i) => (
+        <Fragment key={i}>
+          <dt className={`bg-[var(--bg-sunken)] px-3 pt-2 text-[0.74rem] font-semibold text-[var(--fg-muted)] sm:py-2 ${i > 0 ? "border-t border-[var(--border)]" : ""}`}>
+            {/* The document's own separator, kept: "(Section 10):" is not "(Section 10)". */}
+            <Inline text={`${row.key}:`} />
+          </dt>
+          <dd className={`m-0 min-w-0 break-words px-3 pb-2 pt-0.5 text-[0.84rem] leading-snug sm:py-2 ${i > 0 ? "sm:border-t sm:border-[var(--border)]" : ""}`}>
+            <Inline text={row.value} />
+            {row.extra && (
+              <div className="mt-1 text-[0.8rem]">
+                <Markdown text={row.extra} />
+              </div>
+            )}
+          </dd>
+        </Fragment>
+      ))}
+    </dl>
+  );
+}
+
+/** Numbered findings as cards: the number, the lead as a title, the evidence under it. */
+function Findings({ items }: { items: FindingItem[] }) {
+  return (
+    <ol className="my-3 space-y-2">
+      {items.map((item, i) => (
+        <li
+          key={i}
+          className="flex gap-3 rounded-xl border border-l-4 border-[var(--border)] bg-[var(--bg-raised)] px-3 py-2.5"
+          style={{ borderLeftColor: toneColor(item.tone) }}
+        >
+          <span className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-[var(--bg-sunken)] text-[0.72rem] font-semibold tabular-nums text-[var(--fg-muted)]">
+            {item.number}
+          </span>
+          <div className="min-w-0 flex-1 text-[0.84rem] leading-snug">
+            <div className="font-medium">
+              <Inline text={item.lead} />
+            </div>
+            {item.body && (
+              <div className="mt-1 text-[0.82rem] text-[var(--fg-muted)]">
+                <Markdown text={item.body} />
+              </div>
+            )}
+          </div>
+        </li>
+      ))}
+    </ol>
+  );
+}
+
+function ScoredHeading({ level, text, value, max }: { level: number; text: string; value: number; max: number }) {
+  const Tag = `h${Math.min(6, Math.max(3, level))}` as "h3";
+  const ratio = max ? Math.max(0, Math.min(1, value / max)) : 0;
+  return (
+    <div className="mb-2 mt-5">
+      <Tag className="text-[0.95rem] font-semibold">
+        <Inline text={text} />
+      </Tag>
+      <span className="mt-1 block h-1.5 w-full max-w-[18rem] overflow-hidden rounded-full bg-[var(--bg-sunken)]" aria-hidden>
+        <span className="block h-full rounded-full" style={{ width: `${ratio * 100}%`, backgroundColor: tone(ratio) }} />
+      </span>
+    </div>
+  );
+}
+
+function Checklist({ title, body, tone: t }: { title: string; body: string; tone: Tone }) {
+  return (
+    <div className="my-3 rounded-xl border border-t-4 border-[var(--border)] bg-[var(--bg-raised)] px-3 py-2.5" style={{ borderTopColor: toneColor(t) }}>
+      <div className="flex items-center text-[0.84rem] font-semibold">
+        <ToneDot tone={t} />
+        <Inline text={title} />
+      </div>
+      <div className="mt-1 text-[0.82rem]">
+        <Markdown text={body} />
+      </div>
+    </div>
+  );
+}
+
+function Quotes({ items }: { items: string[] }) {
+  return (
+    <ul className="my-3 grid gap-2" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(16rem, 1fr))" }}>
+      {items.map((q, i) => (
+        <li key={i} className="rounded-xl border-l-4 bg-[var(--bg-sunken)] px-3 py-2 text-[0.84rem] italic leading-snug" style={{ borderLeftColor: "var(--color-electric-blue)" }}>
+          <Inline text={q} />
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+/** Long prose: the opening paragraph in full, the rest one click away. Still in the DOM, so the
+ * browser's find, print and a screen reader all reach it. */
+function Prose({ lead, rest, restWords }: { lead: string; rest: string; restWords: number }) {
+  const { expandProse } = useContext(VisualOptionsContext);
+  if (expandProse) {
+    return (
+      <div className="my-2">
+        <Markdown text={lead} />
+        <Markdown text={rest} />
+      </div>
+    );
+  }
+  return (
+    <div className="my-2">
+      <Markdown text={lead} />
+      <details className="group mt-1">
+        <summary className="cursor-pointer list-none text-[0.78rem] font-semibold text-[var(--color-electric-blue)] group-open:mb-2">
+          <span className="group-open:hidden">Continue reading · {restWords.toLocaleString("en-US")} more words</span>
+          <span className="hidden group-open:inline">Show less</span>
+        </summary>
+        <Markdown text={rest} />
+      </details>
+    </div>
+  );
+}
+
+function Diagram({ code }: { code: string }) {
+  return (
+    <pre className="md-scroll my-3 overflow-x-auto rounded-xl border border-[var(--border)] bg-[var(--bg-sunken)] p-3 font-mono text-[0.76rem] leading-snug">
+      {code}
+    </pre>
+  );
+}
+
 // --------------------------------------------------------------------------------------
 // A block, and a section
 // --------------------------------------------------------------------------------------
@@ -500,12 +675,27 @@ export function VisualBlockView({ block }: { block: VisualBlock }) {
       return <Sequence steps={block.steps} />;
     case "runOfShow":
       return <RunOfShow slots={block.slots} />;
+    case "fields":
+      return <FieldGrid rows={block.rows} />;
+    case "findings":
+      return <Findings items={block.items} />;
+    case "scoredHeading":
+      return <ScoredHeading level={block.level} text={block.text} value={block.value} max={block.max} />;
+    case "checklist":
+      return <Checklist title={block.title} body={block.body} tone={block.tone} />;
+    case "quotes":
+      return <Quotes items={block.items} />;
+    case "prose":
+      return <Prose lead={block.lead} rest={block.rest} restWords={block.restWords} />;
+    case "diagram":
+      return <Diagram code={block.code} />;
   }
 }
 
 /** A section in the Visual view: HTML blocks exactly as the text view renders them, everything else
  * split into visual blocks. */
 export function VisualSectionBody({ body, label }: { body: string; label: string }) {
+  const { staticHtml } = useContext(VisualOptionsContext);
   const segments = useMemo(
     () => splitHtmlBlocks(body).map((s) => (s.kind === "html" ? s : { ...s, blocks: parseVisualBlocks(s.text) })),
     [body],
@@ -514,7 +704,11 @@ export function VisualSectionBody({ body, label }: { body: string; label: string
     <>
       {segments.map((segment, i) =>
         segment.kind === "html" ? (
-          <HtmlPreview key={i} html={segment.html} label={label} />
+          staticHtml ? (
+            <StaticHtmlBlock key={i} html={segment.html} label={label} />
+          ) : (
+            <HtmlPreview key={i} html={segment.html} label={label} />
+          )
         ) : (
           <Fragment key={i}>
             {"blocks" in segment && segment.blocks.map((b, bi) => <VisualBlockView key={bi} block={b} />)}
@@ -522,5 +716,28 @@ export function VisualSectionBody({ body, label }: { body: string; label: string
         ),
       )}
     </>
+  );
+}
+
+/** A generated page inside the HTML report: shown in a sandboxed frame (no scripts reach the report),
+ * with the page's own source one click below it, so the file carries the page as well as a picture
+ * of it. */
+function StaticHtmlBlock({ html, label }: { html: string; label: string }) {
+  return (
+    <figure className="my-4">
+      <iframe
+        title={label}
+        srcDoc={html}
+        sandbox=""
+        loading="lazy"
+        className="h-[40rem] w-full rounded-xl border border-[var(--border)] bg-white"
+      />
+      <details className="mt-2">
+        <summary className="cursor-pointer text-[0.78rem] font-semibold text-[var(--color-electric-blue)]">Page source (HTML)</summary>
+        <pre className="md-scroll mt-2 max-h-[30rem] overflow-auto rounded-xl border border-[var(--border)] bg-[var(--bg-sunken)] p-3 font-mono text-[0.72rem]">
+          {html}
+        </pre>
+      </details>
+    </figure>
   );
 }

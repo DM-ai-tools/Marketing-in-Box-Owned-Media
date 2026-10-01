@@ -9,6 +9,7 @@
  *   - a check that fails says so and offers a retry, and a failed or truncated draft is not checked.
  */
 import { renderToStaticMarkup } from "react-dom/server";
+import { AssetCheckPanel } from "../src/pipeline/AssetCheckPanel";
 import { GenerationStream } from "../src/pipeline/GenerationStream";
 import type { AssetCheckReport } from "../src/pipeline/pipelineApi";
 import { composeFixNote, usePipelineStore, type PipelineMessage } from "../src/pipeline/pipelineStore";
@@ -163,6 +164,24 @@ async function main() {
   await usePipelineStore.getState().retryGeneration("g3");
   await flush();
   ok("nothing is checked without a finished draft", !calls.some((c) => c.url.includes("/check/")));
+
+  // ---------- the scan, while the check runs ----------
+  const scanning = renderToStaticMarkup(
+    <AssetCheckPanel message={{ ...failedDraft, id: "g4", text: "Draft", generationError: undefined, check: { status: "running" } }} />,
+  );
+  ok("a running check shows the scan, marked busy", scanning.includes('aria-busy="true"') && scanning.includes("scanning this draft"));
+  ok("the scan animates (beam, bar, current step)", ["bc-beam", "bc-bar", "bc-pulse"].every((c) => scanning.includes(c)));
+  ok("the scan says what runs, in words", scanning.includes("Rule checks") && scanning.includes("Predicting virality") && scanning.includes("in progress"));
+  ok("the scan says approval is not blocked", scanning.includes("never blocks"));
+
+  // ---------- the results explain their scores ----------
+  const results = renderToStaticMarkup(
+    <AssetCheckPanel message={{ ...failedDraft, id: "g5", text: "Draft", generationError: undefined, check: { status: "done", report: REPORT } }} />,
+  );
+  ok("each score says what it measures", results.includes("Are its claims, prices, testimonials and wording allowed"));
+  ok("scores are banded, in words", results.includes("80–100 Good") && results.includes("At risk"));
+  ok("an error is labelled must fix", results.includes("Must fix"));
+  ok("fixing is explained before the click", results.includes("Sends a note") && results.includes("Checks it again"));
 
   console.log(`check: ${pass} passed, ${fails.length} failed`);
   for (const f of fails) console.log(`  FAIL ${f}`);

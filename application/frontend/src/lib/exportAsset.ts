@@ -1,4 +1,5 @@
 import { splitHtmlBlocks } from "./htmlBlocks";
+import { stripPromptEchoes } from "./promptEcho";
 import { withTopicSuggestions } from "./topicSuggestions";
 
 /** Taking a generated asset out of the app — as a file on disk, or through the OS share sheet.
@@ -38,8 +39,11 @@ export function buildAssetExport(opts: {
   preamble?: string;
   /** Decides where the preamble goes — see `withTopicSuggestions`. */
   assetId?: string;
+  /** Markdown put after the asset in a `.md` export — the competitors it was benchmarked on (see
+   * `lib/competitorSources.ts`). Never added to an `.html` export, for the same reason as `preamble`. */
+  appendix?: string;
 }): AssetExport {
-  const text = opts.text;
+  const text = stripPromptEchoes(opts.text);
   const segments = splitHtmlBlocks(text);
   const only = segments.length === 1 ? segments[0] : undefined;
 
@@ -48,7 +52,11 @@ export function buildAssetExport(opts: {
 
   return only?.kind === "html"
     ? { filename: `${base}.html`, mime: "text/html", content: only.html }
-    : { filename: `${base}.md`, mime: "text/markdown", content: withTopicSuggestions(text, opts.preamble ?? "", opts.assetId) };
+    : {
+        filename: `${base}.md`,
+        mime: "text/markdown",
+        content: withTopicSuggestions(text, opts.preamble ?? "", opts.assetId) + (opts.appendix ?? ""),
+      };
 }
 
 export function downloadExport(exported: AssetExport): void {

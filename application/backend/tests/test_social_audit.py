@@ -32,7 +32,8 @@ def test_parse_account_handles_accepts_full_urls_and_numeric_facebook_ids():
 
     assert accounts == (
         social_audit.SocialAccount(platform="facebook", handle="100063669491743"),
-        social_audit.SocialAccount(platform="instagram", handle="https://instagram.com/acme"),
+        # A pasted profile URL is reduced to the username: the Instagram endpoint 400s on a URL.
+        social_audit.SocialAccount(platform="instagram", handle="acme"),
     )
 
 
@@ -184,7 +185,8 @@ async def test_resolve_competitor_handles_falls_back_to_context_dev_for_the_gap(
     # Facebook is Firecrawl's own find and must not be overridden by Context.dev's.
     assert by_platform["facebook"] == "https://facebook.com/acme"
     assert by_platform["linkedin"] == "https://linkedin.com/company/acme"
-    assert by_platform["instagram"] == "https://instagram.com/acme"
+    # Reduced to the bare username: the Instagram endpoint 400s on a profile URL.
+    assert by_platform["instagram"] == "acme"
 
 
 @pytest.mark.asyncio

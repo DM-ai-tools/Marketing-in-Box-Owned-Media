@@ -398,6 +398,9 @@ SERVICE_FIELD_BY_ASSET: dict[str, str] = {
     "funnel": "target_service_if_different_from_pillar_page",
     "funnel_hub_media": "service_or_product_line_being_funnel_mapped",
     "content_marketing_strategy": "primary_service_pillar_page_being_supported",
+    # The services the operator picked for the page (`service_scan.py`), so the head-term
+    # suggestions are about what this page covers rather than the run's headline service.
+    "pillar_page": "services_covered",
 }
 
 # Run-level facts, in preference order per phase. `target_service` is written by the frontend from
@@ -447,7 +450,13 @@ def resolve_service_anchor(
 
     service_field = SERVICE_FIELD_BY_ASSET.get(asset_id)
     if service_field:
-        own = _usable(answers.get(service_field))
+        raw = answers.get(service_field)
+        if service_field == "services_covered":
+            # A list with URLs and the card's own formatting; the names are the anchor.
+            from app.services.service_scan import anchor_text
+
+            raw = anchor_text(raw or "")
+        own = _usable(raw)
         if own:
             return own, f"this stage's {service_field}"
 

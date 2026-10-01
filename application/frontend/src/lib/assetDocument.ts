@@ -37,6 +37,8 @@
  */
 
 import { splitHtmlBlocks } from "./htmlBlocks";
+import { BUSINESS_CHECK_LABEL, isBusinessCheckHeading } from "./businessCheck";
+import { COMPETITOR_SOURCES_LABEL, isCompetitorSourcesHeading } from "./competitorSources";
 import { isTopicSuggestionsHeading, TOPIC_SUGGESTIONS_LABEL } from "./topicSuggestions";
 
 export type SectionKind = "prose" | "table" | "html";
@@ -292,7 +294,17 @@ export function parseAssetDocument(text: string | undefined | null): AssetDocume
   // under whichever rule won. Added only after the rule was chosen on the document's own headings,
   // so inserting it can never change how the stage's output is split.
   const rule = RULES.find((r) => r.name === chosen.name)!;
-  chosen.boundaries = scan(lines, (line) => (isTopicSuggestionsHeading(line) ? TOPIC_SUGGESTIONS_LABEL : rule.match(line)));
+  // The competitor-sources appendix (`lib/competitorSources.ts`) and the business-check appendix
+  // (`lib/businessCheck.ts`) are treated the same way.
+  chosen.boundaries = scan(lines, (line) =>
+    isTopicSuggestionsHeading(line)
+      ? TOPIC_SUGGESTIONS_LABEL
+      : isCompetitorSourcesHeading(line)
+        ? COMPETITOR_SOURCES_LABEL
+        : isBusinessCheckHeading(line)
+          ? BUSINESS_CHECK_LABEL
+          : rule.match(line),
+  );
 
   const sections: DocSection[] = [];
 
