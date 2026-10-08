@@ -48,6 +48,11 @@ export interface FieldDef {
    * Not a general substitute for `context_key`: an input that means one document should read one
    * key, so that the operator's "use my own instead" replaces something specific. */
   context_keys?: string[];
+  /** With `context_keys`: send each gathered document as an excerpt of at most this many characters
+   * instead of in full. For an input that asks *which* assets exist rather than what they say —
+   * Plan of Action's "Existing Phase 1 Assets" gathers up to thirteen approved documents, and the
+   * pillar page alone is a whole HTML file. Unset, documents are passed whole. */
+  context_excerpt_chars?: number;
   sub_key?: string;
   fallback?: ContextFallback;
   /** ask only if this condition holds against previously-collected answers for this asset */

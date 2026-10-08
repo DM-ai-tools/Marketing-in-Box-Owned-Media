@@ -19,6 +19,10 @@ colours is exactly how this pipeline used to produce photorealistic images of th
 (see its own docstring, and `image_briefs.py`). It runs once per run, alongside the brand-token
 capture, whenever Firecrawl is configured and image generation is about to happen.
 
+**`scrape_links`** is Stage 10's: a competitor's page links, for `social_audit.
+resolve_competitor_handles` to find social profiles in when the free direct read of that page found
+none. See its own docstring for why it is a links scrape and not an `/extract`.
+
 What this module returns
 -------------------------
 `extract_brand_tokens` asks Firecrawl's `/extract` for a fixed JSON Schema (colors, fonts, logo,
@@ -39,6 +43,7 @@ Docs
 ----
 * Extract   https://docs.firecrawl.dev/api-reference/endpoint/extract
 * Poll      https://docs.firecrawl.dev/api-reference/endpoint/extract-get
+* Scrape    https://docs.firecrawl.dev/api-reference/endpoint/scrape (`scrape_links`)
 """
 
 from __future__ import annotations
@@ -108,20 +113,6 @@ _IMAGE_SCHEMA: dict[str, Any] = {
     },
 }
 
-# What `extract_social_links` asks for — resolving a competitor's *domain* to the social accounts
-# `sociavault_client` can then fetch real posts from. Stage 10 (`social_content_strategy_audit`)
-# has a real handle for the client (`client_s_own_social_pages_handles`) but only a domain for each
-# competitor (`competitor_list`'s own output), and a domain is not a handle SociaVault can look up.
-_SOCIAL_LINKS_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "properties": {
-        "facebookUrl": {"type": "string", "description": "Absolute URL of this business's Facebook page, if one is linked anywhere on the site (header, footer, or a social icon)"},
-        "instagramUrl": {"type": "string", "description": "Absolute URL of this business's Instagram profile, if linked"},
-        "linkedinUrl": {"type": "string", "description": "Absolute URL of this business's LinkedIn company page, if linked"},
-    },
-}
-
-
 class FirecrawlError(Exception):
     """A Firecrawl call did not produce a usable answer."""
 
@@ -174,16 +165,21 @@ def _rate_limit_wait(response: httpx.Response) -> float | None:
     return max(wait, 1.0)
 
 
-async def _post_extract(client: httpx.AsyncClient, body: dict[str, Any]) -> httpx.Response:
-    """Submit an extract job, waiting out one rate-limit window if Firecrawl names one."""
-    response = await client.post("/extract", json=body)
+async def _post(client: httpx.AsyncClient, path: str, body: dict[str, Any]) -> httpx.Response:
+    """POST to Firecrawl, waiting out one rate-limit window if Firecrawl names one."""
+    response = await client.post(path, json=body)
     wait = _rate_limit_wait(response)
     if wait is not None:
         logger.info("Firecrawl rate limit hit; waiting %.0fs for the window to reset", wait)
         await asyncio.sleep(wait)
-        response = await client.post("/extract", json=body)
+        response = await client.post(path, json=body)
     response.raise_for_status()
     return response
+
+
+async def _post_extract(client: httpx.AsyncClient, body: dict[str, Any]) -> httpx.Response:
+    """Submit an extract job, waiting out one rate-limit window if Firecrawl names one."""
+    return await _post(client, "/extract", body)
 
 
 def _fail(what: str, exc: Exception) -> FirecrawlError:
@@ -348,65 +344,34 @@ async def extract_reference_images(url: str) -> ReferenceImages:
     )
 
 
-@dataclass(frozen=True)
-class SocialLinks:
-    """A domain's own social profile URLs — not the client's, a *competitor's*. See
-    `extract_social_links` and `social_audit.resolve_competitor_handles`, the module that turns this
-    into something `sociavault_client.fetch_recent_posts` can actually look up."""
-
-    source_url: str
-    facebook_url: str | None = None
-    instagram_url: str | None = None
-    linkedin_url: str | None = None
-
-    @property
-    def available(self) -> bool:
-        return bool(self.facebook_url or self.instagram_url or self.linkedin_url)
-
-
-async def extract_social_links(url: str) -> SocialLinks:
-    """Ask Firecrawl which Facebook/Instagram/LinkedIn URLs a business's own site links to.
+async def scrape_links(url: str) -> tuple[str, ...]:
+    """Every link on the rendered page, as Firecrawl's `/scrape` reports it. One credit.
 
     Why this exists
     ----------------
-    Stage 10 (`social_content_strategy_audit`) has a real, ready-to-fetch handle for the client
-    (`client_s_own_social_pages_handles`), but for a competitor it only has a domain
-    (`competitor_list`'s own output names a company and a URL, never a social handle) — and a
-    domain is not something `sociavault_client` can look up directly. This is the missing step: a
-    business's own site almost always links to its own social profiles (header icons, footer,
-    "follow us"), so reading those links off the page turns a domain into a real, fetchable handle,
-    per `social_audit.resolve_competitor_handles` — Firecrawl first, Context.dev's `retrieve_brand`
-    as the fallback when Firecrawl is unconfigured or finds nothing, per that function's own
-    docstring for why the order is inverted from `design_md.py`'s usual Context.dev-primary rule.
+    Stage 10 has a domain, not a social handle, for each competitor, and a business's own site
+    almost always links its profiles from header or footer icons. `social_audit.
+    resolve_competitor_handles` reads those links off the page itself first, for free; this is its
+    paid second try, for a site whose served HTML has no links in it (a JS-rendered page).
 
-    Raises `FirecrawlError` on failure or timeout; callers treat that as "no links found here" and
-    fall through to the next source, never a fabricated handle.
+    **A links scrape, not an `/extract`.** The `/extract` call this replaced asked a model to find
+    the profiles in the page's *markdown*, and an icon-only `<a>` has no text, so it never reaches
+    the markdown: a live run on entourage.com.au came back empty while the page linked all three
+    profiles. The `links` format lists every href whether or not it has text.
+
+    Returns the raw URLs. Deciding which one is a profile (and not a tracking pixel or a share
+    button) is `social_audit`'s job, the same "dumb wrapper" rule as the rest of this module.
+    Raises `FirecrawlError` on failure; callers fall through to the next source.
     """
-    logger.info("Firecrawl API executing operation=extract_social_links url=%r", url)
-    client = _client()
+    logger.info("Firecrawl API executing operation=scrape_links url=%r", url)
     try:
-        submit = await _post_extract(client, {"urls": [url], "schema": _SOCIAL_LINKS_SCHEMA})
+        response = await _post(_client(), "/scrape", {"url": url, "formats": ["links"], "onlyMainContent": False})
     except httpx.HTTPError as exc:
-        logger.error("Firecrawl API error operation=extract_social_links url=%r error=%s", url, exc)
-        raise _fail(f"Could not submit a Firecrawl social-links extract for {url}", exc) from exc
+        logger.error("Firecrawl API error operation=scrape_links url=%r error=%s", url, exc)
+        raise _fail(f"Could not scrape the links on {url} through Firecrawl", exc) from exc
 
-    payload = submit.json()
-    job_id = payload.get("id")
-    if not job_id:
-        raise FirecrawlError(f"Firecrawl did not return a job id for {url}.")
-
-    try:
-        data = await _poll(client, job_id, url)
-    except FirecrawlError as exc:
-        logger.error("Firecrawl API error operation=extract_social_links url=%r error=%s", url, exc)
-        raise
-
-    return SocialLinks(
-        source_url=url,
-        facebook_url=(data.get("facebookUrl") or "").strip() or None,
-        instagram_url=(data.get("instagramUrl") or "").strip() or None,
-        linkedin_url=(data.get("linkedinUrl") or "").strip() or None,
-    )
+    data = response.json().get("data") or {}
+    return tuple(link for link in (data.get("links") or []) if isinstance(link, str) and link.strip())
 
 
 async def _poll(client: httpx.AsyncClient, job_id: str, url: str) -> dict[str, Any]:

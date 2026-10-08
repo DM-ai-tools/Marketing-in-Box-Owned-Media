@@ -150,13 +150,13 @@ function message(over: Partial<PipelineMessage>): PipelineMessage {
   });
   const nav = renderToStaticMarkup(<TopNav />);
   ok("nav: client name shown", nav.includes("Sample Dental"), nav.slice(0, 500));
-  ok("nav: saved counter shown", nav.includes("2/15"), nav.slice(0, 700));
+  ok("nav: saved counter shown", nav.includes("2/14"), nav.slice(0, 700));
 
   // The wrong key compiles because the profile is a loose record; an empty pill must not appear.
   seedPipeline({ clientProfile: {} });
   const bare = renderToStaticMarkup(<TopNav />);
   ok("nav: no empty client pill when unknown", !bare.includes("Client:"), bare.slice(0, 400));
-  ok("nav: counter still renders", bare.includes("/15"));
+  ok("nav: counter still renders", bare.includes("/14"));
 }
 
 console.log(`\n${pass} passed, ${fails.length} failed`);

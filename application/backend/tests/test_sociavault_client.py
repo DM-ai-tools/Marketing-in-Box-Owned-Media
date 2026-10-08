@@ -6,6 +6,8 @@ Nothing here touches the live API. The seam is the cached client: a fake stands 
 
 from __future__ import annotations
 
+import json
+import pathlib
 import types
 
 import httpx
@@ -104,8 +106,10 @@ async def test_instagram_posts_are_normalised_and_paginated(monkeypatch):
     assert calls["n"] == 2
     assert result.credits_used == 2
     assert len(result.posts) == 2
-    assert result.posts[0].like_count == 10
-    assert result.posts[0].url == "https://www.instagram.com/p/AAA/"
+    # Newest first, whatever order the pages came in.
+    assert [p.id for p in result.posts] == ["2", "1"]
+    assert result.posts[1].like_count == 10
+    assert result.posts[1].url == "https://www.instagram.com/p/AAA/"
     assert result.more_available is False
 
 
@@ -305,3 +309,109 @@ async def test_a_sample_that_stops_at_the_limit_is_not_reported_as_the_full_hist
 
     assert len(result.posts) == 15 and calls["n"] == 5
     assert result.more_available is True
+
+
+# --------------------------------------------------------------------------------------
+# What a sample has to correct for — `tests/fixtures/sociavault_live.json`, trimmed from live
+# responses on 2026-10-06 (Prospa's Instagram and Facebook, ARG Finance's LinkedIn company page)
+# --------------------------------------------------------------------------------------
+
+_LIVE = json.loads((pathlib.Path(__file__).parent / "fixtures" / "sociavault_live.json").read_text(encoding="utf-8"))
+
+
+def _serve(payload: dict, *, then_stop: bool = True):
+    """A fake client answering every call with `payload`; with `then_stop`, the second page offers
+    no cursor, so paging ends after one page."""
+    calls = {"n": 0}
+
+    async def get(path, params):
+        calls["n"] += 1
+        if then_stop and calls["n"] > 1:
+            return _Response({"success": True, "data": {}, "credits_used": 1})
+        return _Response(payload)
+
+    return types.SimpleNamespace(get=get), calls
+
+
+@pytest.mark.asyncio
+async def test_pinned_instagram_posts_are_left_out_of_the_recent_sample(monkeypatch):
+    """Prospa's grid opened with three posts pinned a year earlier. Cut to limit=5 in the API's order
+    they took three of the five slots, and a year-old ad read as this week's cadence."""
+    fake, _ = _serve(_LIVE["instagram_posts"])
+    monkeypatch.setattr(sociavault_client, "_client", lambda: fake)
+
+    result = await sociavault_client.fetch_recent_posts("instagram", "prospaau", limit=5)
+
+    assert result.pinned_excluded == 3
+    assert len(result.posts) == 5
+    assert all(not p.raw.get("timeline_pinned_user_ids") for p in result.posts)
+    dates = [p.published_at for p in result.posts]
+    assert dates == sorted(dates, reverse=True)
+    assert min(dates) > 1_780_000_000  # nothing from the pinned 2025 posts
+
+
+@pytest.mark.asyncio
+async def test_instagram_format_and_views_come_from_the_live_fields(monkeypatch):
+    fake, _ = _serve(_LIVE["instagram_posts"])
+    monkeypatch.setattr(sociavault_client, "_client", lambda: fake)
+
+    result = await sociavault_client.fetch_recent_posts("instagram", "prospaau", limit=40)
+
+    by_format = {p.format for p in result.posts}
+    assert {"carousel", "image", "reel"} <= by_format
+    reel = next(p for p in result.posts if p.format == "reel")
+    assert reel.view_count == 352 and reel.is_video
+    # A still image has no view count to publish: None, not 0.
+    assert all(p.view_count is None for p in result.posts if p.format in ("image", "carousel"))
+
+
+@pytest.mark.asyncio
+async def test_facebook_views_and_format_are_read_and_shares_stay_none(monkeypatch):
+    """The live response carries `videoViewCount` and no share count under any key."""
+    fake, _ = _serve(_LIVE["facebook_profile_posts"])
+    monkeypatch.setattr(sociavault_client, "_client", lambda: fake)
+
+    result = await sociavault_client.fetch_recent_posts("facebook", "https://www.facebook.com/ProspaAU", limit=3)
+
+    assert len(result.posts) == 3
+    assert all(p.share_count is None for p in result.posts)
+    assert all(p.view_count is None for p in result.posts)  # `videoViewCount: null` on image posts
+    assert {p.format for p in result.posts} == {"image"}
+    assert result.posts[0].like_count == 7
+
+
+@pytest.mark.asyncio
+async def test_linkedin_times_are_read_from_the_activity_id_not_the_estimated_date(monkeypatch):
+    """`datePublished` on the company feed is a relative label turned into a date at scrape time:
+    every value had the scrape's time of day, five posts landed on one date and one was null."""
+    fake, _ = _serve(_LIVE["linkedin_company"], then_stop=False)
+    monkeypatch.setattr(sociavault_client, "_client", lambda: fake)
+
+    result = await sociavault_client.fetch_recent_posts(
+        "linkedin", "https://www.linkedin.com/company/arg-finance-pty-ltd", limit=10
+    )
+
+    posts = {p.id: p for p in result.posts}
+    # The id-derived time of the RBA post; its `datePublished` claimed 06:17:14, the scrape's time.
+    assert posts["7510565171300511744"].published_at == 1790658276
+    # The one with `datePublished: null` still gets a real date.
+    assert posts["7492805359817064448"].published_at is not None
+    assert len({p.published_at for p in result.posts}) == len(result.posts)
+    dates = [p.published_at for p in result.posts]
+    assert dates == sorted(dates, reverse=True)
+    assert result.follower_count == 819
+    assert result.more_available is True  # a `paginationToken` came back
+    assert all(p.like_count is None and p.view_count is None for p in result.posts)
+
+
+@pytest.mark.asyncio
+async def test_linkedin_falls_back_to_date_published_without_an_activity_id(monkeypatch):
+    payload = {"success": True, "data": {"posts": [{"url": "u0", "datePublished": "2026-07-01T00:00:00Z", "text": "x"}]}}
+    fake, _ = _serve(payload, then_stop=False)
+    monkeypatch.setattr(sociavault_client, "_client", lambda: fake)
+
+    result = await sociavault_client.fetch_recent_posts("linkedin", "https://www.linkedin.com/company/x", limit=5)
+
+    assert result.posts[0].published_at == 1782864000
+    assert result.more_available is False
+    assert result.follower_count is None

@@ -9,6 +9,7 @@ const CHECK_LABEL: Record<CheckName, string> = {
   funnel_relevance: "Funnel",
   business_logic: "Business rules",
   virality: "Virality",
+  page_readiness: "Deploy-ready",
 };
 
 /** What each score measures, in the operator's words — a number with no question behind it is
@@ -18,6 +19,7 @@ const CHECK_QUESTION: Record<CheckName, string> = {
   funnel_relevance: "Does it lead the buyer to the next real step on the ladder, matched to where they are?",
   business_logic: "Are its claims, prices, testimonials and wording allowed for this client?",
   virality: "How likely it is to be shared: hook, curiosity, specificity, emotion, platform fit.",
+  page_readiness: "Will the page publish as delivered: the client's real links, real images, the document tags, and a layout that works on a phone?",
 };
 
 type Band = { label: string; color: string };

@@ -95,6 +95,8 @@ Include this single line near the top of your output (no explanation):
  
 OUTPUT STRUCTURE (mandatory headings — do not omit any section)
  
+FORMAT: write the output as Markdown. The template below shows the content of each line, not its formatting. Put the Title Line on a single "# " heading line, and each numbered section on its own "## " heading line, numbered as below (e.g. "## 1. Identity Snapshot"). Write each label as a bold lead on the same line as its value (e.g. "**Avatar Name:** …", "**Functional Goals:** …"). Write the quotes in section 3, the objections in section 12 and the checklist in section 16 as "- " list items, one per line.
+ 
 Title Line:
 ICP ([Awareness Level]) — [Company] | [Offer] | [Price/Terms] | [Business Model] | [Region] | [Company Type] | [Audience Type] | [Maturity Tier]
  

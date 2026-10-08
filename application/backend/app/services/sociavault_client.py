@@ -23,6 +23,18 @@ returns the same `SocialPost` shape regardless of platform. A field a platform g
 expose (LinkedIn's like/comment counts) is left `None`, never fabricated — `social_audit.py`'s
 renderer states that gap in the document rather than printing a `0` or an invented figure.
 
+Three things the live responses do that a sample has to correct for, each checked against real
+payloads on 2026-10-06:
+
+* Instagram lists **pinned posts first**, whatever their age. They are left out of the sample
+  (`SocialFetchResult.pinned_excluded` counts them), and every platform's posts are sorted newest
+  first before the sample is cut to `limit`.
+* LinkedIn's `datePublished` is an **estimate made at scrape time** from a relative label. The real
+  time is read out of the post's activity id (`_linkedin_time_from_id`).
+* Facebook publishes **no share count** under any key. `videoViewCount` and Instagram's
+  `play_count` become `SocialPost.view_count`; the media type becomes `SocialPost.format`; the
+  LinkedIn company page's `followers` becomes `SocialFetchResult.follower_count`.
+
 Credits
 -------
 Every call costs a credit, and Facebook is the expensive one: 3 posts per call versus Instagram's
@@ -47,8 +59,10 @@ Docs
 
 from __future__ import annotations
 
+import datetime
 import logging
 import os
+import re
 from dataclasses import dataclass, field
 from functools import lru_cache
 from typing import Any
@@ -152,6 +166,12 @@ class SocialPost:
     share_count: int | None
     is_video: bool = False
     raw: dict[str, Any] = field(default_factory=dict, repr=False)
+    #: Plays/views where the platform publishes them (an Instagram reel, a Facebook video). `None`
+    #: for a still image, which has no view count to publish — not a measured zero.
+    view_count: int | None = None
+    #: "reel" | "video" | "carousel" | "image" | "text", from the platform's own media type. `None`
+    #: where the response does not say (LinkedIn's company feed).
+    format: str | None = None
 
 
 @dataclass(frozen=True)
@@ -167,6 +187,12 @@ class SocialFetchResult:
     credits_used: int
     #: Set when a request succeeded but returned zero posts, or the account could not be resolved.
     note: str | None = None
+    #: The account's follower count where the response carries one (LinkedIn's company page), for
+    #: an engagement rate. `None` when absent, never 0.
+    follower_count: int | None = None
+    #: Pinned posts left out of the sample. Instagram lists them first whatever their age, and
+    #: counted as recent they made a year-old ad look like this week's cadence.
+    pinned_excluded: int = 0
 
 
 def _as_int(value: Any) -> int | None:
@@ -232,31 +258,76 @@ def instagram_username(handle: str) -> str:
     return raw.lstrip("@").strip("/")
 
 
-async def _instagram_page(handle: str, *, next_max_id: str | None) -> tuple[list[SocialPost], str | None, bool, int]:
+@dataclass(frozen=True)
+class _Page:
+    """One page of one platform's posts, before the pages are joined into a `SocialFetchResult`."""
+
+    posts: list[SocialPost]
+    cursor: str | None
+    more_available: bool
+    credits: int
+    pinned_excluded: int = 0
+    follower_count: int | None = None
+
+
+def _instagram_format(item: dict[str, Any]) -> str | None:
+    """Instagram's own media type: `product_type` "clips" is a reel; `media_type` 8 a carousel,
+    2 a video, 1 a single image."""
+    if item.get("product_type") == "clips":
+        return "reel"
+    return {8: "carousel", 2: "video", 1: "image"}.get(_as_int(item.get("media_type")))
+
+
+def _is_pinned(item: dict[str, Any]) -> bool:
+    """Pinned to the profile grid. The live response marks it with a non-empty
+    `timeline_pinned_user_ids` (`{"0": <owner id>}`), and lists pinned posts first whatever their age."""
+    return bool(item.get("timeline_pinned_user_ids"))
+
+
+def _instagram_post(item: dict[str, Any]) -> SocialPost:
+    # An owner can hide like counts. The field still arrives, but it is not a public measurement.
+    hidden = bool(item.get("like_and_view_counts_disabled"))
+    views = _as_int(item.get("play_count") or item.get("ig_play_count") or item.get("view_count"))
+    return SocialPost(
+        platform="instagram",
+        id=str(item.get("pk") or item.get("code") or ""),
+        url=f"https://www.instagram.com/p/{item['code']}/" if item.get("code") else None,
+        published_at=_as_int(item.get("taken_at")),
+        caption=_caption(item.get("caption")),
+        like_count=None if hidden else _as_int(item.get("like_count")),
+        comment_count=_as_int(item.get("comment_count")),
+        share_count=None,  # Instagram's posts endpoint does not publish a share count.
+        is_video=bool(item.get("video_duration") or views),
+        raw=item,
+        view_count=None if hidden else views,
+        format=_instagram_format(item),
+    )
+
+
+async def _instagram_page(handle: str, *, cursor: str | None) -> _Page:
     params: dict[str, Any] = {"handle": instagram_username(handle)}
-    if next_max_id:
-        params["next_max_id"] = next_max_id
+    if cursor:
+        params["next_max_id"] = cursor
     payload = await _get("/scrape/instagram/posts", params)
     data = payload.get("data") or {}
-    posts = [
-        SocialPost(
-            platform="instagram",
-            id=str(item.get("pk") or item.get("code") or ""),
-            url=f"https://www.instagram.com/p/{item['code']}/" if item.get("code") else None,
-            published_at=_as_int(item.get("taken_at")),
-            caption=_caption(item.get("caption")),
-            like_count=_as_int(item.get("like_count")),
-            comment_count=_as_int(item.get("comment_count")),
-            share_count=None,  # Instagram's posts endpoint does not publish a share count.
-            is_video=bool(item.get("video_duration") or item.get("play_count")),
-            raw=item,
-        )
-        for item in _records(data.get("items"))
-    ]
-    return posts, data.get("next_max_id"), bool(data.get("more_available")), int(payload.get("credits_used") or 1)
+    items = _records(data.get("items"))
+    kept = [item for item in items if not _is_pinned(item)]
+    return _Page(
+        posts=[_instagram_post(item) for item in kept],
+        cursor=data.get("next_max_id"),
+        more_available=bool(data.get("more_available")),
+        credits=int(payload.get("credits_used") or 1),
+        pinned_excluded=len(items) - len(kept),
+    )
 
 
-async def _facebook_page(handle: str, *, cursor: str | None) -> tuple[list[SocialPost], str | None, bool, int]:
+def _facebook_format(item: dict[str, Any]) -> str:
+    if item.get("videoDetails"):
+        return "video"
+    return "image" if item.get("image") or item.get("images") else "text"
+
+
+async def _facebook_page(handle: str, *, cursor: str | None) -> _Page:
     # `handle` doubles as either a profile URL or a bare numeric page id — SociaVault accepts
     # either under different query params, so a purely numeric handle is sent as `pageId`.
     params: dict[str, Any] = {"pageId": handle} if handle.strip().isdigit() else {"url": handle}
@@ -273,32 +344,63 @@ async def _facebook_page(handle: str, *, cursor: str | None) -> tuple[list[Socia
             caption=item.get("text") if isinstance(item.get("text"), str) else None,
             like_count=_as_int(item.get("reactionCount")),
             comment_count=_as_int(item.get("commentCount")),
+            # The live response (checked 2026-10-06) carries no share count under any key; this
+            # stays None unless SociaVault adds one.
             share_count=_as_int(item.get("shareCount")),
             is_video=bool(item.get("videoDetails")),
             raw=item,
+            view_count=_as_int(item.get("videoViewCount")),
+            format=_facebook_format(item),
         )
         for item in _records(data.get("posts"))
     ]
     next_cursor = data.get("cursor")
     # Facebook's docs don't publish a `more_available` flag the way Instagram's do — the practical
     # signal is "did this page hand back another cursor at all".
-    return posts, next_cursor, bool(next_cursor), int(payload.get("credits_used") or 1)
+    return _Page(posts, next_cursor, bool(next_cursor), int(payload.get("credits_used") or 1))
 
 
-async def _linkedin_posts(url: str) -> tuple[list[SocialPost], int]:
-    """LinkedIn has no separate posts endpoint or pagination — `profile` (a person) and `company`
-    both embed a `posts` array directly in the one response. Neither publishes engagement counts as
-    of this module's docs pass, so `like_count`/`comment_count`/`share_count` are always `None`
-    here; see the module docstring for why that is left `None` rather than `0`."""
+# LinkedIn activity ids are snowflakes: the top 41 bits are the post's creation time in epoch ms.
+_LINKEDIN_ACTIVITY_ID = re.compile(r"(?:activity[:-])?(\d{15,})")
+# A derived time outside this window means the number was not an activity id after all.
+_EARLIEST_PLAUSIBLE_POST = 1_104_537_600  # 2005-01-01, before LinkedIn had a feed
+
+
+def _linkedin_time_from_id(*candidates: Any) -> int | None:
+    """The real creation time of a LinkedIn post, read out of its activity id.
+
+    The company endpoint's `datePublished` is not that: it is LinkedIn's relative label ("2w",
+    "1mo") turned into a date at scrape time, so every value carries the scrape's time of day, a
+    month-old post can be 25 days out, several posts collapse onto one date, and some are null. Read
+    from the id, a live sample matched the same posts' Facebook and Instagram times to the minute.
+    """
+    now = datetime.datetime.now(tz=datetime.timezone.utc).timestamp()
+    for candidate in candidates:
+        match = _LINKEDIN_ACTIVITY_ID.search(str(candidate or ""))
+        if not match:
+            continue
+        seconds = (int(match.group(1)) >> 22) // 1000
+        if _EARLIEST_PLAUSIBLE_POST <= seconds <= now + 86_400:
+            return seconds
+    return None
+
+
+async def _linkedin_page(url: str) -> _Page:
+    """LinkedIn has no separate posts endpoint — `profile` (a person) and `company` both embed a
+    `posts` array directly in the one response. Neither publishes engagement counts, so
+    `like_count`/`comment_count`/`share_count` are always `None` here; see the module docstring for
+    why that is left `None` rather than `0`. (`/scrape/linkedin/post` does return likes and comments,
+    at one credit per post; it is not used, by choice, to keep a sample's cost per account flat.)"""
     path = "/scrape/linkedin/company" if "/company/" in url else "/scrape/linkedin/profile"
     payload = await _get(path, {"url": url})
     data = payload.get("data") or {}
     posts = [
         SocialPost(
             platform="linkedin",
-            id=str(item.get("url") or item.get("datePublished") or index),
+            id=str(item.get("id") or item.get("url") or item.get("datePublished") or index),
             url=item.get("url"),
-            published_at=_parse_iso8601(item.get("datePublished")),
+            published_at=_linkedin_time_from_id(item.get("id"), item.get("url"))
+            or _parse_iso8601(item.get("datePublished")),
             caption=item.get("text") if isinstance(item.get("text"), str) else None,
             like_count=None,
             comment_count=None,
@@ -307,18 +409,29 @@ async def _linkedin_posts(url: str) -> tuple[list[SocialPost], int]:
         )
         for index, item in enumerate(_records(data.get("posts")))
     ]
-    return posts, int(payload.get("credits_used") or 1)
+    return _Page(
+        posts=posts,
+        cursor=None,
+        # Not paged here (one call per account), but a `paginationToken` means the feed goes on.
+        more_available=bool(data.get("paginationToken")),
+        credits=int(payload.get("credits_used") or 1),
+        follower_count=_as_int(data.get("followers")),
+    )
 
 
 def _parse_iso8601(value: Any) -> int | None:
     if not isinstance(value, str) or not value:
         return None
-    import datetime
-
     try:
         return int(datetime.datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp())
     except ValueError:
         return None
+
+
+def _newest_first(posts: list[SocialPost]) -> list[SocialPost]:
+    """Newest first, undated last. Applied before the sample is cut to `limit`, so the sample is the
+    most recent posts rather than whatever order the platform happened to list them in."""
+    return sorted(posts, key=lambda p: (p.published_at is None, -(p.published_at or 0)))
 
 
 async def fetch_recent_posts(platform: str, handle: str, *, limit: int = 40) -> SocialFetchResult:
@@ -338,23 +451,22 @@ async def fetch_recent_posts(platform: str, handle: str, *, limit: int = 40) -> 
         )
 
     if platform == "linkedin":
-        posts, credits = await _linkedin_posts(handle)
-        return SocialFetchResult(
-            platform=platform, handle=handle, posts=tuple(posts[:limit]), more_available=False, credits_used=credits
-        )
+        pages = [await _linkedin_page(handle)]
+    else:
+        page_fn = _instagram_page if platform == "instagram" else _facebook_page
+        pages = []
+        cursor: str | None = None
+        for _ in range(_MAX_PAGES_PER_ACCOUNT):
+            page = await page_fn(handle, cursor=cursor)
+            pages.append(page)
+            cursor = page.cursor
+            fetched = sum(len(p.posts) for p in pages)
+            # A page of nothing but pinned posts is not the end of the feed.
+            if (not page.posts and not page.pinned_excluded) or fetched >= limit or not cursor or not page.more_available:
+                break
 
-    page_fn = _instagram_page if platform == "instagram" else _facebook_page
-    posts: list[SocialPost] = []
-    cursor: str | None = None
-    more_available = False
-    credits_used = 0
-    for _ in range(_MAX_PAGES_PER_ACCOUNT):
-        page_posts, cursor, more_available, page_credits = await page_fn(handle, **({"next_max_id": cursor} if platform == "instagram" else {"cursor": cursor}))
-        credits_used += page_credits
-        posts.extend(page_posts)
-        if not page_posts or len(posts) >= limit or not cursor or not more_available:
-            break
-
+    posts = _newest_first([post for page in pages for post in page.posts])
+    last = pages[-1]
     note = None if posts else "SociaVault returned no posts for this account."
     return SocialFetchResult(
         platform=platform,
@@ -364,7 +476,9 @@ async def fetch_recent_posts(platform: str, handle: str, *, limit: int = 40) -> 
         # or if this page overshot `limit` and the extra posts were cut. Requiring both, as this
         # once did, reported a sample that stopped exactly at `limit` as the account's full
         # history, which the rendered document then stated as fact.
-        more_available=more_available or len(posts) > limit,
-        credits_used=credits_used,
+        more_available=last.more_available or len(posts) > limit,
+        credits_used=sum(page.credits for page in pages),
         note=note,
+        follower_count=next((p.follower_count for p in pages if p.follower_count is not None), None),
+        pinned_excluded=sum(page.pinned_excluded for page in pages),
     )

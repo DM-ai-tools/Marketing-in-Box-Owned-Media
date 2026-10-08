@@ -144,6 +144,81 @@ export class StreamTruncatedError extends Error {
   }
 }
 
+/** A stream route answered with a non-2xx status before any SSE body began.
+ *
+ * Carries the status, which the retry rules below need and a message string cannot supply: 503 from
+ * a backend that is still booting is worth retrying by itself, while 409 ("already generating") and
+ * 404 ("no such stage in this phase") never are. Parsing that back out of a sentence would be
+ * guessing at something the response already stated. */
+export class StreamHttpError extends Error {
+  readonly status: number;
+
+  constructor(status: number, message: string) {
+    super(message);
+    this.name = "StreamHttpError";
+    this.status = status;
+  }
+}
+
+/** How the backend's terminating `done` event ended.
+ *
+ * `truncated` is the one that changes what the operator is shown: the model hit its output ceiling
+ * mid-document, so what arrived is a real partial deliverable that must not be approved, checked or
+ * assembled as a finished one. Decided on the server (`_done_event` in `app/routers/pipeline.py`) so
+ * "what counts as cut off" lives in one place. */
+export interface StreamCompletion {
+  stopReason: string | null;
+  truncated: boolean;
+}
+
+/** How many times a stream that produced *nothing* is restarted before the failure is reported.
+ *
+ * Only the empty case is retried, and that is the whole safety argument: once a single delta has
+ * arrived the call is generating and has been billed, so restarting it would pay twice and throw
+ * away real text. Three attempts total covers the failure this exists for — an API process
+ * restarted by its own file watcher, a proxy that dropped the connection on handshake — without
+ * turning a genuine outage into a minute of silent waiting. */
+const MAX_TRANSIENT_RETRIES = 2;
+
+/** Backoff before attempt `n` (0-based), in ms. Jittered, because every card in a chat that
+ * reconnects on the same schedule reconnects in the same instant. */
+function retryBackoffMs(attempt: number): number {
+  return (attempt === 0 ? 600 : 2000) + Math.floor(Math.random() * 400);
+}
+
+/** Whether restarting could plausibly work, given nothing was received.
+ *
+ * Deliberately a short allow-list. Anything not named here is reported to the operator rather than
+ * retried: a 400 for a prompt over the context window, a rejected key, an exhausted credit balance
+ * and a mistyped asset id all fail identically on the second attempt, and retrying them only
+ * delays the one message that would let somebody fix it. */
+function isTransient(err: unknown): boolean {
+  // The body ended before `done` and before any text — see `StreamTruncatedError`.
+  if (err instanceof StreamTruncatedError) return !err.receivedText;
+  // A fault the backend already classified. `retryable` is its own judgement (`api_errors.py`) and
+  // is not second-guessed here.
+  if (err instanceof ApiFaultError) return err.fault.retryable;
+  if (err instanceof StreamHttpError) return err.status === 408 || err.status === 429 || err.status >= 500;
+  // `fetch` itself failing — no route to the host, DNS, a connection refused mid-handshake.
+  if (err instanceof TypeError) return true;
+  return false;
+}
+
+function delay(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) return reject(new DOMException("Aborted", "AbortError"));
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    function onAbort() {
+      clearTimeout(timer);
+      reject(new DOMException("Aborted", "AbortError"));
+    }
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
 export interface StreamStageOptions {
   /** Run-level client facts, so a stage that only collects a topic (blog / webinar / podcast)
    * can still have its competitor prepass benchmark against the right site. */
@@ -157,32 +232,62 @@ export interface StreamStageOptions {
   runId?: string | null;
   onPrepassStart?: (competitorAssetId: string) => void;
   onPrepass?: (event: PrepassEvent) => void;
+  /** How the stream ended. Called once, on a clean finish only — a failure throws instead, and a
+   * stream that never reached `done` has nothing to report. The caller uses `truncated` to decide
+   * whether this is a draft to review or one to offer Continue on. */
+  onDone?: (completion: StreamCompletion) => void;
+  /** A stream that produced nothing is being restarted. `attempt` counts from 2 (the first retry),
+   * so it can be shown as-is. Purely for the UI — nothing branches on it. */
+  onRetry?: (attempt: number, of: number) => void;
   signal?: AbortSignal;
 }
 
 type SseEvent =
   | { type: "delta"; text: string }
-  | { type: "done" }
+  | { type: "done"; stop_reason?: string | null; truncated?: boolean }
   | ({ type: "error"; message: string } & Partial<ApiFault>)
   | { type: "prepass_start"; asset_id: string }
-  | ({ type: "prepass" } & PrepassEvent);
+  | ({ type: "prepass" } & PrepassEvent)
+  | { type: "social_prepass"; skipped?: boolean; content?: string; error?: string };
 
-/** Shared SSE-body reader for the two generation routes below — same event shape/parsing as
+/** The field `social_prepass` fills, so a continuation can hand back what the first attempt paid
+ * for. Named here rather than inferred, because the event — unlike `prepass` — does not say which
+ * field it answered: it only ever answers this one (see `_run_social_data_prepass`). */
+export const SOCIAL_POST_DATA_FIELD_ID = "raw_post_data_source";
+
+/** Mutable progress handed into the reader, so the retry wrapper can tell "nothing arrived" from
+ * "it was generating and then broke". Those two need opposite handling and a thrown error cannot
+ * always distinguish them — a `fetch` failure mid-body is a bare `TypeError` either way. */
+interface StreamProgress {
+  receivedText: boolean;
+}
+
+/** Shared SSE-body reader for the generation routes below — same event shape/parsing as
  * `lib/icpApi.ts`'s `streamIcp`. */
 async function consumeSseStream(
   res: Response,
   onChunk: (chunk: string) => void,
   opts: StreamStageOptions = {},
+  progress: StreamProgress = { receivedText: false },
 ): Promise<void> {
   if (!res.ok || !res.body) {
-    const detail = await res.text().catch(() => "");
-    throw new Error(`Generation failed (${res.status}): ${detail || res.statusText}`);
+    const body = await res.text().catch(() => "");
+    // FastAPI puts a refusal written for the operator in `detail` — the 409 from `_claim_stream` is
+    // three sentences of it. Wrapping that in `Generation failed (409): {"detail":…}` buries the
+    // one part worth reading, the same argument `scrapePage` makes for its own errors.
+    let detail = body;
+    try {
+      const parsed = JSON.parse(body) as { detail?: unknown };
+      if (typeof parsed.detail === "string" && parsed.detail.trim()) detail = parsed.detail;
+    } catch {
+      // Not JSON (a proxy's error page) — the raw body is all there is.
+    }
+    throw new StreamHttpError(res.status, detail || `Generation failed (${res.status} ${res.statusText}).`);
   }
 
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
-  let receivedText = false;
 
   while (true) {
     const { done, value } = await reader.read();
@@ -206,23 +311,69 @@ async function consumeSseStream(
       }
 
       if (event.type === "delta") {
-        receivedText = true;
+        progress.receivedText = true;
         onChunk(event.text);
       }
       else if (event.type === "prepass_start") opts.onPrepassStart?.(event.asset_id);
       else if (event.type === "prepass") opts.onPrepass?.(event);
+      else if (event.type === "social_prepass") {
+        // Routed through the same handler as the competitor prepass, under the field it fills, so
+        // the store has one place that collects "inputs this run already paid for".
+        if (!event.skipped && event.content) {
+          opts.onPrepass?.({
+            asset_id: "social_post_data",
+            target_field_id: SOCIAL_POST_DATA_FIELD_ID,
+            skipped: false,
+            content: event.content,
+          });
+        }
+      }
       else if (event.type === "error") {
         const fault = faultFromUnknown(event);
         throw fault ? new ApiFaultError(fault) : new Error(event.message);
       }
-      else if (event.type === "done") return;
+      else if (event.type === "done") {
+        opts.onDone?.({
+          stopReason: event.stop_reason ?? null,
+          // Defaulted rather than required: a `done` from a backend that predates this field is a
+          // finished stream, which is what it always meant.
+          truncated: Boolean(event.truncated),
+        });
+        return;
+      }
     }
   }
 
   // The body ended without `done` and without an `error` event. Both of those are things the
   // backend always sends before finishing (see `_generation_sse_stream`), so reaching here means
   // the stream was cut rather than completed — never a successful generation to be reviewed.
-  throw new StreamTruncatedError(receivedText);
+  throw new StreamTruncatedError(progress.receivedText);
+}
+
+/** Open a stream, read it, and restart it a bounded number of times if it produced nothing.
+ *
+ * The one rule that makes this safe to have at all: **a retry only ever happens when not a single
+ * delta arrived.** Past that point the call is generating, it has been billed, and a restart would
+ * pay for a second document and splice it onto the first. An operator-requested stop is not a
+ * failure either, so an aborted signal is re-thrown untouched. */
+async function streamWithRetry(
+  open: () => Promise<Response>,
+  onChunk: (chunk: string) => void,
+  opts: StreamStageOptions,
+): Promise<void> {
+  for (let attempt = 0; ; attempt++) {
+    const progress: StreamProgress = { receivedText: false };
+    try {
+      await consumeSseStream(await open(), onChunk, opts, progress);
+      return;
+    } catch (err) {
+      if (progress.receivedText) throw err;
+      if (opts.signal?.aborted) throw err;
+      if (attempt >= MAX_TRANSIENT_RETRIES || !isTransient(err)) throw err;
+      opts.onRetry?.(attempt + 2, MAX_TRANSIENT_RETRIES + 1);
+      await delay(retryBackoffMs(attempt), opts.signal);
+    }
+  }
 }
 
 /** Real generation for one stage: the actual master prompt for `assetId` (see
@@ -233,19 +384,57 @@ export async function streamGenerateStage(
   onChunk: (chunk: string) => void,
   opts: StreamStageOptions = {},
 ): Promise<void> {
-  const res = await fetch(`/api/pipeline/generate/${assetId}/stream`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      answers,
-      client_profile: opts.clientProfile ?? {},
-      phase: opts.phase ?? "phase1",
-      chat_session_id: opts.chatSessionId ?? null,
-      run_id: opts.runId ?? null,
-    }),
-    signal: opts.signal,
-  });
-  await consumeSseStream(res, onChunk, opts);
+  await streamWithRetry(
+    () =>
+      fetch(`/api/pipeline/generate/${assetId}/stream`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          answers,
+          client_profile: opts.clientProfile ?? {},
+          phase: opts.phase ?? "phase1",
+          chat_session_id: opts.chatSessionId ?? null,
+          run_id: opts.runId ?? null,
+        }),
+        signal: opts.signal,
+      }),
+    onChunk,
+    opts,
+  );
+}
+
+/** Finish a draft the model's output ceiling cut off, streamed as the text to **append** to
+ * `partialDraft` rather than as a replacement for it.
+ *
+ * `prefilled` carries the prepass output the cut-off attempt already paid for, keyed by the field
+ * it filled, so continuing does not re-run a competitor web search — and so the continuation is
+ * finishing the document against the same INPUTS the partial was written from. */
+export async function streamContinueStage(
+  assetId: string,
+  answers: Record<string, string>,
+  partialDraft: string,
+  onChunk: (chunk: string) => void,
+  opts: StreamStageOptions & { prefilled?: Record<string, string> } = {},
+): Promise<void> {
+  await streamWithRetry(
+    () =>
+      fetch(`/api/pipeline/continue/${assetId}/stream`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          answers,
+          partial_draft: partialDraft,
+          client_profile: opts.clientProfile ?? {},
+          phase: opts.phase ?? "phase1",
+          chat_session_id: opts.chatSessionId ?? null,
+          run_id: opts.runId ?? null,
+          prefilled: opts.prefilled ?? {},
+        }),
+        signal: opts.signal,
+      }),
+    onChunk,
+    opts,
+  );
 }
 
 /** Revision of a previous draft per an operator's requested change — a different, smaller
@@ -261,22 +450,29 @@ export async function streamRefineStage(
   /** Set for "Fix with Refine": the revision is then handed the business facts the findings were
    * checked against, so it can use the real price or offer instead of guessing one. */
   businessFix?: { clientProfile: Record<string, string> },
+  /** The same two callbacks a generation gets. A revision is asked for the whole document, so it
+   * can be cut off by the ceiling exactly as a generation can. */
+  opts: Pick<StreamStageOptions, "onDone" | "onRetry"> = {},
 ): Promise<void> {
-  const res = await fetch(`/api/pipeline/refine/${assetId}/stream`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      previous_draft: previousDraft,
-      note,
-      phase,
-      chat_session_id: attribution.chatSessionId ?? null,
-      run_id: attribution.runId ?? null,
-      business_fix: Boolean(businessFix),
-      client_profile: businessFix?.clientProfile ?? {},
-    }),
-    signal,
-  });
-  await consumeSseStream(res, onChunk);
+  await streamWithRetry(
+    () =>
+      fetch(`/api/pipeline/refine/${assetId}/stream`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          previous_draft: previousDraft,
+          note,
+          phase,
+          chat_session_id: attribution.chatSessionId ?? null,
+          run_id: attribution.runId ?? null,
+          business_fix: Boolean(businessFix),
+          client_profile: businessFix?.clientProfile ?? {},
+        }),
+        signal,
+      }),
+    onChunk,
+    { ...opts, signal },
+  );
 }
 
 export interface RunContextResult {
@@ -1003,6 +1199,20 @@ export async function saveRunIndustry(
   return body.profile;
 }
 
+/** Record which sub-service a Phase 2 run is for.
+ *
+ * The sub-service is a run-level fact the UI holds, and nothing on the server knows it. The Plan of
+ * Action covers every sub-service at once and has to name each one, so every Phase 2 run files its
+ * own. A correction appends a new version; the latest wins. */
+export async function saveRunSubService(runId: string, label: string): Promise<void> {
+  const res = await fetch(`/api/pipeline/runs/${runId}/sub-service`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ label }),
+  });
+  await unwrap<{ run_id: string; label: string }>(res, "Save the run's sub-service");
+}
+
 /** The run's industry, inherited from its source run when it has none of its own; null when neither
  * has one, which is the cue to ask. */
 export async function fetchRunIndustry(runId: string): Promise<IndustryProfileResult | null> {
@@ -1020,7 +1230,7 @@ export async function fetchRunIndustry(runId: string): Promise<IndustryProfileRe
 // Checking a draft against the client's business — see `app/services/asset_check.py`
 // --------------------------------------------------------------------------------------
 
-export type CheckName = "offer_relevance" | "funnel_relevance" | "business_logic" | "virality";
+export type CheckName = "offer_relevance" | "funnel_relevance" | "business_logic" | "virality" | "page_readiness";
 export type CheckSeverity = "error" | "warn" | "info";
 
 export interface CheckFinding {

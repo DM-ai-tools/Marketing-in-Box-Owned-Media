@@ -87,6 +87,31 @@ const SUB_KEY_LABELS: Record<string, Record<string, string[]>> = {
   },
 };
 
+/** Entries a document never states, worked out from one it does.
+ *
+ * Kept apart from `SUB_KEY_LABELS` on purpose: that table is the list of settings the server
+ * captures (`CLIENT_SETTING_FIELD_IDS`, checked against it by `tests/test_cro_settings.py`), and a
+ * derived answer is not one of them — nothing was asked, so there is nothing to capture.
+ *
+ * `regulated_field_flag` is the Plan of Action's "Is this a regulated field?". The CRO stage never
+ * asks it in those words; it asks the claim substantiation tier, which is the same question at finer
+ * grain. Tiers 2 (professionally regulated) and 3 (health-therapeutic) are the regulated fields the
+ * plan means — medical, legal, financial, insurance. Tier 1 is consumer law, which binds every
+ * business and is not what a "regulated field" names, so it reads as No. An unreadable tier derives
+ * nothing, and the field is asked: a legal guardrail is not something to default. */
+const DERIVED_SUB_KEYS: Record<string, Record<string, { from: string; derive: (value: string) => string | undefined }>> = {
+  cro_client_settings: {
+    regulated_field_flag: {
+      from: "claim_substantiation_tier",
+      derive: (tier) => {
+        const level = /^\s*([0-3])\b/.exec(tier)?.[1];
+        if (level === undefined) return undefined;
+        return Number(level) >= 2 ? "Yes" : "No";
+      },
+    },
+  },
+};
+
 /** The longest an extracted entry may be, per map-shaped key.
  *
  * A terminology entry is a word or short phrase, and anything longer is the extractor having matched
@@ -147,7 +172,7 @@ function valueForLabel(text: string, labels: string[], maxLength: number): strin
 /** True when `contextKey` names a map whose entries are addressed by `sub_key`, rather than a
  * document to be passed through whole. */
 export function isMapShapedContextKey(contextKey: string): boolean {
-  return contextKey in SUB_KEY_LABELS;
+  return contextKey in SUB_KEY_LABELS || contextKey in DERIVED_SUB_KEYS;
 }
 
 /** The value of one entry of a map-shaped context document, or undefined when this document does
@@ -157,6 +182,12 @@ export function isMapShapedContextKey(contextKey: string): boolean {
  * asks the operator, which is the correct outcome for a single-word field the upstream document
  * never actually resolved. */
 export function extractSubKey(contextKey: string, subKey: string, text: string): string | undefined {
+  const derived = DERIVED_SUB_KEYS[contextKey]?.[subKey];
+  if (derived) {
+    const source = extractSubKey(contextKey, derived.from, text);
+    return source ? derived.derive(source) : undefined;
+  }
+
   const labels = SUB_KEY_LABELS[contextKey]?.[subKey];
   if (!labels || !text.trim()) return undefined;
 

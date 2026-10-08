@@ -3,6 +3,7 @@ import { AssetReport } from "../pipeline/visual/AssetReport";
 import { slugify, type AssetExport } from "./exportAsset";
 import { splitHtmlBlocks } from "./htmlBlocks";
 import { stripPromptEchoes } from "./promptEcho";
+import { upgradePlainOutline } from "./plainOutline";
 import { withTopicSuggestions } from "./topicSuggestions";
 
 /** A deliverable as a designed, self-contained HTML file — the reader's Visual view, on its own.
@@ -73,7 +74,7 @@ function escapeHtml(text: string): string {
 
 export async function buildAssetReportHtml(opts: ReportOptions): Promise<string> {
   const { renderToStaticMarkup } = await import("react-dom/server");
-  const text = withTopicSuggestions(stripPromptEchoes(opts.text), opts.preamble ?? "", opts.assetId) + (opts.appendix ?? "");
+  const text = withTopicSuggestions(upgradePlainOutline(stripPromptEchoes(opts.text)), opts.preamble ?? "", opts.assetId) + (opts.appendix ?? "");
   const date = opts.date ?? new Date().toLocaleDateString("en-AU", { day: "numeric", month: "long", year: "numeric" });
   const body = renderToStaticMarkup(
     createElement(AssetReport, {

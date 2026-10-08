@@ -22,9 +22,11 @@ import {
   saveCompetitorAnalysis,
   saveHeadlineSelection,
   saveRunIndustry,
+  saveRunSubService,
   saveStageOutput,
   scrapePage,
   seedRunContext,
+  streamContinueStage,
   streamGenerateStage,
   scanServices,
   streamRefineStage,
@@ -43,6 +45,7 @@ import type {
   PrepassEvent,
   ScannedService,
   SourceRunSummary,
+  StreamCompletion,
 } from "./pipelineApi";
 import {
   CLIENT_PROFILE_SOURCES,
@@ -76,7 +79,8 @@ import {
 } from "./pipelineData";
 import type { PickedService, PipelinePhase } from "./pipelineData";
 import { SUB_SERVICE_FACT, phase2StartingContext } from "../data/phase2Catalog";
-import { SERVER_COMPOSED_CONTEXT_KEYS } from "../data/assetCatalog";
+import { PLAN_COMPOSED_KEYS, SERVER_COMPOSED_CONTEXT_KEYS } from "../data/assetCatalog";
+import { useUiStore } from "../store/uiStore";
 import { INDUSTRY_PROFILES, isIndustryBucket, notRecommendedReason } from "../data/industryProfiles";
 import { specifyPrefix } from "../lib/specifyChoice";
 
@@ -391,6 +395,26 @@ export interface PipelineMessage {
   /** Set when a resumed chat's draft was cut off mid-stream by the tab closing. The partial text
    * is kept (it may be most of the asset) but the card warns and offers a regeneration. */
   interrupted?: boolean;
+  /** Set when the *model* stopped because it hit its output ceiling, rather than because it had
+   * finished — the backend's `done` event says so (`stop_reason: "max_tokens"`).
+   *
+   * A different thing from `interrupted`, with a different remedy, which is why it is a second flag
+   * rather than a reuse of that one. `interrupted` is a broken connection: nothing more is coming
+   * and the only way forward is to generate again. This is a complete, successful, *billed*
+   * response to a document that was simply longer than one reply — so the remedy is to ask for the
+   * rest (`continueGeneration`), and regenerating would throw away everything already paid for and
+   * run into the same ceiling. */
+  truncated?: boolean;
+  /** A continuation is streaming into the end of this card. Distinct from `streaming`, which is
+   * also set: the body is already readable, so the card keeps showing the draft and appends to it
+   * rather than switching back to the progress view. */
+  continuing?: boolean;
+  /** Prepass output this card's generation already paid for, keyed by the field it filled. Replayed
+   * on a continuation so the search is not run twice — see `streamContinueStage`. */
+  prefilled?: Record<string, string>;
+  /** A stream that produced nothing is being restarted — see `streamWithRetry`. Cleared the moment
+   * the first delta of any attempt arrives. */
+  reconnecting?: { attempt: number; of: number };
   generationError?: string;
   savePhase?: MessageSavePhase;
   saveError?: string;
@@ -539,6 +563,14 @@ interface PipelineState {
   submitRefine: (messageId: string, note: string, opts?: { businessFix?: boolean }) => Promise<void>;
   saveStage: (messageId: string) => Promise<void>;
   retryGeneration: (messageId: string) => Promise<void>;
+  /** Ask for the rest of a draft the model's output ceiling cut off, appended to what is there.
+   *
+   * Not a retry and not a refine. The response was complete, successful and already billed — it was
+   * simply longer than one reply allows — so the fix is to carry on from the cut rather than to
+   * start again into the same ceiling. One call, started by the operator: a continuation resends
+   * the stage's whole prompt plus the partial as input, so whether a document that stopped after
+   * its second of three webinar packages is worth finishing is their judgement, not a loop's. */
+  continueGeneration: (messageId: string) => Promise<void>;
   /** Re-run one asset from the top: re-ask its own questions, then regenerate it.
    *
    * For the case Retry does not cover. Retry re-sends the *same* answers, which only helps a
@@ -787,8 +819,14 @@ const EMPTY_GENERATION =
  * which strands the chat. So each in-flight card is converted into whichever *resumable* form
  * fits: a partial draft keeps its text and gains a regenerate option, an empty one becomes a
  * plain retry, and an unfinished competitor step becomes a re-run. */
+/** The "Back in Phase N, at Stage …" card `setPhase` used to push on every phase toggle. It is no
+ * longer written, and chats saved before that carry one per toggle, so a reopened chat drops them. */
+const PHASE_RETURN_NOTE = /^Back in Phase \d+, (?:at Stage \d+: |which is complete)/;
+
 function repairInterruptedMessages(messages: PipelineMessage[]): PipelineMessage[] {
-  return messages.map((m) => {
+  return messages
+    .filter((m) => !(m.role === "assistant" && m.kind === "text" && PHASE_RETURN_NOTE.test(m.text ?? "")))
+    .map((m) => {
     // A prepass chip left "running" would spin forever; drop it rather than restore the lie.
     const prepass = m.prepass?.status === "running" ? undefined : m.prepass;
 
@@ -856,11 +894,20 @@ function repairInterruptedMessages(messages: PipelineMessage[]): PipelineMessage
       };
     }
 
+    // A continuation that was still appending when the tab closed. It restores as the truncated
+    // draft it was, not as an `interrupted` one: both flags would put two warnings and two buttons
+    // on one card, and the remedy here has not changed — the document is still short of its end,
+    // and Continue is still the way to finish it. Whatever the continuation did manage to write is
+    // kept, which is the point of the whole feature.
+    if (m.streaming && m.continuing) {
+      return { ...m, prepass, streaming: false, continuing: false, reconnecting: undefined, truncated: true };
+    }
+
     if (m.streaming) {
       const hasDraft = Boolean(m.text?.trim());
       return hasDraft
-        ? { ...m, prepass, streaming: false, interrupted: true }
-        : { ...m, prepass, streaming: false, generationError: INTERRUPTED_GENERATION };
+        ? { ...m, prepass, streaming: false, continuing: false, reconnecting: undefined, interrupted: true }
+        : { ...m, prepass, streaming: false, reconnecting: undefined, generationError: INTERRUPTED_GENERATION };
     }
 
     // A finished-looking generation with nothing in it: a stream that was cut before its first
@@ -1419,6 +1466,17 @@ async function ensureRun(get: () => PipelineState, set: (partial: Partial<Pipeli
   return run_id;
 }
 
+/** File a track's sub-service on its run, so the Plan of Action can name every one of them.
+ *
+ * Not awaited and never fatal: the plan degrades to "Sub-service N" for a run whose label did not
+ * arrive, which is a worse plan, not a broken run. */
+function fileSubService(track: Pick<Phase2Track, "runId" | "label">): void {
+  if (!track.runId) return;
+  void saveRunSubService(track.runId, track.label).catch((err) => {
+    console.error(`Could not record the ${track.label} sub-service on its run`, err);
+  });
+}
+
 async function createPhase2Tracks(
   get: () => PipelineState,
   set: (partial: Partial<PipelineState>) => void,
@@ -1464,6 +1522,7 @@ async function createPhase2Tracks(
     phase2Tracks: Object.fromEntries(created.map((track) => [track.id, track])),
     activePhase2TrackId: firstRunId,
   });
+  for (const track of created) fileSubService(track);
   if (created.length > 1) {
     push(get, set, {
       role: "assistant",
@@ -1493,31 +1552,79 @@ function startCreepingProgress(get: () => PipelineState, set: (partial: Partial<
 }
 
 /** Streams `run`'s output into an existing message, driving activeStatus/navStatus/progress
- * around it. Shared by fresh generation, refinement, and retry. */
+ * around it. Shared by fresh generation, refinement, retry and continuation.
+ *
+ * **One stream per card, enforced here.** Every path that generates goes through this function, so
+ * this is the one place the guard has to be — and it has to exist, because nothing else stopped a
+ * second request being opened against a card that already had one. Two clicks on Retry, a
+ * double-submitted Refine, or a stale client resuming a chat whose card still read `streaming`
+ * each billed twice and interleaved two documents into one `text` at whatever rate the two
+ * connections happened to arrive. The server guards the same thing under its own key
+ * (`app/services/stream_locks.py`); this half is what keeps an ordinary double-click from ever
+ * becoming an HTTP 409 the operator has to read.
+ *
+ * `append` is for a continuation: the draft is already in `text` and the stream adds to the end of
+ * it, rather than the default of replacing it.
+ */
 async function streamIntoMessage(
   get: () => PipelineState,
   set: (partial: Partial<PipelineState>) => void,
   messageId: string,
-  run: (onChunk: (chunk: string) => void, signal: AbortSignal) => Promise<void>,
+  run: (onChunk: (chunk: string) => void, signal: AbortSignal, hooks: StreamHooks) => Promise<void>,
+  opts: { append?: boolean } = {},
 ): Promise<void> {
+  // Refused rather than queued, and refused rather than replacing the one already running: the
+  // request in flight is doing exactly what this one would do, and cancelling it to start again
+  // would throw away however much of the document it has already been billed for.
+  if (generationRequests.has(messageId)) return;
+
   set({ activeStatus: "running", navStatus: "Generating…" });
   const stop = startCreepingProgress(get, set);
   const controller = new AbortController();
   generationRequests.set(messageId, controller);
+  let truncated = false;
+
+  // Handed to every call site rather than wired per call, so a new generation path cannot forget
+  // the one flag that decides whether its draft is reviewable.
+  const hooks: StreamHooks = {
+    onDone: (completion) => {
+      truncated = completion.truncated;
+    },
+    onRetry: (attempt, of) => patchMessage(get, set, messageId, { reconnecting: { attempt, of } }),
+  };
 
   try {
-    await run((chunk) => {
-      const current = get().messages.find((m) => m.id === messageId);
-      patchMessage(get, set, messageId, { text: (current?.text ?? "") + chunk });
-    }, controller.signal);
+    await run(
+      (chunk) => {
+        const current = get().messages.find((m) => m.id === messageId);
+        patchMessage(get, set, messageId, {
+          text: (current?.text ?? "") + chunk,
+          // Real text has arrived, so whatever reconnection was being reported is over.
+          ...(current?.reconnecting ? { reconnecting: undefined } : null),
+        });
+      },
+      controller.signal,
+      hooks,
+    );
     // A model that echoed the prompt's private blocks ("===== BEGIN INDUSTRY_VOICE =====…") has
     // that removed here, before the draft can be approved into the Context Store or checked.
     const finished = get().messages.find((m) => m.id === messageId)?.text ?? "";
     const cleaned = stripPromptEchoes(finished);
-    patchMessage(get, set, messageId, cleaned === finished ? { streaming: false } : { streaming: false, text: cleaned });
+    patchMessage(get, set, messageId, {
+      streaming: false,
+      continuing: false,
+      reconnecting: undefined,
+      truncated,
+      // A continuation that finished the document clears the flag that offered it, so the card
+      // stops warning and goes back to being an ordinary draft to review.
+      ...(cleaned === finished ? null : { text: cleaned }),
+    });
     set({ activeStatus: "hitl", progress: 100, navStatus: "Awaiting Review" });
-    // Only a clean finish: a truncated or failed draft is not worth checking until it is complete.
-    void runAssetCheck(get, set, messageId);
+    // Only a *complete* draft is checked. A document the ceiling cut off mid-sentence would be
+    // scored on sections it has not got yet, and judged for contradictions against an argument it
+    // has not finished making — a report the operator would then have to re-read after continuing.
+    // The check runs on its own when the continuation finishes.
+    if (!truncated) void runAssetCheck(get, set, messageId);
   } catch (err) {
     // A stop the operator asked for is not a failure and not a truncated draft. `stopStage` has
     // already superseded this card and put the run back to Ready, so anything set here would
@@ -1527,12 +1634,27 @@ async function streamIntoMessage(
     // as one interrupted by the tab closing — kept, flagged incomplete, regenerable — rather than
     // being replaced by an error card that hides the text it did produce.
     if (err instanceof StreamTruncatedError && err.receivedText) {
-      patchMessage(get, set, messageId, { streaming: false, interrupted: true });
+      patchMessage(get, set, messageId, {
+        streaming: false,
+        continuing: false,
+        reconnecting: undefined,
+        interrupted: true,
+      });
       set({ activeStatus: "hitl", progress: 100, navStatus: "Awaiting Review" });
       return;
     }
     const msg = recordFailure(set, err);
-    patchMessage(get, set, messageId, { streaming: false, generationError: msg });
+    // A continuation that fails leaves the draft exactly as it was, still truncated and still
+    // offering Continue. The failure belongs on the card as a note, not as the error state that
+    // hides the body — there is a real document here, and it was there before this call.
+    patchMessage(
+      get,
+      set,
+      messageId,
+      opts.append
+        ? { streaming: false, continuing: false, reconnecting: undefined, truncated: true, saveError: msg }
+        : { streaming: false, continuing: false, reconnecting: undefined, generationError: msg },
+    );
     set({ activeStatus: "hitl", progress: 100, navStatus: "Awaiting Review" });
   } finally {
     stop();
@@ -1594,6 +1716,16 @@ export function composeFixNote(findings: CheckFinding[]): string {
   );
 }
 
+/** The two stream callbacks `streamIntoMessage` supplies to whichever API call it is driving.
+ *
+ * Spread into the call's own options at each site — `{ ...hooks, signal }` — rather than threaded
+ * through a wrapper, because the three stream functions take their options differently and a
+ * wrapper that normalised them would be a third shape to keep in step. */
+interface StreamHooks {
+  onDone: (completion: StreamCompletion) => void;
+  onRetry: (attempt: number, of: number) => void;
+}
+
 /** Who to bill the next API call to. Read at call time rather than closed over, because a chat's
  * session row and its run are both created lazily — a call made ten seconds later may be
  * attributable when this one was not. */
@@ -1624,7 +1756,26 @@ function prepassOptions(
       });
     },
     onPrepass: (event: PrepassEvent) => {
+      const current = get().messages.find((m) => m.id === messageId);
+      // Every prepass that actually produced something is filed under the field it filled, so a
+      // Continue on this card can hand it straight back (`streamContinueStage`'s `prefilled`)
+      // rather than paying for the same web search or the same SociaVault fetch a second time.
+      const prefilled =
+        event.skipped || !event.content
+          ? current?.prefilled
+          : { ...current?.prefilled, [event.target_field_id]: event.content };
+
+      // The social-post fetch is routed through this handler too (see `consumeSseStream`), and it
+      // is not the competitor prepass the chip reports on — so it is recorded for replay and
+      // nothing else. Overwriting `prepass` with it would relabel the chip "Competitor Analysis"
+      // over a social fetch.
+      if (event.asset_id === "social_post_data") {
+        patchMessage(get, set, messageId, { prefilled });
+        return;
+      }
+
       patchMessage(get, set, messageId, {
+        prefilled,
         prepass: {
           assetId: event.asset_id,
           label: paired?.label ?? event.asset_id,
@@ -1750,9 +1901,10 @@ async function runStage(
     answers,
   });
 
-  await streamIntoMessage(get, set, message.id, (onChunk, signal) =>
+  await streamIntoMessage(get, set, message.id, (onChunk, signal, hooks) =>
     streamGenerateStage(stage.asset.asset_id, answers, onChunk, {
       ...prepassOptions(get, set, message.id, stage.asset.asset_id),
+      ...hooks,
       signal,
     }),
   );
@@ -2726,12 +2878,21 @@ function finishPhase(get: () => PipelineState, set: (partial: Partial<PipelineSt
       : {}),
   });
   const skipped = skippedAssetIds(get().messages, phase).size;
+  // Phase 1 stops one stage short of the Plan of Action on purpose (`DEFERRED_TO_PHASE2`). Said at
+  // the point the operator would otherwise look for it, because a roadmap that is simply absent from
+  // the end of the pipeline reads as a stage that failed to run.
+  const planNote =
+    phase === "phase1"
+      ? " The Plan of Action isn't generated here: it is written at the end of Phase 2, once your sub-services are built, so that one plan covers all of them."
+      : "";
   push(get, set, {
     role: "assistant",
     kind: "text",
-    text: skipped
-      ? `${PHASE_META[phase].label} is complete. ${total - skipped} of ${total} assets were generated and saved to the Context Store, and ${skipped} ${skipped === 1 ? "was" : "were"} skipped as rarely needed for this industry. Use "Start here" on a skipped stage to build it anyway.`
-      : `All ${total} ${PHASE_META[phase].label} assets have been generated and saved to the Context Store. ${PHASE_META[phase].label} is complete.`,
+    text:
+      (skipped
+        ? `${PHASE_META[phase].label} is complete. ${total - skipped} of ${total} assets were generated and saved to the Context Store, and ${skipped} ${skipped === 1 ? "was" : "were"} skipped as rarely needed for this industry. Use "Start here" on a skipped stage to build it anyway.`
+        : `All ${total} ${PHASE_META[phase].label} assets have been generated and saved to the Context Store. ${PHASE_META[phase].label} is complete.`) +
+      planNote,
   });
 }
 
@@ -2769,10 +2930,19 @@ async function hydrateContextFromDb(
   // `email_sequence_copy`, which no asset writes, could never be read back at all.
   const wanted = new Map<string, string | null>();
   for (const field of asset.fields) {
-    if (resolveContext(field, get().context)) continue;
-    const keys = field.context_keys?.length ? field.context_keys : [field.context_key ?? ""];
+    const gathered = Boolean(field.context_keys?.length);
+    // A gathered field resolves as soon as *one* of its documents is present, so "resolved" cannot
+    // mean "nothing to fetch" for it: a resumed chat holding the funnel but not the lead magnet would
+    // send the plan only the funnel. Each of its keys is checked on its own instead.
+    // The Plan of Action's engagement-wide documents are always read fresh: a copy fetched earlier
+    // knows nothing about a sub-service approved since, and the whole point of the plan is that it
+    // sees every one.
+    const alwaysFresh = Boolean(field.context_key && PLAN_COMPOSED_KEYS[field.context_key]);
+    if (!gathered && !alwaysFresh && resolveContext(field, get().context)) continue;
+    const keys = gathered ? field.context_keys! : [field.context_key ?? ""];
     for (const key of keys) {
       if (!key || key === "unresolved_context_key") continue;
+      if (gathered && get().context[key]?.text?.trim()) continue;
       wanted.set(key, producerAssetIdFor(key) ?? null);
     }
   }
@@ -2791,12 +2961,22 @@ async function hydrateContextFromDb(
     const from = own ? producer ?? key : (producer as string);
     additions[key] = {
       assetId: from,
-      label: ASSET_BY_ID[from]?.label ?? humaniseContextKey(key),
+      label: PLAN_COMPOSED_KEYS[key] ?? ASSET_BY_ID[from]?.label ?? humaniseContextKey(key),
       text: entry.content,
     };
   }
-  if (Object.keys(additions).length) {
-    set({ context: { ...additions, ...get().context } }); // in-session values win on conflict
+
+  // The engagement-wide plan documents are the one exception to "in-session values win": they are
+  // composed from other runs, so the session copy is exactly the one that goes stale. One the server
+  // no longer composes (nothing built) is dropped rather than left behind.
+  const freshKeys = [...wanted.keys()].filter((key) => PLAN_COMPOSED_KEYS[key]);
+  const fresh = Object.fromEntries(Object.entries(additions).filter(([key]) => PLAN_COMPOSED_KEYS[key]));
+  const current = { ...get().context };
+  for (const key of freshKeys) delete current[key];
+  const others = Object.fromEntries(Object.entries(additions).filter(([key]) => !PLAN_COMPOSED_KEYS[key]));
+  if (Object.keys(additions).length || freshKeys.length) {
+    // In-session values win on conflict, except for the keys above.
+    set({ context: { ...others, ...current, ...fresh } });
   }
 }
 
@@ -3275,16 +3455,52 @@ export function approvedAssetIds(messages: PipelineMessage[], phase: PipelinePha
  * executed.
  */
 function nextUnexecutedIndex(state: PipelineState): number {
-  const approved = approvedAssetIds(state.messages, state.phase);
+  // Read for the track on screen. A Phase 2 chat holds every sub-service's cards, and counting them
+  // all made a second sub-service's ICP look finished because the first one's had been approved.
+  const trackId = state.phase === "phase2" ? state.activePhase2TrackId : null;
+  const approved = approvedAssetIds(state.messages, state.phase, trackId);
   // A stage the operator chose to skip on an industry advisory is passed over too — otherwise
   // approving the stage after it would walk straight back to the one they just declined.
-  const skipped = skippedAssetIds(state.messages, state.phase);
+  const skipped = skippedAssetIds(state.messages, state.phase, trackId);
+  // One Plan of Action covers every sub-service, so a later sub-service's walk does not build a
+  // second one: it ends, and `notifyPlanOutOfDate` offers the re-run of the one that exists.
+  const planExists = state.phase === "phase2" && planOfActionApproved(state.messages);
   const stages = stagesFor(state.phase);
   for (let i = 0; i < stages.length; i++) {
     const id = stages[i].asset.asset_id;
+    if (planExists && id === PLAN_ASSET_ID) continue;
     if (!approved.has(id) && !skipped.has(id)) return i;
   }
   return stages.length;
+}
+
+const PLAN_ASSET_ID = "plan_of_action";
+
+/** Whether this chat has an approved Plan of Action, on any Phase 2 track.
+ *
+ * Across tracks on purpose: the plan is the one deliverable that is not per-sub-service. Read off
+ * the transcript like `approvedAssetIds`, so it survives a reload with the messages and needs no
+ * state of its own to go stale. */
+export function planOfActionApproved(messages: PipelineMessage[]): boolean {
+  return messages.some(
+    (m) =>
+      m.kind === "generation" &&
+      m.savePhase === "saved" &&
+      m.assetId === PLAN_ASSET_ID &&
+      (m.phase ?? "phase2") === "phase2",
+  );
+}
+
+/** Tell the operator the plan no longer covers everything the engagement holds.
+ *
+ * Raised when a sub-service's run ends, or one of its stages is re-run, after a plan was approved.
+ * Never for the plan itself, and never mid-walk: ten approvals in a new sub-service's run would be
+ * ten identical interruptions. The question is whether to re-run once it is finished. */
+function notifyPlanOutOfDate(get: () => PipelineState, approvedAssetId: string | undefined): void {
+  const state = get();
+  if (state.phase !== "phase2" || approvedAssetId === PLAN_ASSET_ID) return;
+  if (!planOfActionApproved(state.messages)) return;
+  useUiStore.getState().askPlanRerun({ subService: state.clientProfile[SUB_SERVICE_FACT] ?? "" });
 }
 
 /** Stages this leg skipped on an industry advisory and has not since built.
@@ -3507,6 +3723,7 @@ export const usePipelineStore = create<PipelineState>((set, get) => ({
         status: "queued",
       };
       set({ phase2Tracks: { ...get().phase2Tracks, [track.id]: track } });
+      fileSubService(track);
       push(get, set, {
         role: "assistant",
         kind: "text",
@@ -3544,6 +3761,8 @@ export const usePipelineStore = create<PipelineState>((set, get) => ({
       set({ clientProfile: { ...get().clientProfile, [SUB_SERVICE_FACT]: subService }, editSeed: null });
 
       if (previous) {
+        // The run's recorded sub-service is the old one until it is filed again.
+        fileSubService({ runId: get().runId ?? "", label: subService });
         // A correction from `editField`. The walk it interrupted is still standing, so it resumes
         // where it was rather than restarting the run at stage 01 — which would throw away every
         // stage already approved. What cannot stand is the answers the old sub-service filled in.
@@ -3757,7 +3976,7 @@ export const usePipelineStore = create<PipelineState>((set, get) => ({
 
     const assetId = message.assetId;
     const previousDraft = message.text;
-    await streamIntoMessage(get, set, newMessage.id, (onChunk, signal) =>
+    await streamIntoMessage(get, set, newMessage.id, (onChunk, signal, hooks) =>
       streamRefineStage(
         assetId,
         previousDraft,
@@ -3767,6 +3986,7 @@ export const usePipelineStore = create<PipelineState>((set, get) => ({
         get().phase,
         attribution(get),
         opts?.businessFix ? { clientProfile: get().clientProfile } : undefined,
+        hooks,
       ),
     );
   },
@@ -3850,23 +4070,75 @@ export const usePipelineStore = create<PipelineState>((set, get) => ({
   retryGeneration: async (messageId) => {
     const message = liveMessage(get(), messageId);
     if (!message?.assetId || !message.answers) return;
+    // A stream already running into this card is doing what this click asked for. Checked here as
+    // well as in `streamIntoMessage` so that the card's own state is not wiped — without this the
+    // text would be cleared and the flags reset, and then the guard would refuse to start anything,
+    // leaving a blank card with a live stream still writing into it.
+    if (generationRequests.has(messageId)) return;
     const assetId = message.assetId;
     const answers = message.answers;
 
     patchMessage(get, set, messageId, {
       generationError: undefined,
       interrupted: false,
+      truncated: false,
+      reconnecting: undefined,
       streaming: true,
       text: "",
       prepass: undefined,
+      // Regenerating re-runs the prepasses, so last attempt's output is not replayed into this one.
+      prefilled: undefined,
       // The old report is about text that is being thrown away.
       check: undefined,
     });
-    await streamIntoMessage(get, set, messageId, (onChunk, signal) =>
+    await streamIntoMessage(get, set, messageId, (onChunk, signal, hooks) =>
       streamGenerateStage(assetId, answers, onChunk, {
         ...prepassOptions(get, set, messageId, assetId),
+        ...hooks,
         signal,
       }),
+    );
+  },
+
+  continueGeneration: async (messageId) => {
+    const message = liveMessage(get(), messageId);
+    // `truncated` is the gate, not `text`: this call only makes sense for a draft the *model* cut
+    // off at its ceiling. A connection that dropped (`interrupted`) has no half-finished response
+    // on the other end to carry on from, and a finished draft has nothing left to write.
+    if (!message?.assetId || !message.answers || !message.text || !message.truncated) return;
+    if (generationRequests.has(messageId)) return;
+
+    const assetId = message.assetId;
+    const answers = message.answers;
+    const partial = message.text;
+
+    // `streaming` *and* `continuing`: the first keeps the action row hidden while a call is in
+    // flight, the second tells the card to keep rendering the draft and append to it instead of
+    // switching back to the progress view over a document the operator is already reading.
+    patchMessage(get, set, messageId, {
+      streaming: true,
+      continuing: true,
+      saveError: undefined,
+      reconnecting: undefined,
+    });
+
+    await streamIntoMessage(
+      get,
+      set,
+      messageId,
+      (onChunk, signal, hooks) =>
+        streamContinueStage(assetId, answers, partial, onChunk, {
+          clientProfile: get().clientProfile,
+          phase: get().phase,
+          ...attribution(get),
+          // What the cut-off attempt's prepasses already produced. Without it the continuation
+          // re-runs the competitor search and the SociaVault fetch — paying twice, and finishing
+          // the document against different inputs than the half already written.
+          prefilled: message.prefilled,
+          ...hooks,
+          signal,
+        }),
+      { append: true },
     );
   },
 
@@ -3901,7 +4173,7 @@ export const usePipelineStore = create<PipelineState>((set, get) => ({
       }
 
       await saveStageOutput(runId, message.assetId, message.text, message.answers);
-      patchMessage(get, set, messageId, { savePhase: "saved", interrupted: false });
+      patchMessage(get, set, messageId, { savePhase: "saved", interrupted: false, truncated: false });
 
       const entry: ContextEntry = { assetId: stage.asset.asset_id, label: stage.asset.label, text: message.text };
       set({
@@ -3956,6 +4228,10 @@ export const usePipelineStore = create<PipelineState>((set, get) => ({
       const isRerun = returnIndex !== null;
       const target = nextUnexecutedIndex(get());
       const done = target >= total;
+
+      // A sub-service finished — or one of its earlier stages was re-run — after the plan was
+      // written, so the plan is behind. Said once, here, rather than on every approval.
+      if (isRerun || done) notifyPlanOutOfDate(get, message.assetId);
 
       if (isRerun) {
         // The parked intake belongs to whichever stage the operator was standing in. Restored only
@@ -4571,15 +4847,10 @@ chooseHeadlines: async (messageId, ids) => {
     });
 
     if (resuming) {
-      const stage = stageAt(phase, resuming.currentIndex);
-      const done = resuming.currentIndex >= totalStagesFor(phase);
-      push(get, set, {
-        role: "assistant",
-        kind: "text",
-        text: done
-          ? `Back in ${PHASE_META[phase].label}, which is complete — all ${totalStagesFor(phase)} assets are saved.`
-          : `Back in ${PHASE_META[phase].label}, at Stage ${String(stage.stageNumber).padStart(2, "0")}: ${stage.asset.label}.`,
-      });
+      /* No "Back in Phase N, at Stage …" card here. It used to be pushed on every return, so an
+       * operator flipping between the legs filled the transcript with one per toggle, each saved
+       * with the chat. The toggle, the nav status and the pipeline diagram already say which phase
+       * and stage is on screen. */
       // Re-derived rather than restored from the slot, for the same reason a reopened chat re-derives
       // it: the parked status may name a stream that no longer exists.
       set(deriveResumeActivity(get().messages, get().intake, resuming.currentIndex, resuming.progress, phase, get().activePhase2TrackId));

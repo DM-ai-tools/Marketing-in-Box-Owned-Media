@@ -218,7 +218,9 @@ async def test_html_is_checked_as_the_words_a_reader_sees(monkeypatch: pytest.Mo
     _patch_judge(monkeypatch, json.dumps({"checks": {}}))
     html = "```html\n<html><head><style>.guaranteed{color:red}</style></head><body><p>Hello there.</p></body></html>\n```"
     report = await A.check_asset("pillar_page", html, _facts())
-    assert not any(f for c in report.checks for f in c.findings)
+    # The page check reports this bare page's missing <title>, viewport and so on; the business
+    # checks must not read the stylesheet's `.guaranteed` as a claim.
+    assert not any(f for c in report.checks if c.check != "page_readiness" for f in c.findings)
 
 
 # --------------------------------------------------------------------------------------

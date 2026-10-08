@@ -86,6 +86,9 @@ Past a few hundred URLs use `POST /batch/submit`
   <https://docs.context.dev/optimization/troubleshooting> before changing approach. Note that
   heavily bot-walled review sites (g2.com, trustpilot.com) defeat every reader here — Context.dev
   returns a 400 or a near-empty page, which the thin-content guard already handles.
+- **An empty balance is a 401, the same status as a bad key** (`error_code: "USAGE_EXCEEDED"`,
+  "Insufficient credits"). `_fail` reports it as "out of credits" with the subscription link, not as
+  a rejected key — the key is fine, and every Context.dev call in the app fails until it is topped up.
 
 ---
 
@@ -222,6 +225,14 @@ Set in `app/services/generation.py`; `PageDesignInput.sheet_for(asset_id)` picks
 | `BRAND_THEME_STAGES` | `lead_magnet`, `funnel_hub_media`, `webinar` | the **theme brief** — colours, type, shapes, logo. Layout and components stripped, with an explicit "this is a theme, not a template" directive, because a lead magnet has its own structure. |
 | `SCREENSHOT_STAGES` | `cro`, `pillar_page` | the reference images, as `image` content blocks. Free — the shots are captured once per run either way, so a stage here costs prompt tokens and no credits. `pillar_page` was missing and should not have been: its Rule 1 is that every colour, button and layout element traces back to the reference, and it was the one stage not shown the reference. |
 | everything else | `icp`, `funnel`, `sms_sequence`, `plan_of_action`, … | nothing — no palette to get wrong. |
+
+**`cro` is a replica stage only when there is a page to rewrite.** In Phase 2 (always NEW PAGE),
+and in Phase 1's NEW PAGE mode, `_cro_writes_copy_only` in `app/routers/pipeline.py` gives it no
+page design and no page template. With no page of its own, the design source fell through to
+another page. A real Phase 2 run then wrote a full ```html page into its copy, and its copy was
+assembled into a *different service's* markup. The Pillar Page is the stage that lays the page
+out, and it captures DESIGN.md (and the brief images) on its own first run.
+`tests/test_cro_copy_only.py` pins this.
 
 ### Screenshots
 
@@ -364,7 +375,7 @@ ladder rather than alternatives — a run uses whichever rung it can reach.
 | --- | --- | --- | --- | --- |
 | 1 | `design_md.py` | palette, type, components, logo | 17 credits | the right brand, an invented page |
 | 2 | `page_structure.py` | the band sequence, nav labels, contacts, client logos, SVG inventory | **free** | the right shape, generated markup |
-| 3 | `page_replica.py` | the client's own markup with new words in it | 0-1 credits | the actual page |
+| 3 | `page_replica.py` | the client's own markup with new words in it | 0-1 credits | the actual page — `cro` only; the pillar page is in design-language mode (below) |
 
 ### Why rungs 2 and 3 exist
 
@@ -473,6 +484,39 @@ served HTML is a JS shell. Cached once per run under the `page_replica_template`
 - A replica stage's SSE stream emits `replica_template`, then `replica_start`, then `replica` (the
   report; the HTML is stored, not put on the wire) or `replica_error`. An assembly failure never
   reports the stage as failed — the stage's own document is already complete.
+
+---
+
+## Design-language mode — the pillar page is a new page in the client's style
+
+Rung 3 is right for `cro` (its job is to rewrite the page it was given) and wrong for the pillar
+page: that page does not exist yet, its copy has a different length and shape from the reference's,
+and pouring it into the reference's markup or forcing the reference's band count on it was what
+made pillar pages come out badly. So `pillar_page` is in `generation.DESIGN_LANGUAGE_STAGES`:
+**every visual decision, the header, the footer and every link come from the reference; the body's
+sections follow the content.** No intake question switches this — it is how the stage works.
+
+| Piece | Where | What it does |
+| --- | --- | --- |
+| Link manifest | `app/services/link_manifest.py` | Every `<a href>` on the reference page, grouped header (with sub-menu parent) / footer (with column) / social / cta / contact / legal / body, absolute, never `#`. Icon-only links are labelled from `aria-label` / svg `<title>` / img alt / platform. Free — runs on `DesignTokens.html`. |
+| `## Links` + `## Responsive` | `design_md.build_design_md` | Full DESIGN.md only. Responsive reads `DesignTokens.breakpoints` (`design_tokens.collect_breakpoints`, the CSS's own `@media` widths) and states defaults as defaults. The manifest is also stored as data under `links` on `brand_design_tokens`. `DESIGN_CAPTURE_VERSION` 4. |
+| Directives | `generation._brand_token_block(design_language=True)` | Swaps `_PAGE_STRUCTURE_DIRECTIVE` for `_DESIGN_LANGUAGE_DIRECTIVE` + `_COMPONENT_VOCABULARY_DIRECTIVE`, adds `_LINKS_DIRECTIVE`, `_RESPONSIVE_DIRECTIVE`, `_DEPLOY_READY_DIRECTIVE` — each only when its section is in the sheet. `page_structure.as_component_vocabulary` re-heads the shared sheet's structure section on the way in, so the document never says "reproduce this sequence exactly" under a directive saying not to. |
+| Standards | `assets/Prompts/PAGE_BUILD_STANDARDS.md` | The design skills' build-quality bar (composition, responsive, a11y, performance, SEO, links) with every aesthetic opinion stripped. In the per-stage tail, **not** `REFERENCE_LIBRARY`: adding it there would cost the pillar page its share of the 12k-token library cache. |
+| Prompt rules | both `Master_Prompt_Universal_Page_Design_v1*.md` | Rule 1 is design-language fidelity; Rule 3 uses real image URLs first; Rule 4 takes the CTA href from Links; Rule 5 reads the Responsive section; "Real links only" and "Deploy-ready" rules added. Same edit in both phases — `tests/test_design_language.py` checks both. |
+| Section images | `image_briefs.build_section_briefs`, `pipeline._ensure_section_images` | Up to `MAX_SECTION_IMAGES` (2) more gpt-image-2 images for the improved content's own `##` sections, generated on the pillar page, stored under `section_images` apart from `generated_images`, regenerated only when those sections leave the copy. |
+| Deploy check | `app/services/page_check.py`, `page_readiness` in `asset_check` | Rules only, never judged, scored 100 − 15/error − 5/warn − 1/info. Missing header/social/contact link = must fix; dead `#` (a scripted one is a warning), unlisted client-site paths, someone else's social profile, image placeholders and stock URLs, missing title/viewport/h1/lang/main, fixed widths, off-palette hexes, and a descendant `nav ul{display:…}` rule that outranks the sub-menu's `display:none` (every dropdown stuck open — must fix; a focusable `<li tabindex>` under `:focus-within` is a warning). `fix_context` carries the Links table so "Fix with Refine" copies the real href. |
+
+### Rules
+
+- **A design-language stage never gets the page template.** `_generation_sse_stream` skips
+  `resolve_page_template` for it; `tests/test_cro_copy_only.py` pins both phases.
+- **The link rules need the manifest.** A run captured before v4 has none; the check lists it under
+  facts missing rather than passing the links, and the next stage run re-captures.
+- **`page_readiness` is in four places:** `asset_check.CHECKS`/`CHECKS_BY_ASSET`, `CheckName` in
+  `pipelineApi.ts`, and the label/question maps in both `AssetCheckPanel.tsx` and
+  `lib/businessCheck.ts`.
+- **`business_facts.PAGE_CHECK_ASSETS` restates `DESIGN_LANGUAGE_STAGES`** because that module sits
+  below `generation` and must not import it. Keep the two in step.
 
 ---
 
@@ -619,7 +663,9 @@ Instagram and LinkedIn's public data, keyed by `SOCIO_VAULT` in the backend `.en
 type, and `fetch_recent_posts(platform, handle, *, limit)` normalising all three platforms' very
 different raw shapes into one `SocialPost`. A field a platform genuinely does not publish — LinkedIn
 has no documented like/comment count — is left `None`, never `0`; printing `0` would claim a real
-measurement of zero engagement, which is a different, false claim.
+measurement of zero engagement, which is a different, false claim. (That is true of the company and
+profile feeds this module reads. `/scrape/linkedin/post` does return likes and comments, at one
+credit per post; it exists and is unused by choice, so a sample's cost per account stays flat.)
 
 **Code against the live responses, not the docs' prose. This has broken once.** On the first live
 run every platform returned nothing while the mocked tests passed. Three causes:
@@ -634,6 +680,26 @@ run every platform returned nothing while the mocked tests passed. Three causes:
   (`{"text": …}`).
 
 `tests/test_sociavault_client.py` pins the real shapes.
+
+**A sample has to be corrected, not just parsed.** A later live run (2026-10-06) returned data that
+parsed cleanly and was still misleading:
+
+- Instagram lists **pinned posts first**, whatever their age. Cut to `limit` in that order, three
+  posts pinned a year earlier took three of a competitor's five slots and read as current cadence.
+  Pinned posts (non-empty `timeline_pinned_user_ids`) are left out and counted in
+  `SocialFetchResult.pinned_excluded`, and every platform's posts are sorted newest first before
+  the cut.
+- LinkedIn's `datePublished` is **an estimate made at scrape time** from a relative label: every
+  value had the scrape's time of day, five posts shared one date, and one was null. The real time is
+  in the activity id (`int(id) >> 22` is epoch ms); `_linkedin_time_from_id` reads it and falls back
+  to `datePublished` only without one. A `paginationToken` sets `more_available`.
+- Facebook publishes **no share count** under any key, so `share_count` stays `None`.
+  `videoViewCount` and Instagram's `play_count` are `SocialPost.view_count`; the media type is
+  `SocialPost.format` (reel / video / carousel / image / text); the LinkedIn company page's
+  `followers` is `SocialFetchResult.follower_count`. All `None` when absent, never `0`.
+
+`tests/fixtures/sociavault_live.json` is trimmed from those responses, and the tests at the bottom
+of `tests/test_sociavault_client.py` run against it.
 
 Pagination is capped at `_MAX_PAGES_PER_ACCOUNT` regardless of `limit` or platform: Facebook returns
 3 posts/page against Instagram's ~12, so a same-sized sample costs roughly 4x the credits, and the
@@ -667,7 +733,7 @@ built, exactly the way a Context.dev capture fills `DESIGN.md` before a replica 
 actual post data, keeps it — the prepass only fires on blank or "research live" wording, matching
 the exact "don't clobber what's already there" rule every other prepass in this codebase follows.
 
-### Competitors — resolving a domain to a handle, Firecrawl first
+### Competitors — resolving a domain to a handle, cheapest reader first
 
 `competitor_list` names a company and a domain, never a social handle, and a domain is not
 something `sociavault_client` can look up. `social_audit.resolve_competitor_handles(domain)` is the
@@ -675,15 +741,29 @@ missing step: almost every business site links to its own social profiles somewh
 a footer, "follow us"), so reading those links off the page turns a domain into a real, fetchable
 handle.
 
-**Firecrawl first, Context.dev as the fallback for whatever Firecrawl leaves unresolved** — the
-reverse of `design_md.py`'s usual Context.dev-primary ordering, by explicit choice for this job:
-this is a one-off per-competitor lookup rather than the once-per-run brand capture Context.dev's
-own credit cost is weighed against there, and Firecrawl's `extract_social_links` (a `/extract` call
-against a small fixed schema, same shape as `extract_brand_tokens`) is the cheaper of the two.
-Context.dev's `retrieve_brand` — 10 credits, already used elsewhere in this codebase for a domain's
-brand record — only runs for platforms Firecrawl didn't find, and never overrides one it did; same
-"each tier only fills what the one before it left open" rule `design_md._capture_brand_fallback`
-already follows for brand tokens.
+**Three tiers, each filling only the platforms the one before it left open, never overriding:**
+
+1. **The free direct read** — `scraper._fetch_html`, the same free fetch `service_scan` and
+   `design_tokens` use, with every `<a href>` on the page. Most sites serve their footer icons in
+   the HTML, so this usually answers alone, at no cost.
+2. **Firecrawl's links scrape** — `firecrawl_client.scrape_links` (`POST /scrape`,
+   `formats: ["links"]`, 1 credit), for a page whose served HTML is a JS shell or refused the read.
+3. **Context.dev's `retrieve_brand`** — 10 credits; its brand record carries `socials`.
+
+This is the reverse of `design_md.py`'s Context.dev-primary ordering, by explicit choice: a one-off
+per-competitor lookup, where the free and cheap reads answer most sites.
+
+**Firecrawl is a links scrape, not an `/extract`. This has broken once.** The `/extract` call it
+replaced asked a model to find the profiles in the page's markdown, and an icon-only `<a>` has no
+text, so it never reaches the markdown: on entourage.com.au it came back empty while the page
+linked all three profiles. The `links` format lists every href, text or not.
+
+**Which link is a profile is decided once, in `social_audit.social_profile_links`,** for whichever
+tier read the page — the wrapper returns raw hrefs, like every other wrapper here. It rejects the
+Meta pixel (`facebook.com/tr`), share and intent buttons and single-post URLs (a post linked from a
+page is often somebody else's), canonicalises the rest, and when a page links two profiles on one
+platform takes the one linked most often: a business puts its own in the header *and* the footer.
+`tests/test_social_audit.py` pins each against an icon-only footer shaped like Entourage's.
 
 **The competitors are the client's own market rivals, not social media agencies.** The
 Stage 10 audit compares each competitor's posts and service coverage with the client's, so a
@@ -695,13 +775,15 @@ linked from their own site. `test_the_social_audit_searches_the_clients_own_mark
 agencies` pins this.
 
 **Firecrawl's per-minute limit is waited out once.** A low plan allows a few requests a minute,
-and a run resolves up to five competitors. `_post_extract` and `_poll` wait for the reset time a
+and a run resolves up to five competitors. `_post` (every Firecrawl POST, `/scrape` and `/extract`
+alike) and `_poll` wait for the reset time a
 429 names, if it is under `_MAX_RATE_LIMIT_WAIT_SECONDS`, and retry once. A second 429 is reported
 as a failure, not retried again.
 
 **Automatic, but bounded — `_MAX_AUTO_COMPETITORS` (5), independent of what the operator typed
-into `number_of_competitors_to_audit`.** Every competitor resolved this way costs a real Firecrawl
-or Context.dev call before SociaVault can even be asked, on every stage run, so the cap is fixed
+into `number_of_competitors_to_audit`.** Every competitor resolved this way can cost a Firecrawl or
+Context.dev call (when the free read finds nothing) and then SociaVault credits per platform, on
+every stage run, so the cap is fixed
 rather than following an operator's own dial for a decision this prepass makes without asking. A
 run naming more competitors than the cap gets a note saying so; `POST /pipeline/social/posts` still
 covers a 6th, 7th, ... competitor by hand. Competitor SociaVault fetches also use a lower sample
@@ -921,6 +1003,36 @@ reading it would search the market for the phrase "NEW PAGE — no existing URL"
 
 ---
 
+## The Plan of Action — written after Phase 2, one plan for every sub-service
+
+The plan's roadmap has a "Phase 2" (expand into sub-services) and it is this app's Phase 2. It used
+to be Phase 1's last stage, so it scheduled sub-service work that was about to be built and listed
+finished sub-services as missing. It is now Phase 2's **last stage** (`PHASE2_ASSET_IDS`), and Phase 1
+stops at 14 stages (`DEFERRED_TO_PHASE2`) and says so when it finishes.
+
+- **Composed on read, never stored.** A run reads *down* `source_run_id`, never sideways, so the plan
+  cannot see sibling sub-services through ordinary inheritance. `app/services/plan_context.py`
+  composes three documents from the root Phase 1 run and every run under it, and
+  `GET /pipeline/runs/{id}/context/{key}` dispatches on `COMPOSED_KEYS`: `plan_root_icp`,
+  `plan_phase1_assets`, `plan_phase2_assets`. A stored copy would be stale the moment another
+  sub-service was approved. The frontend re-reads them on every entry to the stage
+  (`hydrateContextFromDb`, `PLAN_COMPOSED_KEYS`) — the one exception to "in-session values win".
+- **Excerpts, not documents.** The question the plan asks of a deliverable is whether it exists and
+  what it is about. The ICP is the exception. `PHASE2_EXCERPT_CHARS` bounds the block that grows with
+  every sub-service.
+- **Each run names its sub-service.** The server did not know it; `POST /pipeline/runs/{id}/sub-service`
+  files it as a `sub_service` context entry when a track is created or its sub-service corrected.
+- **Three inputs are dropped in Phase 2** (CRO framework, existing funnels/lead magnets, existing
+  value ladder), on both sides (`PHASE2_OVERRIDES`, `DELTAS.plan_of_action`). In a Phase 2 run those
+  would be one sub-service's documents offered as the client's. The headline service's are inside
+  `plan_phase1_assets`.
+- **One plan, not one per track.** `nextUnexecutedIndex` skips the plan for a track once any track
+  has an approved one. When a later sub-service finishes (or one of its stages is re-run), the store
+  raises `uiStore.pendingPlanRerun` and `PlanRerunDialog` offers the re-run — once, at the end, not on
+  every approval. Staleness is read off the transcript, so it needs no state to clear.
+- `Phase2/Plan-of-Action-Architect-Prompt_phase2.md` is Phase 1's file plus declared edits;
+  `tests/test_plan_context.py` reverses them and requires the original byte for byte.
+
 ## Industry personality — one voice block per client, and advice about which stages to run
 
 Every prompt in `assets/Prompts/` is industry-agnostic, and until this existed nothing told the model
@@ -1106,6 +1218,14 @@ download, which stays verbatim.
 - **Adding a recogniser.** Claim contiguous lines only, keep every word in what you render, and add
   a real-sample recognition assertion to `smoke/visual.tsx` or `smoke/report.tsx`. The corpus checks
   will then tell you if it loses anything. Put new recognisers **after** the existing ones.
+- **A plain-text output gets its Markdown at read time.** `ICP.md`'s output template is plain text,
+  and a real Phase 2 ICP copied it literally: no `#`, no `**`, so the reader found no sections and
+  showed one block. Both ICP prompts now ask for Markdown (the same edit, so the "Phase 1 plus two
+  edits" test holds). `lib/plainOutline.ts` covers runs saved before that: on a document with *no*
+  Markdown and three or more `N. Title` paragraphs numbered in order, it adds headings, bold labels
+  and list markers, never words. It runs next to `stripPromptEchoes` in the reader, the card, the
+  Deliverables grid and the HTML report. The `.md` download and the saved text stay verbatim.
+  `smoke/plainOutline.tsx` pins it.
 - **Colours come from `pipeline/visual/tone.ts`**, not from a hex in a component.
   `--color-signal-amber` is the "partial" state.
 

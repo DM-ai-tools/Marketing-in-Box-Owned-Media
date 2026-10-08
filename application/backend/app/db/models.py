@@ -787,7 +787,9 @@ class ApiUsage(Base):
     asset_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
     # Which pipeline: "phase1" | "phase2".
     phase: Mapped[str | None] = mapped_column(String(20), nullable=True)
-    # What kind of call: "generation" | "revision" | "competitor" | "briefing".
+    # What kind of call: "generation" | "continuation" | "revision" | "competitor" | "briefing" |
+    # "check". A free string rather than an enum for the same reason `asset_id` is (see above) — a
+    # new kind of call must not need a migration before its spend can be recorded.
     kind: Mapped[str] = mapped_column(String(30), nullable=False)
     # As the response reported it, which may be a dated snapshot id rather than the alias requested.
     model: Mapped[str] = mapped_column(String(80), nullable=False)

@@ -1,5 +1,6 @@
 import { assetGlance } from "../lib/assetGlance";
 import { MiniGlance } from "./visual/GlanceView";
+import { upgradePlainOutline } from "../lib/plainOutline";
 import { useMemo } from "react";
 import { countWords, parseAssetDocument } from "../lib/assetDocument";
 import { summariseAsset } from "../lib/assetSummary";
@@ -33,7 +34,8 @@ export function DeliverablesGrid() {
     return messagesInPhase(allMessages, phase, activePhase2TrackId)
       .filter((m) => m.kind === "generation" && m.savePhase === "saved" && !m.superseded && m.text)
       .map((message) => {
-        const text = message.text ?? "";
+        // Read as the reader reads it, so a card and the document it opens never disagree.
+        const text = upgradePlainOutline(message.text ?? "");
         const stage = stages.find((s) => s.asset.asset_id === message.assetId);
         const doc = parseAssetDocument(text);
         return {

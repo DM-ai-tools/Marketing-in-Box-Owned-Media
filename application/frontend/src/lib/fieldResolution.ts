@@ -14,7 +14,7 @@ export function resolveContext(
   field: FieldDef,
   context: ContextStore,
 ): { assetId: string; label: string; text: string } | undefined {
-  if (field.context_keys?.length) return gatherContext(field.context_keys, context);
+  if (field.context_keys?.length) return gatherContext(field.context_keys, context, field.context_excerpt_chars);
   if (!field.context_key || field.context_key === "unresolved_context_key") return undefined;
 
   let entry: { assetId: string; label: string; text: string } | undefined;
@@ -45,17 +45,45 @@ export function resolveContext(
 function gatherContext(
   keys: string[],
   context: ContextStore,
+  excerptChars?: number,
 ): { assetId: string; label: string; text: string } | undefined {
-  const found = keys.map((key) => context[key]).filter((entry): entry is ContextEntryLike => Boolean(entry?.text?.trim()));
+  const seen = new Set<string>();
+  const found = keys
+    .map((key) => context[key])
+    .filter((entry): entry is ContextEntryLike => Boolean(entry?.text?.trim()))
+    // One stage publishes several keys that all point at the same document; list it once.
+    .filter((entry) => (seen.has(entry.assetId) ? false : (seen.add(entry.assetId), true)));
   if (!found.length) return undefined;
+
+  const body = (entry: ContextEntryLike) =>
+    excerptChars ? excerptOf(entry.text, excerptChars) : entry.text.trim();
+  const intro = excerptChars
+    ? `Built and approved earlier in this run (treat as done, do not re-plan): ${found.map((e) => e.label).join(", ")}.\n\n`
+    : "";
 
   return {
     assetId: found.map((entry) => entry.assetId).join("+"),
     label: found.map((entry) => entry.label).join(" + "),
-    text: found
-      .map((entry) => `## ${entry.label}\n\n${entry.text.trim()}`)
-      .join("\n\n---\n\n"),
+    text: intro + found.map((entry) => `## ${entry.label}\n\n${body(entry)}`).join("\n\n---\n\n"),
   };
+}
+
+/** The opening of a document, as readable text: an HTML deliverable is reduced to its words first,
+ * because its first thousand characters are `<head>` boilerplate that says nothing about the page. */
+export function excerptOf(text: string, max: number): string {
+  let plain = text.trim();
+  if (/^\s*(?:<!doctype|<html|<head|<body|<div|<section)/i.test(plain) || /<\/(?:div|section|body)>/i.test(plain)) {
+    plain = plain
+      .replace(/<(script|style|svg|head)\b[\s\S]*?<\/\1>/gi, " ")
+      .replace(/<[^>]+>/g, " ")
+      .replace(/&nbsp;/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+  if (plain.length <= max) return plain;
+  const cut = plain.slice(0, max);
+  const lastBreak = Math.max(cut.lastIndexOf("\n"), cut.lastIndexOf(". "));
+  return `${(lastBreak > max * 0.5 ? cut.slice(0, lastBreak + 1) : cut).trimEnd()}\n\n[Excerpt. The full document was approved in this run.]`;
 }
 
 type ContextEntryLike = { assetId: string; label: string; text: string };
@@ -149,6 +177,14 @@ export interface WalkedField {
   label: string;
 }
 
+function yesNo(text: string | undefined): boolean | undefined {
+  const value = text?.trim();
+  if (!value) return undefined;
+  if (/^(y|yes|true)$/i.test(value)) return true;
+  if (/^(n|no|false)$/i.test(value)) return false;
+  return undefined;
+}
+
 export interface FieldWalkResult {
   index: number;
   field: FieldDef | null;
@@ -191,7 +227,12 @@ export function findNextAskable(
     }
 
     if (plan.action === "auto-context") {
-      answers[field.field_id] = `[[context: ${plan.label}]]`;
+      // A yes/no field is stored as the yes/no itself, not as a marker for it. Whatever is
+      // conditional on it (`regulation_name`, asked only when "regulated" is true) reads the answer
+      // straight off `answers`, and a marker string is neither true nor false — so the follow-up
+      // would never be asked, even for a client that is regulated.
+      const flag = field.kind === "boolean_flag" ? yesNo(resolveContext(field, context)?.text) : undefined;
+      answers[field.field_id] = flag ?? `[[context: ${plan.label}]]`;
       autoContextLabels.push(plan.label);
       autoContextFields.push({ fieldId: field.field_id, label: field.label });
     } else if (plan.action === "auto-known") {

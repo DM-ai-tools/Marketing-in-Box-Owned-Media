@@ -28,7 +28,7 @@ interface ExportNode {
   c: ExportNode[];
 }
 
-/** Kind -> the short tag the app uses. Kept in step with `PlanMindMap`'s own table. */
+/** Kind -> the short tag the app uses. Kept in step with `KIND_TAG` in `planFamilies.ts`. */
 const TAGS: Record<string, string> = {
   root: "PLAN",
   phase: "PHASE",

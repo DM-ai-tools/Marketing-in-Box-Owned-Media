@@ -151,7 +151,9 @@ def _fail(what: str, exc: Exception) -> ContextDevError:
     they can act on is the distinction between "your key is wrong" (fix the deployment), "the site
     would not answer" (paste the copy instead), and "we ran out of retries" (try again).
     """
-    if isinstance(exc, AuthenticationError):
+    if isinstance(exc, AuthenticationError) and _is_out_of_credits(exc):
+        detail = f"Context.dev is out of credits — top up at {_SUBSCRIPTION_URL}."
+    elif isinstance(exc, AuthenticationError):
         detail = f"Context.dev rejected the API key. Check {API_KEY_ENV}."
     elif isinstance(exc, RateLimitError):
         # Reached only after the SDK has already honoured Retry-After for `_MAX_RETRIES` attempts.
@@ -166,6 +168,20 @@ def _fail(what: str, exc: Exception) -> ContextDevError:
         detail = str(exc) or exc.__class__.__name__
     logger.error("Context.dev API error operation=%s detail=%s", what, detail)
     return ContextDevError(f"{what}: {detail}")
+
+
+_SUBSCRIPTION_URL = "https://www.context.dev/dashboard/subscription"
+
+
+def _is_out_of_credits(exc: APIStatusError) -> bool:
+    """An exhausted balance arrives as a 401, the same status as a bad key: `{"error_code":
+    "USAGE_EXCEEDED", "message": "Insufficient credits: ..."}`. Reported as a rejected key, it sent
+    an operator to rotate a key that was fine while every Context.dev call kept failing."""
+    body = getattr(exc, "body", None)
+    if not isinstance(body, dict):
+        return False
+    message = str(body.get("message") or "").lower()
+    return body.get("error_code") == "USAGE_EXCEEDED" or "insufficient credits" in message
 
 
 def _status_body(exc: APIStatusError) -> str:

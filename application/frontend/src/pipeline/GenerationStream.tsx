@@ -18,6 +18,7 @@ import { topicPreambleFor } from "../lib/topicSuggestions";
 import { assetAppendixFor } from "../lib/assetAppendix";
 import { checkAppliesTo } from "../lib/businessCheck";
 import { stripPromptEchoes } from "../lib/promptEcho";
+import { upgradePlainOutline } from "../lib/plainOutline";
 import { QuestionWidget } from "../components/QuestionWidget";
 import { TypingIndicator } from "../components/TypingIndicator";
 import { DeliverablesGrid } from "./DeliverablesGrid";
@@ -336,6 +337,15 @@ function ActionRow({ message, label, stageNumber }: { message: PipelineMessage; 
           Save failed: {message.saveError}
         </p>
       )}
+      {/* Warn, do not block: the operator may decide a cut-off webinar of two packages is enough.
+          Approving without this note would store a half-document as the stage's output, which is
+          the failure the truncated banner exists to prevent — so the same sentence sits here, next
+          to the button that would do it. */}
+      {message.truncated && !saved && (
+        <p className="mb-2 text-[0.76rem]" style={{ color: "var(--color-signal-orange)" }}>
+          This draft is unfinished. Saving it now stores a document that stops part-way.
+        </p>
+      )}
       <div className="flex flex-wrap items-center gap-2">
         {saved ? (
           <span
@@ -365,6 +375,72 @@ function ActionRow({ message, label, stageNumber }: { message: PipelineMessage; 
         <span className="flex-1" />
         {menu}
       </div>
+    </div>
+  );
+}
+
+/** The draft stopped because the model ran out of output budget, not because it had finished.
+ *
+ * This state was previously invisible. The stream ended, the card said "Awaiting Review", the
+ * business check scored a document missing its last third, and Approve wrote it to the Context
+ * Store as the stage's output — with the only record of the problem a WARNING line in the server
+ * log. The backend now says so on its terminating event and this is what the operator sees.
+ *
+ * **Continue is the primary action, and the wording has to carry why.** Every instinct says
+ * "regenerate" — that is the button for every other kind of broken draft in this app. Here it is
+ * the wrong one: the response was complete and successful, the whole of it was billed, and a second
+ * attempt at the same prompt meets the same ceiling. So the notice states what happened in the
+ * model's terms (it ran out of room, the text is good), and Continue sits where the eye lands.
+ */
+function TruncatedNotice({ message }: { message: PipelineMessage }) {
+  const continueGeneration = usePipelineStore((s) => s.continueGeneration);
+  const retryGeneration = usePipelineStore((s) => s.retryGeneration);
+  // A continuation needs the intake to rebuild the prompt with. A draft restored from a chat
+  // snapshot taken before answers were held on the card has none, so Continue would do nothing —
+  // better not to offer it than to offer a button that silently returns.
+  const canContinue = Boolean(message.answers && message.text);
+
+  return (
+    <div
+      className="mb-2.5 rounded-lg border px-2.5 py-2 text-[0.76rem]"
+      style={{ borderColor: "var(--color-signal-orange)" }}
+    >
+      <span style={{ color: "var(--color-signal-orange)" }}>⚠ This draft is unfinished</span>
+      <span className="text-[var(--fg-muted)]">
+        {" "}
+        — the model reached its maximum reply length before the end of the document. Everything
+        below is good; it just stops part-way.
+      </span>
+      <div className="mt-2 flex flex-wrap items-center gap-2">
+        {canContinue && (
+          <motion.button
+            type="button"
+            onClick={() => void continueGeneration(message.id)}
+            whileTap={{ scale: 0.97 }}
+            className="min-h-10 cursor-pointer rounded-full px-3 py-1.5 text-[0.76rem] font-semibold text-white sm:min-h-0"
+            style={{ backgroundColor: "var(--color-electric-blue)" }}
+          >
+            Continue writing it
+          </motion.button>
+        )}
+        <button
+          type="button"
+          onClick={() => void retryGeneration(message.id)}
+          className="min-h-10 cursor-pointer rounded-full border border-[var(--border-strong)] px-3 py-1.5 text-[0.76rem] font-medium sm:min-h-0"
+        >
+          Start it again
+        </button>
+      </div>
+      {message.saveError && (
+        <p className="mt-1.5 text-[0.72rem]" style={{ color: "var(--color-signal-orange)" }}>
+          Continue failed: {message.saveError}
+        </p>
+      )}
+      <p className="mt-1.5 text-[0.68rem] leading-relaxed text-[var(--fg-faint)]">
+        {canContinue
+          ? "Continuing costs one more call and appends to what's here. Starting again discards it and is likely to stop in the same place."
+          : "This draft has no stored intake to continue from, so the whole stage has to be run again."}
+      </p>
     </div>
   );
 }
@@ -487,7 +563,7 @@ function GenerationBody({ message, label }: { message: PipelineMessage; label: s
   // Stripped at display as well as at the end of the stream, so a draft saved before that existed
   // does not show prompt plumbing either.
   const raw = message.text ?? "";
-  const text = useMemo(() => (message.streaming ? raw : stripPromptEchoes(raw)), [message.streaming, raw]);
+  const text = useMemo(() => (message.streaming ? raw : upgradePlainOutline(stripPromptEchoes(raw))), [message.streaming, raw]);
   const streaming = !!message.streaming;
   const openReader = useUiStore((s) => s.openReader);
   const docView = useUiStore((s) => s.docView);
@@ -502,7 +578,16 @@ function GenerationBody({ message, label }: { message: PipelineMessage; label: s
     [doc, docView, text],
   );
 
-  if (streaming) return <StreamProgress text={text} label={label} />;
+  if (streaming) {
+    return (
+      <StreamProgress
+        text={text}
+        label={label}
+        continuing={message.continuing}
+        reconnecting={message.reconnecting}
+      />
+    );
+  }
 
   // `full` renders exactly what this card rendered before the outline existed. It is a real
   // preference rather than a fallback — see `DocView` — so it is checked before the outline.
@@ -708,6 +793,14 @@ function GenerationCard({ message }: { message: PipelineMessage }) {
             Generate it again
           </button>
         </div>
+      )}
+      {/* Cut off by the model's own output ceiling rather than by a broken connection, which is a
+          different problem with a different answer — see `truncated` in `pipelineStore.ts`. The
+          response finished cleanly and was billed in full; the document was simply longer than one
+          reply. So Continue leads, and Regenerate is the secondary option: regenerating throws away
+          everything already paid for and runs into the same ceiling again. */}
+      {message.truncated && !message.streaming && message.savePhase !== "saved" && (
+        <TruncatedNotice message={message} />
       )}
       <GenerationBody message={message} label={stage?.asset.label ?? "Generated page"} />
       {/* Above Approve, never instead of it: the check advises, the operator decides. */}

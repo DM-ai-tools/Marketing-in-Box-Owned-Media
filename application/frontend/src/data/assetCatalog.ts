@@ -133,7 +133,28 @@ const ctx = (
   placeholder: opts.placeholder,
   sub_key: opts.sub_key,
   overridable: opts.overridable,
+  ...(opts.context_keys ? { context_keys: opts.context_keys } : {}),
 });
+
+/** Every Phase 1 deliverable that runs before the Plan of Action, by the key its approved output is
+ * stored under in the session (`saveStage` files each stage under its own asset_id) and in the
+ * database (`save_stage` writes `context_key = asset_id`). The ICP is not here: the plan reads it
+ * whole through its own input. */
+const PLAN_PHASE1_ASSET_KEYS = [
+  "cro",
+  "pillar_page",
+  "funnel",
+  "funnel_hub_media",
+  "offers",
+  "lead_magnet",
+  "blog",
+  "content_marketing_strategy",
+  "social_content_strategy_audit",
+  "webinar",
+  "book",
+  "podcast",
+  "sms_sequence",
+];
 
 const txt = (field_id: string, label: string, opts: Partial<FieldDef> = {}): FieldDef => ({
   field_id,
@@ -144,6 +165,9 @@ const txt = (field_id: string, label: string, opts: Partial<FieldDef> = {}): Fie
   default: opts.default,
   helpText: opts.helpText,
   placeholder: opts.placeholder,
+  // Without this the helper silently dropped the condition, so a follow-up declared as "only when
+  // the flag is Yes" (Regulation Name) was asked of every client, regulated or not.
+  conditional_on: opts.conditional_on,
 });
 
 /** A topic the operator picks from suggestions instead of typing cold.
@@ -225,7 +249,28 @@ const file = (field_id: string, label: string, opts: Partial<FieldDef> = {}): Fi
  * does state and wrong for this one, so `saveStage` skips these and lets them be read back from the
  * database when a stage actually wants one.
  */
-export const SERVER_COMPOSED_CONTEXT_KEYS: ReadonlySet<string> = new Set(["cro_client_settings", "industry_profile"]);
+export const SERVER_COMPOSED_CONTEXT_KEYS: ReadonlySet<string> = new Set([
+  "cro_client_settings",
+  "industry_profile",
+  "plan_root_icp",
+  "plan_phase1_assets",
+  "plan_phase2_assets",
+]);
+
+/** The Plan of Action's three engagement-wide documents, and what each is called on a card.
+ *
+ * Unlike `cro_client_settings` these are never written by any stage: the server composes them on
+ * read from the Phase 1 run and every sub-service run under it (`app/services/plan_context.py`,
+ * `COMPOSED_KEYS` — `tests/test_plan_context.py` proves the two lists agree). That is why they are
+ * read through the context route and *never trusted from the session*: a copy fetched earlier knows
+ * nothing about a sub-service approved since, and "one plan covering all sub-services" is only true
+ * if the plan sees every track as it stands now. `hydrateContextFromDb` refetches them on every
+ * entry to the stage. */
+export const PLAN_COMPOSED_KEYS: Readonly<Record<string, string>> = {
+  plan_root_icp: "ICP (headline service)",
+  plan_phase1_assets: "Phase 1 deliverables (headline service)",
+  plan_phase2_assets: "Phase 2 sub-services built so far",
+};
 
 export const ASSET_CATALOG: AssetDefinition[] = [
   // ---------------------------------------------------------------- Foundation
@@ -1234,9 +1279,34 @@ export const ASSET_CATALOG: AssetDefinition[] = [
         helpText: "The hub page the expansion hangs off — the live URL, or the one it will eventually live at.",
         placeholder: "e.g. https://northpathdigital.com.au/social-media-marketing",
       }),
-      file("existing_phase_1_assets_optional", "Existing Phase 1 Assets (optional)", {
+      /* Gathered from this run, not asked. The prompt decides from this one input which Phase 1 work
+       * is already done ("treat that work as done — do not re-plan"; Step 8 "Mark Phase 1 as already
+       * complete"). As a typed question it was routinely left blank, so a plan written at the end of
+       * a run that had just built the CRO rewrite, funnel, lead magnet and blog reported them as
+       * missing and scheduled them again. Excerpts, not whole documents: the question is *which*
+       * assets exist, and the pillar page alone is a full HTML file. The funnel and lead magnet still
+       * arrive whole, through their own input below. Still overridable, and still asked when the run
+       * has built none of them. */
+      {
+        ...file("existing_phase_1_assets_optional", "Existing Phase 1 Assets (optional)", {
+          required: false,
+          helpText: "Everything approved earlier in this run, so the plan marks it done instead of scheduling it again.",
+          placeholder: "e.g. ICP done, pillar page live, funnel built, no lead magnet yet",
+        }),
+        // `kind` stays `file_attach`, so when nothing has been built yet it is asked exactly as before.
+        source: "auto_from_context",
+        context_keys: PLAN_PHASE1_ASSET_KEYS,
+        context_excerpt_chars: 1200,
+        overridable: true,
+        fallback: "ask_user_if_missing",
+      },
+      // Phase 2 only, and answered by the server rather than asked: see `plan_of_action` in
+      // `data/phase2Catalog.ts`. Optional and file-shaped like its Phase 1 twin above, so the one
+      // place it is ever asked — a run with no sub-service built — takes "skip".
+      file("phase_2_sub_services_already_built_optional", "Phase 2 Sub-Services Already Built (optional)", {
         required: false,
-        placeholder: "e.g. ICP done, pillar page live, funnel built, no lead magnet yet",
+        helpText: "Every sub-service already built, so the plan marks it done instead of briefing it again.",
+        placeholder: "e.g. Meta Ads: ICP, page copy, pillar page and funnel built; no lead magnet yet",
       }),
       txt("sub_services_to_expand_into_phase_2", "Sub-Services to Expand Into (Phase 2)", {
         helpText: 'Say "infer 6-10 sub-services" to have them inferred instead.',
@@ -1254,7 +1324,12 @@ export const ASSET_CATALOG: AssetDefinition[] = [
       }),
       ctx("icp_document", "ICP Document", "icp_*"),
       ctx("cro_messaging_framework_optional", "CRO / Messaging Framework (optional)", "cro_rewritten_copy", { required: false }),
-      ctx("existing_funnels_lead_magnets_optional", "Existing Funnels / Lead Magnets (optional)", "funnel_stages", { required: false }),
+      // The input asks for funnels *and* lead magnets; reading only `funnel_stages` left every lead
+      // magnet this run built out of the plan's Funnel Overview and Lead Magnet Master List.
+      ctx("existing_funnels_lead_magnets_optional", "Existing Funnels / Lead Magnets (optional)", "funnel_stages", {
+        required: false,
+        context_keys: ["funnel_stages", "lead_magnet", "funnel_hub_media"],
+      }),
       ctx("existing_value_ladder_offers_optional", "Existing Value Ladder / Offers (optional)", "offer_ladder", { required: false }),
       ctx("brand_design_reference_optional", "Brand Design Reference (optional)", "design_tokens", { required: false }),
       file("competitor_list", "Competitor List", { required: false, helpText: "3-6 direct competitors. If none supplied, well-known ones will be named and flagged as an assumption." }),

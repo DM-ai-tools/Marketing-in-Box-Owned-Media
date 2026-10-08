@@ -187,6 +187,38 @@ function render(messages: PipelineMessage[]): string {
   ok("interrupted: offers a regenerate", html.includes("Generate it again"));
 }
 
+/* ---------- truncated by the output ceiling ---------- */
+{
+  const html = render([message({ truncated: true, answers: { topic: "Meta Ads" } })]);
+  ok("truncated: warns it is unfinished", html.includes("This draft is unfinished"), html.slice(0, 500));
+  ok("truncated: names the ceiling, not a dropped connection", html.includes("maximum reply length"), html.slice(0, 500));
+  ok("truncated: Continue is the primary action", html.includes("Continue writing it"));
+  ok("truncated: regenerate is still offered as the secondary", html.includes("Start it again"));
+  ok("truncated: Save is still offered", html.includes("Save It"));
+  ok("truncated: Save is warned, not blocked", html.includes("stores a document that stops part-way"), html.slice(0, 800));
+}
+
+/* ---------- truncated with no stored intake ---------- */
+{
+  const html = render([message({ truncated: true, answers: undefined })]);
+  ok("truncated no intake: Continue is withheld", !html.includes("Continue writing it"), html.slice(0, 500));
+  ok("truncated no intake: says why", html.includes("no stored intake"), html.slice(0, 500));
+}
+
+/* ---------- a continuation is appending ---------- */
+{
+  const html = render([message({ streaming: true, continuing: true, text: "and then the next paragraph of the draft" })]);
+  ok("continuing: does not claim the stage restarted", !html.includes("Starting"), html.slice(0, 400));
+  ok("continuing: names the finish", html.includes("Finishing") || html.includes("picking up"), html.slice(0, 400));
+}
+
+/* ---------- a stream that produced nothing is reconnecting ---------- */
+{
+  const html = render([message({ streaming: true, text: "", reconnecting: { attempt: 2, of: 3 } })]);
+  ok("reconnecting: says so", html.includes("Reconnecting"), html.slice(0, 400));
+  ok("reconnecting: names the attempt", html.includes("Attempt 2 of 3"), html.slice(0, 400));
+}
+
 /* ---------- generation failed ---------- */
 {
   const html = render([message({ generationError: "upstream 500", text: undefined })]);

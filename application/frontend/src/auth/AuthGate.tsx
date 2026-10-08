@@ -81,6 +81,9 @@ function UnreachableScreen({ message }: { message: string | null }) {
  * A corner toast rather than a modal or an onboarding step: it acknowledges without standing
  * between the user and the work. Self-dismisses, because nothing here needs an answer.
  */
+/** How long the bottom notification stays before it dismisses itself. */
+const TOAST_MS = 3000;
+
 function WelcomeToast() {
   const welcome = useAuthStore((s) => s.welcome);
   const user = useAuthStore((s) => s.user);
@@ -89,7 +92,7 @@ function WelcomeToast() {
 
   useEffect(() => {
     if (!welcome) return;
-    const timer = window.setTimeout(dismiss, 9000);
+    const timer = window.setTimeout(dismiss, TOAST_MS);
     return () => window.clearTimeout(timer);
   }, [welcome, dismiss]);
 

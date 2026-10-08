@@ -12,6 +12,7 @@ import { OverflowItem, OverflowMenu } from "../components/OverflowMenu";
 import { parseAssetDocument } from "../lib/assetDocument";
 import { assetAppendixFor } from "../lib/assetAppendix";
 import { stripPromptEchoes } from "../lib/promptEcho";
+import { upgradePlainOutline } from "../lib/plainOutline";
 import { topicPreambleFor, withTopicSuggestions } from "../lib/topicSuggestions";
 import { useUiStore } from "../store/uiStore";
 import { stagesFor } from "./pipelineData";
@@ -86,7 +87,7 @@ export function AssetReader() {
             transition={reduceMotion ? { duration: 0 } : { type: "spring", stiffness: 420, damping: 34, mass: 0.8 }}
           >
             <ReaderContents
-              text={stripPromptEchoes(message.text ?? "")}
+              text={upgradePlainOutline(stripPromptEchoes(message.text ?? ""))}
               assetId={message.assetId}
               phase={phase}
               // The topics this asset was built on and the ones passed over — shown in the reader

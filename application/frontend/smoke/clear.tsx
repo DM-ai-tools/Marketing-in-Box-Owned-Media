@@ -326,6 +326,25 @@ const PHASE1_SLOT = {
   ok("delete: offers a way out", asking.includes("Keep it"), asking.slice(-900));
 }
 
+/* ---------- switching back to a parked leg adds nothing to the transcript ----------
+ * Returning to a phase used to push a "Back in Phase 2, at Stage 04: Funnel." card on every toggle,
+ * so flipping between the legs filled the chat with them. */
+{
+  seed({
+    phase: "phase1",
+    messages: [saved("a", "cro", "phase1")],
+    phaseSlots: { phase2: { ...PHASE1_SLOT, runId: "run-p2", currentIndex: 3 } },
+  });
+  const before = state().messages.length;
+  state().setPhase("phase2");
+  state().setPhase("phase1");
+  state().setPhase("phase2");
+  ok("toggle: phase switches still land", state().phase === "phase2" && state().runId === "run-p2", `${state().phase} ${state().runId}`);
+  ok("toggle: no 'Back in Phase' cards", !state().messages.some((m) => /^Back in Phase/.test(m.text ?? "")),
+    state().messages.map((m) => m.text?.slice(0, 40)).join(" | "));
+  ok("toggle: the transcript does not grow", state().messages.length === before, `${before} -> ${state().messages.length}`);
+}
+
 console.log(`\n${pass} passed, ${fails.length} failed`);
 if (fails.length) {
   console.log("\nFAILURES:");

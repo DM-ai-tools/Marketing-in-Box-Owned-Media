@@ -32,6 +32,9 @@ superseded, interrupted, failed, refining — without a browser or a new depende
   offers, the SMS sequence, the lead-magnet winner, the funnel flow, kanban and heat table, and the
   webinar run of show), and gives each table rule a positive and a negative case. Finally, the reader
   opens in Visual, Text is the old markup, and grid cards carry the glance.
+- `plainOutline.tsx` — `lib/plainOutline.ts` on the real plain-text Phase 2 ICP in `manual_execution/`:
+  it splits into its sixteen sections with every word kept, and every Markdown output in the
+  corpus comes back byte-identical.
 - `check.tsx` — the business check on a draft, driven through the store's real actions with the
   generation, check and refine routes stubbed. Covers:
   - a clean finish is checked with no click, and the panel shows scores, the "prediction" label on

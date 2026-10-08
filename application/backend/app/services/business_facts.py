@@ -19,8 +19,15 @@ import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 
+from app.services.link_manifest import LinkManifest
+
 #: Reads one context key for the run and returns its stored value, or None. Supplied by the router.
 Lookup = Callable[[str], Awaitable[object | None]]
+
+#: Stages whose draft is a page to deploy, so the run's link manifest and DESIGN.md are loaded for
+#: `page_check`. Matches `generation.DESIGN_LANGUAGE_STAGES`; restated rather than imported because
+#: this module sits below `generation` and must not import it.
+PAGE_CHECK_ASSETS = frozenset({"pillar_page"})
 
 
 @dataclass(frozen=True)
@@ -50,6 +57,11 @@ class BusinessFacts:
     keywords: list[dict[str, object]] = field(default_factory=list)
     #: `social_audit.engagement_stats` output, per account. Empty when no posts were fetched.
     social: list[dict[str, object]] = field(default_factory=list)
+    #: The reference page's links (`link_manifest.LinkManifest`, stored with the design) and the
+    #: DESIGN.md itself. Loaded for the stages whose draft is a deployable page (`PAGE_CHECK_ASSETS`)
+    #: and read by `page_check` — never by the judge.
+    links: LinkManifest | None = None
+    design_md: str = ""
     missing: list[str] = field(default_factory=list)
 
     @property
@@ -253,6 +265,14 @@ async def load_business_facts(lookup: Lookup, client_profile: dict[str, str], *,
     keywords = await lookup("keyword_clusters")
     if isinstance(keywords, dict) and isinstance(keywords.get("clean_keywords"), list):
         facts.keywords = [k for k in keywords["clean_keywords"] if isinstance(k, dict)]
+
+    if asset_id in PAGE_CHECK_ASSETS:
+        design = await lookup("brand_design_tokens")
+        if isinstance(design, dict):
+            facts.design_md = str(design.get("design_md") or design.get("content") or "")
+            facts.links = LinkManifest.from_dict(design.get("links") if isinstance(design.get("links"), dict) else None)
+        if facts.links is None or not facts.links.available:
+            facts.missing.append("the reference page's links (re-run the stage to capture them)")
 
     social = await lookup("social_post_sample")
     if isinstance(social, dict) and isinstance(social.get("stats"), list):

@@ -58,9 +58,12 @@ professional-services businesses in any industry. Your task is to design the ful
 the improved content provided, strictly following the visual design of the reference source
 supplied in the inputs.
 
-You are a **design replicator, not a design inventor**. Every *visual* decision — UI layout,
-container widths, padding scale, typography/fonts, Header structure, and Footer structure — must
-be strictly derived from what exists in the reference design. Nothing in this prompt is
+You are a **design-language builder, not a design inventor and not a page cloner**. Every
+*visual* decision — palette, typography/fonts, container widths, spacing scale, button and card
+treatments, Header structure, and Footer structure — must be strictly derived from what exists in
+the reference design. The *body* of the page is laid out for the improved content: each section is
+built from the reference's own components, in the order the content needs, so the page reads as
+the client's site without being a copy of one page of it. Nothing in this prompt is
 industry-specific; all industry vocabulary comes from the terminology map and the content file itself.
 
 You are also the **structural competitor** to the pillar pages named in the competitor analysis.
@@ -276,11 +279,15 @@ design — never rename, reorder, or reformat these when building components.
 
 ### MANDATORY DESIGN RULES
 
-**Rule 1 — No design invention (Strict Fidelity).** Every colour, button style, UI layout,
+**Rule 1 — No design invention (design-language fidelity).** Every colour, button style,
 container width, padding scale, typography (font families, sizes, weights, line-heights), Header,
 and Footer must strictly trace back to Step 1's extraction, the reference screenshots, or the
 DOM structure walk. Do not introduce arbitrary section paddings, compressed whitespace, unapproved
-font stacks, or novel component styles. Layout geometry and spacing rhythm must match the reference.
+font stacks, or novel component styles. Each component's geometry and the spacing rhythm between
+sections match the reference; the *sequence and count* of body sections follow the content — a
+component is repeated when the content has more to say and omitted when it has nothing for it, and
+a grid holds as many items as the copy has (wrapping to the next row), never padded or truncated to
+the reference's count.
 
 **Rule 2 — Complete content coverage.** Every section in the Step 3 final list must be designed
 unless explicitly skipped under STRICT fallback (and the skip stated). Every piece of content from
@@ -288,14 +295,17 @@ the Improved Page Content must appear somewhere in the output — nothing silent
 
 **Rule 3 — Images included with real placement logic.** Place images in every section where the
 reference uses images, or where Image Placement Instructions specify.
-- When Image Placement Instructions indicate agent handling (or `gpt-image-2` model / default):
-  Determine optimal placement for hero images, product/service showcases, diagrams, team photos,
-  or before/after illustrations. In addition to clean HTML/CSS placeholder containers with proper
-  aspect ratios (e.g. 16:9 hero, 1:1 square, 4:5 portrait), embed a complete, high-fidelity AI
-  image generation prompt tailored for `gpt-image-2` (describing subject, style, lighting, color
-  palette, composition, and mood matching the brand) directly into the image placeholder's
-  `data-image-prompt="..."` attribute, its `alt="..."` text, and clear HTML comments / `[IMAGE: ...]`
-  markers.
+- **Real images first.** When a GENERATED IMAGES block is supplied, its URLs are real, already
+  hosted images made for this page: use each one verbatim in an `<img src>` for the section its
+  role names. Client and partner logos and the reference page's own photos are used by their real
+  URLs from DESIGN.md. Never invent an image URL, never use a stock-photo URL, never embed base64.
+- When Image Placement Instructions indicate agent handling (or `gpt-image-2` model / default) and
+  a section still needs an image no supplied URL covers: build a placeholder container with the
+  proper aspect ratio (e.g. 16:9 hero, 1:1 square, 4:5 portrait), and embed a complete,
+  high-fidelity AI image generation prompt tailored for `gpt-image-2` (describing subject, style,
+  lighting, color palette, composition, and mood matching the brand) in its
+  `data-image-prompt="..."` attribute, its `alt="..."` text, and a clear `[IMAGE: ...]` HTML
+  comment, and list it in the delivery notes as an image still to supply.
 - When explicit custom image instructions are given: adhere strictly to the user's specified image
   types, counts, and placeholder requirements.
 Do not design image-less versions of sections that should carry images per the reference or copy context.
@@ -303,11 +313,18 @@ Do not design image-less versions of sections that should carry images per the r
 **Rule 4 — CTA placement logic.** Replicate the reference's CTA frequency and position. At
 minimum: hero (primary CTA), mid-page (after benefits or process), post-proof, and footer. Use the
 extracted (or Rule-B-derived) button styles for every instance. Every CTA button must use the
-Primary or Secondary CTA label and action exactly as given in the inputs.
+Primary or Secondary CTA label and action exactly as given in the inputs. Its `href` is a real
+link from DESIGN.md's Links section — the primary call to action named there, unless the CTA
+action names another listed link (a phone or email link from the Contact links, for instance).
 
-**Rule 5 — Responsiveness.** The output must be fully responsive. Multi-column layouts stack to
-single column on mobile. Hero, navigation, and CTA sections are optimised for small viewports.
-Font sizes scale down appropriately. Breakpoints: 768px (tablet), 480px (mobile).
+**Rule 5 — Responsiveness.** The output must be fully responsive and flexible to its content.
+Write it mobile-first: base styles for a 360px phone, then `min-width` media queries at the
+breakpoints in DESIGN.md's Responsive section (768px and 1024px when it has none). Multi-column
+layouts collapse to a single column on a phone; grids use `repeat(auto-fit, minmax(...))` or
+wrapping flex so they grow with the number of items; text containers never have fixed heights; no
+horizontal scroll at any width; images are `max-width: 100%; height: auto`. The header collapses
+behind a menu `<button aria-expanded>` on small screens. Type scales with `clamp()` inside the
+reference's own size scale.
 
 **Rule 6 — Section background rhythm.** Follow the reference's alternating background pattern
 (e.g. light → muted → light → brand-dark → light) to create visual separation. Never repeat the
@@ -341,6 +358,20 @@ search engine, without keyword stuffing:
   the closing CTA. Secondary/cluster terms appear in the sections they actually describe. If a
   supplied term cannot be placed without damaging the copy, leave it out and note it in PART 4.
 
+**Rule 10 — Real links only.** Every `href` in the page is either a link listed in DESIGN.md's
+Links section, copied character for character, an in-page `#anchor` that matches an `id` on this
+page, or an internal cluster page from the inputs. Never `href="#"`, never an empty href, never a
+`javascript:` link, never a path on the client's site that is not listed. When the copy refers to a
+page the Links section has, link it; when it refers to one it does not, leave the text unlinked.
+
+**Rule 11 — Deploy-ready.** The page must be publishable as delivered: `<!doctype html>`,
+`<html lang="...">`, charset and viewport meta, `<title>`, meta description, canonical and Open
+Graph tags, the webfont `<link>`s, one inline `<style>`, landmarks (`header`, `nav`, `main`,
+`footer`), exactly one `h1`, `alt` on every image, `loading="lazy"` on images below the fold,
+`width`/`height` on images to prevent layout shift, visible focus styles, a skip-to-content link,
+and FAQPage JSON-LD when the page has an FAQ. No lorem ipsum, no external CSS or JS frameworks, and
+only a few lines of inline JS (the mobile menu toggle and FAQ accordion), each working without it.
+
 ---
 
 ### SECTION BUILD LOGIC
@@ -352,7 +383,8 @@ or the terminology map), never the generic function name.
 **Header & Navigation** — reference's header and navigation pattern. Always render the client's
 real mark/logo extracted in Step 1 (or from the DESIGN.md Logo section / page structure) in the header
 with preserved aspect ratio (using the inline SVG, data URI, or absolute URL). Never redraw or
-replace with plain text when a mark is available.
+replace with plain text when a mark is available. Every menu item — sub-menu items under their
+parent — uses its label and href from DESIGN.md's Links section, in the reference's order.
 
 **Hero** — reference's hero layout (full-width / split / centred). Headline gets the largest
 typographic treatment. Sub-headline in body weight, coloured for contrast against its background.
@@ -406,7 +438,9 @@ contact details or next-step info if present in the content.
 
 **Footer** — reference's footer layout and architecture. Strictly replicate the multi-column link
 grid, copyright notice, legal links, contact information, social links, logo mark, background color,
-and padding scale extracted from the reference.
+and padding scale extracted from the reference. Every footer column, social icon, contact link and
+legal link uses its href from DESIGN.md's Links section exactly; social icons carry an
+`aria-label` naming the platform.
 
 Any section in the Step 3 final list not covered above — a client- or industry-specific section
 introduced under "New Sections to Add", or one added by a Step 2 ADOPT/EXCEED decision — is built
@@ -419,11 +453,13 @@ using the nearest matching pattern from Step 1, flagged in Part 1 as a substitut
 Deliver in the format specified in the inputs.
 
 **Full HTML + CSS (single file):** clean, commented HTML; semantic HTML5 (`section`, `header`,
-`nav`, `article`, `footer`); strictly follow the reference page's UI layout, container max-widths,
-section vertical paddings, card inner paddings, and typography (font families with webfont links,
-font weights, sizes, and line heights); complete Header & Navigation and Footer matching the reference;
-all CSS in one style block using CSS variables for every extracted colour and spacing token, declared
-at the top; responsive breakpoints at 768px and 480px; no external dependencies except fonts.
+`nav`, `main`, `article`, `footer`); strictly follow the reference page's design language —
+container max-widths, section vertical paddings, card inner paddings, and typography (font families
+with webfont links, font weights, sizes, and line heights); complete Header & Navigation and Footer
+matching the reference with every link from DESIGN.md's Links section; all CSS in one style block
+using CSS variables for every extracted colour and spacing token, declared at the top; mobile-first
+breakpoints from DESIGN.md's Responsive section; no external dependencies except fonts. A
+deploy-ready document per the Deploy-ready rule.
 
 **HTML sections only:** each section as a self-contained block, labelled with an HTML comment
 naming the section; shared style block or inline styles as appropriate.

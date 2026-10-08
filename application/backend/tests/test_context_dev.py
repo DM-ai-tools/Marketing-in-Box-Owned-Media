@@ -141,6 +141,40 @@ async def test_sdk_failures_become_one_readable_sentence(monkeypatch):
     assert context_dev.API_KEY_ENV in str(caught.value)
 
 
+@pytest.mark.asyncio
+async def test_an_exhausted_balance_is_not_reported_as_a_bad_key(monkeypatch):
+    """The live API answers an empty balance with a 401 — the same status as a bad key. Reported as
+    "rejected the API key", it sent an operator to rotate a key that was fine."""
+    import httpx
+    from context.dev import AuthenticationError
+
+    # The real body from a live call on 2026-10-06, request id dropped.
+    body = {
+        "message": "Insufficient credits: this request needs 10 credits and 0 remain. To get more credits "
+        "immediately, subscribe to a plan at https://www.context.dev/dashboard/subscription, or contact "
+        "hello@context.dev for help.",
+        "error_code": "USAGE_EXCEEDED",
+        "key_metadata": {"credits_consumed": 0, "credits_remaining": 0},
+    }
+    response = httpx.Response(401, request=httpx.Request("POST", "https://api.context.dev/v1/brand/retrieve"))
+
+    async def fake_scrape(**_):
+        raise AuthenticationError("Insufficient credits", response=response, body=body)
+
+    monkeypatch.setattr(
+        context_dev,
+        "_client",
+        lambda: _fake_client(web=types.SimpleNamespace(web_scrape_md=fake_scrape)),
+    )
+    with pytest.raises(context_dev.ContextDevError) as caught:
+        await context_dev.scrape_markdown("https://example.com")
+
+    message = str(caught.value)
+    assert "out of credits" in message
+    assert "https://www.context.dev/dashboard/subscription" in message
+    assert "rejected the API key" not in message
+
+
 # ---------------------------------------------------------------------------------------------
 # search
 # ---------------------------------------------------------------------------------------------

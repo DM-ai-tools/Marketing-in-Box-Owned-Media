@@ -90,6 +90,7 @@ from app.services import (
     asset_check as asset_check_service,
     business_facts as business_facts_service,
     cro_settings,
+    plan_context,
     design_md as design_md_service,
     design_tokens as design_tokens_service,
     headlines as headlines_service,
@@ -105,6 +106,7 @@ from app.services import (
     slide_deck as slide_deck_service,
     social_audit as social_audit_service,
     sociavault_client,
+    stream_locks,
     usage as usage_service,
 )
 from app.services.api_errors import classify as classify_api_error
@@ -118,8 +120,10 @@ from app.services.dependencies import (
 )
 from app.services.generation import (
     DEFAULT_PHASE,
+    DESIGN_LANGUAGE_STAGES,
     PAGE_REPLICA_STAGES,
     PageDesignInput,
+    generate_continuation_stream,
     generate_replica_copy,
     generate_revision_stream,
     generate_stage_stream,
@@ -783,6 +787,98 @@ async def _latest_context_entry(
     return None
 
 
+async def _entry_text_on_run(session: AsyncSession, run_uuid: uuid.UUID, keys: tuple[str, ...]) -> str:
+    """The newest approved text filed on *this* run under any of `keys`. No inheritance: the plan
+    composes across runs itself, and a walk down `source_run_id` would hand a sub-service the
+    parent's document and report it as the sub-service's own."""
+    for key in keys:
+        result = await session.execute(
+            select(ContextEntry)
+            .where(ContextEntry.run_id == run_uuid, ContextEntry.context_key == key)
+            .order_by(ContextEntry.version.desc())
+            .limit(1)
+        )
+        entry = result.scalar_one_or_none()
+        content = entry.value.get("content") if entry is not None and isinstance(entry.value, dict) else None
+        if isinstance(content, str) and content.strip():
+            return content
+    return ""
+
+
+async def _root_run_id(session: AsyncSession, run_uuid: uuid.UUID) -> uuid.UUID:
+    """The Phase 1 run at the top of this run's `source_run_id` chain (itself, for a Phase 1 run)."""
+    current = run_uuid
+    seen: set[uuid.UUID] = set()
+    for _ in range(_MAX_SOURCE_RUN_HOPS):
+        run = await session.get(Run, current)
+        if run is None or run.source_run_id is None or current in seen:
+            break
+        seen.add(current)
+        current = run.source_run_id
+    return current
+
+
+async def _compose_plan_context(session: AsyncSession, run_uuid: uuid.UUID, context_key: str) -> str:
+    """One of the Plan of Action's engagement-wide documents, built from the root run and all of
+    its sub-service runs as they stand now. "" when there is nothing to say."""
+    root = await _root_run_id(session, run_uuid)
+
+    if context_key == plan_context.ROOT_ICP_KEY:
+        return plan_context.render_root_icp(await _entry_text_on_run(session, root, ("icp",)))
+
+    if context_key == plan_context.PHASE1_ASSETS_KEY:
+        docs = {
+            asset_id: await _entry_text_on_run(session, root, plan_context.keys_for(asset_id))
+            for asset_id in plan_context.PHASE1_ASSET_IDS
+        }
+        return plan_context.render_phase1_assets(docs)
+
+    children = (
+        await session.execute(select(Run.id).where(Run.source_run_id == root).order_by(Run.created_at))
+    ).scalars().all()
+    tracks: list[plan_context.SubServiceTrack] = []
+    for index, child in enumerate(children, start=1):
+        label = (await _entry_text_on_run(session, child, (plan_context.SUB_SERVICE_KEY,))).strip()
+        docs = {
+            asset_id: await _entry_text_on_run(session, child, plan_context.keys_for(asset_id))
+            for asset_id in plan_context.PHASE2_ASSET_IDS
+        }
+        tracks.append(plan_context.SubServiceTrack(label or f"Sub-service {index}", docs))
+    return plan_context.render_phase2_assets(tracks)
+
+
+class SubServiceRequest(BaseModel):
+    label: NonBlankStr
+
+
+@router.post("/runs/{run_id}/sub-service")
+async def save_run_sub_service(run_id: str, payload: SubServiceRequest) -> dict[str, str]:
+    """Record which sub-service a Phase 2 run is for.
+
+    Nothing else on the server knows: the sub-service is a run-level fact the UI holds. The Plan of
+    Action covers every sub-service at once and has to name each one, so it is filed here as a
+    context entry on the run. A correction appends a new version; the latest wins."""
+    try:
+        run_uuid = uuid.UUID(run_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid run_id: {run_id!r}") from exc
+    session_factory = get_sessionmaker()
+    async with session_factory() as session:
+        if await session.get(Run, run_uuid) is None:
+            raise HTTPException(status_code=404, detail=f"Run not found: {run_id}")
+        session.add(
+            ContextEntry(
+                run_id=run_uuid,
+                context_key=plan_context.SUB_SERVICE_KEY,
+                version=await _next_version(session, run_uuid, plan_context.SUB_SERVICE_KEY),
+                value={"content": payload.label},
+                written_by_asset_id=None,
+            )
+        )
+        await session.commit()
+    return {"run_id": run_id, "label": payload.label}
+
+
 @router.get("/runs/{run_id}/context/{context_key}", response_model=RunContextResponse)
 async def get_run_context(run_id: str, context_key: str) -> RunContextResponse:
     """Return the latest approved output stored under `context_key` for this run.
@@ -805,6 +901,16 @@ async def get_run_context(run_id: str, context_key: str) -> RunContextResponse:
 
     session_factory = get_sessionmaker()
     async with session_factory() as session:
+        # The Plan of Action's three engagement-wide documents are composed on read from every run
+        # under the same Phase 1 run, never stored — see `app/services/plan_context.py`.
+        if context_key in plan_context.COMPOSED_KEYS:
+            composed = await _compose_plan_context(session, run_uuid, context_key)
+            if not composed:
+                raise HTTPException(
+                    status_code=404, detail=f"Nothing built yet to compose {context_key!r} for run {run_id}"
+                )
+            return RunContextResponse(run_id=run_id, context_key=context_key, version=1, content=composed)
+
         found = await _latest_context_entry(session, run_uuid, context_key)
         if found is None:
             raise HTTPException(
@@ -1950,7 +2056,9 @@ DESIGN_TOKENS_CONTEXT_KEY = "brand_design_tokens"
 #   1 — tokens only (pre-DESIGN.md, `content` alone)
 #   2 — DESIGN.md: front matter, colours, type, components, logo
 #   3 — adds the `## Page structure` band walk (`page_structure.py`)
-DESIGN_CAPTURE_VERSION = 3
+#   4 — adds `## Links` (every href, `link_manifest.py`) and `## Responsive` (the CSS's own
+#       breakpoints), and stores the link manifest as data for the pillar page check
+DESIGN_CAPTURE_VERSION = 4
 
 # In preference order. The parent page first — a company's brand is most concretely expressed on
 # the page actually being extended, and a home page can differ from a service page's template.
@@ -2177,6 +2285,98 @@ async def _ensure_generated_images(
     return updated
 
 
+async def _ensure_section_images(
+    session_factory,
+    run_uuid: uuid.UUID,
+    value: dict,
+    asset_id: str | None,
+    answers: dict[str, str],
+    profile: dict[str, str],
+) -> dict:
+    """Generate images for a design-language page's own body sections, once per set of sections.
+
+    The three page-level briefs (hero, proof, closing CTA) are captured with the design, before
+    anybody has written the pillar page's copy, so they cannot be about its sections. This runs on
+    the pillar page itself, where `improved_page_content` is in hand, and makes at most
+    `image_briefs.MAX_SECTION_IMAGES` more — stored under `section_images`, apart from
+    `generated_images`, so a failed page-level generation still retries on the next stage.
+
+    Re-generated only when the sections it illustrated are no longer in the copy: a re-run for a
+    wording change keeps the images it already paid for. Same skip-cleanly rules as
+    `_ensure_generated_images`, and nothing is written when every generation fails.
+    """
+    if asset_id not in DESIGN_LANGUAGE_STAGES:
+        return value
+    headings = image_briefs_service.content_section_headings(answers.get("improved_page_content") or "")
+    if not headings:
+        return value
+    stored = value.get("section_images") or []
+    stored_headings = {
+        str(item.get("role", ""))[len(image_briefs_service.SECTION_ROLE_PREFIX):].lower()
+        for item in stored
+        if isinstance(item, dict)
+    }
+    if stored and stored_headings <= {heading.lower() for heading in headings}:
+        return value
+    if not openai_image_client.is_configured() and not runway_image_client.is_configured():
+        return value
+
+    reference_urls: tuple[str, ...] = ()
+    for brief in _briefs_from_stored(value.get("image_briefs")):
+        if brief.reference_image_urls:
+            reference_urls = brief.reference_image_urls
+            break
+    briefs = image_briefs_service.build_section_briefs(
+        str(value.get("design_md") or value.get("content") or ""),
+        headings,
+        subject_context=_image_subject_context(answers, profile),
+        reference_image_urls=reference_urls,
+    )
+
+    async with session_factory() as session:
+        if await session.get(Run, run_uuid) is None:
+            return value
+        generated, notes = await image_briefs_service.generate_all(briefs, session)
+        if not generated:
+            if notes:
+                logger.info("Section images produced nothing for run_id=%s: %s", run_uuid, "; ".join(notes))
+            return value
+        updated = {
+            **value,
+            "section_images": [
+                {"role": g.role, "size": g.size, "prompt": g.prompt, "url": g.url} for g in generated
+            ],
+        }
+        version = await _next_version(session, run_uuid, DESIGN_TOKENS_CONTEXT_KEY)
+        session.add(
+            ContextEntry(
+                run_id=run_uuid,
+                context_key=DESIGN_TOKENS_CONTEXT_KEY,
+                version=version,
+                value=updated,
+                written_by_asset_id=None,
+            )
+        )
+        await session.commit()
+
+    logger.info(
+        "Generated %s/%s section image(s) for run_id=%s: %s",
+        len(generated),
+        len(briefs),
+        run_uuid,
+        ", ".join(g.role for g in generated),
+    )
+    return updated
+
+
+def _all_generated_images(value: dict) -> tuple[GeneratedImage, ...]:
+    """The page-level images, then the section ones. One list on the prompt side: each carries its
+    role, which is what tells the model where it goes."""
+    return _generated_images_from_stored(value.get("generated_images")) + _generated_images_from_stored(
+        value.get("section_images")
+    )
+
+
 def _page_design_input(value: dict) -> PageDesignInput | None:
     """Rebuild the generation input from a stored context entry.
 
@@ -2194,7 +2394,7 @@ def _page_design_input(value: dict) -> PageDesignInput | None:
         design_md=design_md or legacy,
         theme_brief=theme_brief or legacy,
         screenshot_urls=tuple(value.get("model_screenshot_urls") or ()),
-        generated_images=_generated_images_from_stored(value.get("generated_images")),
+        generated_images=_all_generated_images(value),
     )
 
 
@@ -2239,6 +2439,9 @@ async def resolve_page_design(
             reuse, why = _reuse_stored_design(value, url)
             if reuse:
                 value = await _ensure_generated_images(session_factory, run_uuid, value, asset_id)
+                value = await _ensure_section_images(
+                    session_factory, run_uuid, value, asset_id, answers, profile
+                )
                 return _page_design_input(value)
             logger.info("Re-capturing page design for run_id=%s: %s", run_id, why)
 
@@ -2280,6 +2483,9 @@ async def resolve_page_design(
             # Pre-filtered, so the prompt builder never has to re-derive which images the model
             # API will accept.
             "model_screenshot_urls": [s.image_url for s in design.model_screenshots],
+            # As data as well as in the sheet: the pillar page check compares a generated page's
+            # hrefs against these, and re-parsing them out of the Markdown table would be fragile.
+            "links": design.links.to_dict() if design.links is not None else None,
             "image_briefs": [
                 {
                     "role": b.role,
@@ -2326,7 +2532,10 @@ async def resolve_page_design(
     generated_images: tuple[GeneratedImage, ...] = ()
     if run_uuid is not None and stored_value is not None:
         stored_value = await _ensure_generated_images(session_factory, run_uuid, stored_value, asset_id)
-        generated_images = _generated_images_from_stored(stored_value.get("generated_images"))
+        stored_value = await _ensure_section_images(
+            session_factory, run_uuid, stored_value, asset_id, answers, profile
+        )
+        generated_images = _all_generated_images(stored_value)
 
     return PageDesignInput(
         design_md=design.design_md,
@@ -3114,6 +3323,40 @@ def _template_to_stored(template: page_replica_service.PageTemplate) -> dict:
     }
 
 
+_NEW_PAGE_PREFIX = "NEW PAGE"
+
+
+def _cro_writes_copy_only(asset_id: str, phase: str, answers: dict[str, str]) -> bool:
+    """Whether this is a CRO run with no page of its own to rebuild, so it writes copy and no HTML.
+
+    `cro` is in `PAGE_REPLICA_STAGES` because in Phase 1 its job is to rewrite the client's
+    *existing* page, so it is handed that page's DESIGN.md, structure, screenshots and markup. With
+    no existing page, every one of those comes from somewhere else: `_design_source_url` falls
+    through to the parent pillar or the client's site. The stage then received "any HTML you
+    produce must follow the reference page's layout" plus a band-by-band structure brief, wrote a
+    full ```html page into Part 2, and the replica assembly poured its copy into *another
+    service's* page. Measured on a real Phase 2 run: the sub-service copy landed in the client's
+    Property Development Finance page.
+
+    Two cases, both copy-only:
+
+    * **Phase 2, always.** The phase runs CRO in NEW PAGE mode by construction, and its Pillar
+      Page prompt is the design replicator that lays the CRO copy out. CRO building the page as
+      well produced the same page twice, one of them against the wrong reference.
+    * **NEW PAGE mode in Phase 1.** Same situation: nothing to rewrite, and the same rule the
+      no-reference pillar path follows: take the brand, never another page's markup.
+
+    The Pillar Page still captures DESIGN.md (and generates the brief images) the first time it
+    runs, once per run as before, so nothing downstream loses its design.
+    """
+    if asset_id != "cro":
+        return False
+    if phase == "phase2":
+        return True
+    existing = str(answers.get("existing_page_url") or "").strip().upper()
+    return existing.startswith(_NEW_PAGE_PREFIX)
+
+
 async def resolve_page_template(
     run_id: str | None,
     answers: dict[str, str],
@@ -3724,6 +3967,31 @@ class RefineStageRequest(BaseModel):
     client_profile: dict[str, str] = Field(default_factory=dict)
 
 
+class ContinueStageRequest(BaseModel):
+    """"Finish the document you were cut off inside" — the payload behind the Continue button.
+
+    It carries the same intake as the generation it is finishing, because the continuation is given
+    the stage's whole prompt again; see `_generation_sse_stream`'s docstring for why that is one code
+    path rather than two."""
+
+    answers: dict[str, str] = {}
+    #: The draft so far, held by the browser. Sent rather than read off the run for the same reason
+    #: `RefineStageRequest.previous_draft` is: the draft being continued has not been approved, so
+    #: there is no `ContextEntry` to read it from — a truncated draft is precisely the kind nobody
+    #: should be approving yet.
+    partial_draft: NonBlankStr
+    phase: str = DEFAULT_PHASE
+    chat_session_id: str | None = None
+    run_id: str | None = None
+    client_profile: dict[str, str] = Field(default_factory=dict)
+    #: Prepass output the interrupted attempt already paid for, keyed by the field it filled
+    #: (`competitor_list`, `raw_post_data_source`, …). Without it the continuation would re-run the
+    #: competitor web search and re-spend SociaVault credits to rebuild inputs it is already
+    #: holding — and would then be finishing the document against a *different* INPUTS block than
+    #: the one the partial was written from.
+    prefilled: dict[str, str] = Field(default_factory=dict)
+
+
 # Answers that mean "the operator did not supply a competitor analysis", so the prepass should run.
 # `N/A` is the one that matters: the UI writes it verbatim when an optional question is skipped
 # (`skipField` in `pipeline/pipelineStore.ts`), and skipping is the normal way through a competitor
@@ -3828,8 +4096,9 @@ _SOCIAL_COMPETITOR_COUNT_FIELD_ID = "number_of_competitors_to_audit"
 _SOCIAL_COMPETITOR_ANALYSIS_ASSET_ID = "competitor_analysis_social_content_strategy"
 
 # Hard cap on how many competitors this prepass resolves and fetches *automatically*, independent
-# of what the operator typed into `number_of_competitors_to_audit`. Each one costs a Firecrawl (or
-# Context.dev, at 10 credits) handle-resolution call plus a SociaVault fetch per platform resolved —
+# of what the operator typed into `number_of_competitors_to_audit`. Each one can cost a Firecrawl (or
+# Context.dev, at 10 credits) handle-resolution call when the free read of its page finds nothing,
+# plus a SociaVault fetch per platform resolved —
 # credits this prepass spends without being asked to, on every stage run, so the bound is fixed
 # rather than following an operator's dial that this call was never shown. `POST /pipeline/social/
 # posts` is still there for auditing a 6th, 7th, ... competitor by hand.
@@ -3849,7 +4118,7 @@ async def _fetch_competitor_social_blocks(
     competitor_list_raw: str, requested_count: str
 ) -> tuple[str, tuple[str, ...], bool, list[dict]]:
     """Resolve up to `_MAX_AUTO_COMPETITORS` competitors from `competitor_list` to real social
-    handles (Firecrawl first, Context.dev as fallback — see `social_audit.resolve_competitor_handles`)
+    handles (free page read, then Firecrawl, then Context.dev — see `social_audit.resolve_competitor_handles`)
     and fetch their live posts. Returns `(markdown, notes, any_data)`; never raises — a competitor
     whose list cannot be parsed, or whose site links to no social profile, is a stated finding, not
     a failure that should cost the client's own already-fetched data.
@@ -3906,8 +4175,9 @@ async def _fetch_competitor_social_blocks(
         if not accounts:
             return (
                 f"## {competitor.name} — live social data\n\nNo Facebook/Instagram/LinkedIn "
-                f"profile could be resolved from `{competitor.domain}` via Firecrawl or "
-                "Context.dev. Mark this competitor's post-level metrics N/D.\n",
+                f"profile could be resolved from `{competitor.domain}`: its page links none, read "
+                "directly, through Firecrawl, or through Context.dev. Mark this competitor's "
+                "post-level metrics N/D.\n",
                 False,
                 [],
             )
@@ -4071,7 +4341,29 @@ async def _generation_sse_stream(
     phase: str = DEFAULT_PHASE,
     chat_session_id: str | None = None,
     run_id: str | None = None,
+    continue_from: str | None = None,
+    prefilled: dict[str, str] | None = None,
 ):
+    """The generation stream, and — with `continue_from` set — the continuation of one that the
+    output cap cut off.
+
+    One function rather than two, because everything in front of the model call is the same work:
+    the competitor prepass, the social-post fetch, the service-page reads, the design sheet, the
+    page template and the voice pack. A parallel continuation path would be a second place for each
+    of those to be resolved slightly differently, and a continuation built from a different INPUTS
+    block than the draft it is finishing is a document that changes subject halfway down.
+
+    `prefilled` is prepass output the interrupted attempt already paid for, keyed by the field it
+    filled. Merged in before anything runs, so the prepasses see a field that is already answered
+    and skip — pressing Continue must not re-run a competitor web search or re-spend SociaVault
+    credits to rebuild an input the first attempt has already got.
+    """
+    if prefilled:
+        answers = {**answers, **{k: v for k, v in prefilled.items() if v}}
+    # Reported on the terminating `done` event. A list rather than a plain variable because the
+    # callback that fills it is handed to `generation.py` and runs in its frame, not this one.
+    stop_reason: list[str | None] = [None]
+
     try:
         prepasses = PREPASS_BY_MAIN_ASSET_BY_PHASE.get(phase, {})
         if asset_id in prepasses:
@@ -4115,7 +4407,11 @@ async def _generation_sse_stream(
         # simply omits the block then, and the stage's own prompt falls back to asking for brand
         # values rather than inventing a palette. Which view of it a stage sees — the full DESIGN.md
         # or the theme brief — and whether it gets the screenshots is decided in `generation.py`.
-        page_design = await resolve_page_design(run_id, answers, client_profile, asset_id=asset_id)
+        # A copy-only CRO run (Phase 2, or NEW PAGE mode) gets neither: see `_cro_writes_copy_only`.
+        copy_only = _cro_writes_copy_only(asset_id, phase, answers)
+        page_design = (
+            None if copy_only else await resolve_page_design(run_id, answers, client_profile, asset_id=asset_id)
+        )
 
         # The client's confirmed industry, if one is on the run (or its source run). None keeps the
         # default voice, which is the prompt exactly as it was before voice packs existed.
@@ -4125,8 +4421,10 @@ async def _generation_sse_stream(
         # before the generation rather than after it so the operator learns *now* whether the
         # replica is going to happen — a template that turns out to be unavailable is worth knowing
         # about while the stage is still running, not after it has finished.
+        # A design-language stage (the pillar page) builds a new page in the client's style for
+        # content of its own shape, so it is never poured into the reference's markup.
         page_template = None
-        if asset_id in PAGE_REPLICA_STAGES:
+        if asset_id in PAGE_REPLICA_STAGES and asset_id not in DESIGN_LANGUAGE_STAGES and not copy_only:
             page_template = await resolve_page_template(run_id, answers, client_profile)
             if page_template is not None:
                 yield _sse(
@@ -4142,25 +4440,52 @@ async def _generation_sse_stream(
                 )
 
         assembling = page_template is not None and page_template.available and run_id
-        chunks: list[str] = []
+        # Seeded with the draft so far on a continuation, so the replica assembly below reads the
+        # whole document rather than only the part this call produced.
+        chunks: list[str] = [continue_from] if continue_from else []
 
-        async for delta in generate_stage_stream(
-            asset_id,
-            answers,
-            phase,
-            on_usage=usage_service.recorder(
-                kind="generation",
-                chat_session_id=chat_session_id,
-                run_id=run_id,
-                asset_id=asset_id,
-                phase=phase,
-            ),
-            page_design=page_design,
-            voice=voice,
-        ):
+        # Billed as its own kind, so a continuation is visible in the usage panel as the extra call
+        # it is rather than appearing as the stage having cost double for no stated reason.
+        on_usage = usage_service.recorder(
+            kind="continuation" if continue_from else "generation",
+            chat_session_id=chat_session_id,
+            run_id=run_id,
+            asset_id=asset_id,
+            phase=phase,
+        )
+        if continue_from:
+            model_stream = generate_continuation_stream(
+                asset_id,
+                answers,
+                continue_from,
+                phase,
+                on_usage=on_usage,
+                page_design=page_design,
+                voice=voice,
+                on_complete=lambda r: stop_reason.__setitem__(0, r),
+            )
+        else:
+            model_stream = generate_stage_stream(
+                asset_id,
+                answers,
+                phase,
+                on_usage=on_usage,
+                page_design=page_design,
+                voice=voice,
+                on_complete=lambda r: stop_reason.__setitem__(0, r),
+            )
+
+        async for delta in model_stream:
             if assembling:
                 chunks.append(delta)
             yield _sse({"type": "delta", "text": delta})
+
+        # A truncated draft is not assembled onto the client's real page. The assembly maps the
+        # document's copy onto every slot, and a document missing its last third would leave most of
+        # the page carrying the client's old wording while the report claimed a successful build —
+        # see the `truncated` flag on `done`, which is what the card offers Continue from.
+        if stop_reason[0] == "max_tokens":
+            assembling = False
 
         if assembling and chunks:
             # A second billed call, so it announces itself. Wrapped separately from the stage's own
@@ -4207,7 +4532,24 @@ async def _generation_sse_stream(
         yield _sse(fault.as_event())
         return
 
-    yield _sse({"type": "done"})
+    # `truncated` is the one field the UI branches on, and it is derived here rather than in the
+    # browser so that "what counts as cut off" is decided once. `stop_reason` rides along for the
+    # transcript and for a future reason this is not the only non-`end_turn` ending worth naming.
+    yield _sse(_done_event(stop_reason[0]))
+
+
+def _done_event(stop_reason: str | None) -> dict:
+    """The terminating event every stream ends with.
+
+    It used to be a bare `{"type": "done"}`, which made a document the model had been cut off
+    mid-sentence indistinguishable from a finished one: the client marked the card ready for
+    review, ran the business check over a partial deliverable, and offered Approve. The only record
+    that anything had gone wrong was a WARNING in the server log.
+
+    Returns the event dict; the caller wraps it in `_sse`. Wrapping here *and* at the yield would
+    JSON-encode the SSE frame as a string, which the browser would then fail to parse as `done`.
+    """
+    return {"type": "done", "stop_reason": stop_reason, "truncated": stop_reason == "max_tokens"}
 
 
 async def _revision_sse_stream(
@@ -4220,6 +4562,7 @@ async def _revision_sse_stream(
     business_fix: bool = False,
     client_profile: dict[str, str] | None = None,
 ):
+    stop_reason: list[str | None] = [None]
     try:
         voice = await _run_industry(run_id)
         business_facts: str | None = None
@@ -4243,6 +4586,7 @@ async def _revision_sse_stream(
             ),
             voice=voice,
             business_facts=business_facts,
+            on_complete=lambda r: stop_reason.__setitem__(0, r),
         ):
             yield _sse({"type": "delta", "text": delta})
     except Exception as exc:  # noqa: BLE001 - every failure is classified and streamed, never swallowed
@@ -4251,7 +4595,62 @@ async def _revision_sse_stream(
         yield _sse(fault.as_event())
         return
 
-    yield _sse({"type": "done"})
+    # A revision can be cut off by the cap exactly as a generation can — it is asked for the *whole*
+    # revised document rather than a diff, so it is the same length. Continue is offered off the
+    # same flag; the continuation then finishes the revised draft, not the original.
+    yield _sse(_done_event(stop_reason[0]))
+
+
+_SSE_HEADERS = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
+
+
+def _claim_stream(kind: str, asset_id: str, payload: GenerateStageRequest | RefineStageRequest | ContinueStageRequest) -> str | None:
+    """Reserve this (run, stage, kind) for the duration of one stream, or refuse with a 409.
+
+    A **409, not a 429 and not a 500.** The request is well-formed and the account is fine; the
+    answer is "the generation you already started is still running", which is a state the operator
+    can see and act on. `app/services/stream_locks.py` has the reasoning for guarding this on the
+    server at all when the browser store guards it too.
+    """
+    key = stream_locks.key_for(kind, asset_id, payload.phase, payload.run_id, payload.chat_session_id)
+    try:
+        stream_locks.acquire(key)
+    except stream_locks.StreamBusy as busy:
+        logger.info("Refused a duplicate %s stream for asset_id=%r (%s)", kind, asset_id, busy)
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"This stage is already generating — a request started {busy.held_for_seconds:.0f}s ago "
+                "is still running, and starting a second one would bill twice and interleave two "
+                "documents into one draft. Wait for it to finish, or stop the stage and start again."
+            ),
+        ) from busy
+    return key
+
+
+async def _released_on_finish(key: str | None, stream):
+    """Hand the frames through, and give the lock back whichever way the stream ends.
+
+    Every ending runs this `finally`: a normal finish, a classified failure, and the client
+    disconnecting — Starlette's `StreamingResponse` cancels the task running the generator when the
+    connection drops, and `CancelledError` derives from `BaseException`, so it passes straight
+    through the `except Exception` handlers inside without being mistaken for a stage failure. The
+    Anthropic stream's own `async with` closes on the same path, which is what stops a request the
+    operator walked away from carrying on and billing.
+
+    Nothing is awaited in the `finally`. A `GeneratorExit` arriving at the yield below cannot be
+    suspended on, so the release has to be synchronous — which it is, deliberately; the inner
+    generator's own cleanup is Python's to run.
+
+    Deliberately **no `request.is_disconnected()` polling.** Starlette already listens for the
+    disconnect frame; a poll on every delta would cost a receive per few characters of a document
+    that runs to 100KB, to learn something that is already being watched for.
+    """
+    try:
+        async for frame in stream:
+            yield frame
+    finally:
+        stream_locks.release(key)
 
 
 @router.post("/generate/{asset_id}/stream")
@@ -4268,17 +4667,60 @@ async def generate_stage_stream_route(asset_id: str, payload: GenerateStageReque
         )
 
     logger.info("Generate-stream requested for asset_id=%r phase=%r", asset_id, payload.phase)
+    key = _claim_stream("generate", asset_id, payload)
     return StreamingResponse(
-        _generation_sse_stream(
-            asset_id,
-            payload.answers,
-            payload.client_profile,
-            payload.phase,
-            payload.chat_session_id,
-            payload.run_id,
+        _released_on_finish(
+            key,
+            _generation_sse_stream(
+                asset_id,
+                payload.answers,
+                payload.client_profile,
+                payload.phase,
+                payload.chat_session_id,
+                payload.run_id,
+            ),
         ),
         media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        headers=_SSE_HEADERS,
+    )
+
+
+@router.post("/continue/{asset_id}/stream")
+async def continue_stage_stream_route(asset_id: str, payload: ContinueStageRequest) -> StreamingResponse:
+    """Finish a draft the output cap cut off, streamed as the text to append to it.
+
+    Pressed by the operator, never automatic — see the continuation section of
+    `app/services/generation.py` for why finishing a 128k-token document is a decision rather than a
+    retry. The same lock as `generate`, under the same key: continuing a stage and regenerating it
+    are two writers of one document, so they exclude each other rather than only themselves."""
+    if not has_stage(asset_id, payload.phase):
+        raise HTTPException(
+            status_code=404, detail=f"Unknown asset_id {asset_id!r} for phase {payload.phase!r}"
+        )
+
+    logger.info(
+        "Continue-stream requested for asset_id=%r phase=%r partial_chars=%s",
+        asset_id,
+        payload.phase,
+        len(payload.partial_draft),
+    )
+    key = _claim_stream("generate", asset_id, payload)
+    return StreamingResponse(
+        _released_on_finish(
+            key,
+            _generation_sse_stream(
+                asset_id,
+                payload.answers,
+                payload.client_profile,
+                payload.phase,
+                payload.chat_session_id,
+                payload.run_id,
+                continue_from=payload.partial_draft,
+                prefilled=payload.prefilled,
+            ),
+        ),
+        media_type="text/event-stream",
+        headers=_SSE_HEADERS,
     )
 
 
@@ -4292,17 +4734,23 @@ async def refine_stage_stream_route(asset_id: str, payload: RefineStageRequest) 
         )
 
     logger.info("Refine-stream requested for asset_id=%r phase=%r", asset_id, payload.phase)
+    # Its own kind, so a Refine of stage 02 is not blocked by stage 02's generation still running —
+    # they write different cards, and the generation's own card is already superseded by then.
+    key = _claim_stream("refine", asset_id, payload)
     return StreamingResponse(
-        _revision_sse_stream(
-            asset_id,
-            payload.previous_draft,
-            payload.note,
-            payload.phase,
-            payload.chat_session_id,
-            payload.run_id,
-            payload.business_fix,
-            payload.client_profile,
+        _released_on_finish(
+            key,
+            _revision_sse_stream(
+                asset_id,
+                payload.previous_draft,
+                payload.note,
+                payload.phase,
+                payload.chat_session_id,
+                payload.run_id,
+                payload.business_fix,
+                payload.client_profile,
+            ),
         ),
         media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        headers=_SSE_HEADERS,
     )

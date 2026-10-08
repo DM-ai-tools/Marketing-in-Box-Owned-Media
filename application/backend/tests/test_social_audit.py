@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import pytest
 
-from app.services import context_dev, firecrawl_client, social_audit, sociavault_client
+from app.services import context_dev, firecrawl_client, scraper, social_audit, sociavault_client
 from app.services.sociavault_client import SocialFetchResult, SocialPost
 
 
@@ -134,31 +134,131 @@ def test_render_never_prints_none_engagement_as_zero():
     assert markdown.count("not published by this source") == 3  # likes, comments, shares
 
 
+@pytest.fixture(autouse=True)
+def _no_live_page_reads(monkeypatch):
+    """The resolver's first tier is a real HTTP read of the competitor's page. No test may make one:
+    each starts with that read finding nothing, and a test about the read swaps in its own page."""
+
+    async def nothing(_url):
+        return ()
+
+    monkeypatch.setattr(social_audit, "_read_site_links", nothing)
+
+
+# Shaped like entourage.com.au's footer on 2026-10-06: every profile is an icon with no text, so it
+# never reaches a page's markdown — which is why the Firecrawl `/extract` this replaced came back
+# empty on a page that linked all three. Plus everything that is *not* the business's profile.
+_ICON_FOOTER_HTML = """
+<html><head>
+<noscript><img src="https://www.facebook.com/tr?id=111504249562459&ev=PageView&noscript=1"></noscript>
+</head><body>
+<header><a href="https://www.facebook.com/entouragefinance"><svg viewBox="0 0 24 24"><path d="M0"/></svg></a></header>
+<main>
+  <p>Read <a href="https://www.linkedin.com/posts/someone-else_activity-7492396789455638528-GdZ1">this post</a>
+  and <a href="https://www.instagram.com/p/DPxyz123/">our feature</a>.</p>
+  <a href="https://www.facebook.com/sharer/sharer.php?u=https://entourage.com.au">Share</a>
+  <a href="https://www.linkedin.com/shareArticle?mini=true&url=x">Share</a>
+  <a href="https://twitter.com/intent/tweet?url=x">Tweet</a>
+</main>
+<footer>
+  <a href="https://www.facebook.com/entouragefinance/" aria-label="Facebook"><i class="icon-fb"></i></a>
+  <a href="https://www.instagram.com/entourage_au/"><i class="icon-ig"></i></a>
+  <a href="https://au.linkedin.com/company/entourage-finance?trk=footer"><i class="icon-li"></i></a>
+</footer>
+</body></html>
+"""
+
+
 @pytest.mark.asyncio
-async def test_resolve_competitor_handles_prefers_firecrawl(monkeypatch):
+async def test_icon_only_footer_links_are_found_by_the_free_read(monkeypatch):
+    """Tier 1, through the real reader path: the page's own hrefs, with no paid call at all."""
+    monkeypatch.undo()  # drop the autouse stub; this test exercises `_read_site_links` itself
     monkeypatch.setattr(firecrawl_client, "is_configured", lambda: True)
     monkeypatch.setattr(context_dev, "is_configured", lambda: True)
 
-    async def fake_extract(url):
+    async def fake_fetch_html(url):
+        assert url.startswith("https://entourage.com.au")
+        return "https://entourage.com.au/", _ICON_FOOTER_HTML
+
+    async def must_not_be_called(*_args, **_kwargs):
+        raise AssertionError("a paid tier ran although the free read found every platform")
+
+    monkeypatch.setattr(scraper, "_fetch_html", fake_fetch_html)
+    monkeypatch.setattr(firecrawl_client, "scrape_links", must_not_be_called)
+    monkeypatch.setattr(context_dev, "retrieve_brand", must_not_be_called)
+
+    accounts = await social_audit.resolve_competitor_handles("entourage.com.au")
+
+    assert {a.platform: a.handle for a in accounts} == {
+        "facebook": "https://www.facebook.com/entouragefinance",
+        "instagram": "entourage_au",
+        "linkedin": "https://www.linkedin.com/company/entourage-finance",
+    }
+
+
+@pytest.mark.parametrize(
+    "link",
+    [
+        "https://www.facebook.com/tr?id=277483536540840&ev=PageView&noscript=1",
+        "https://www.facebook.com/sharer/sharer.php?u=x",
+        "https://www.facebook.com/entouragefinance/posts/pfbid0Zx3",
+        "https://www.instagram.com/p/DPxyz123/",
+        "https://www.instagram.com/reel/DPxyz123/",
+        "https://www.linkedin.com/posts/arg-finance-pty-ltd_rba-activity-7510565171300511744-refm",
+        "https://www.linkedin.com/shareArticle?mini=true&url=x",
+        "https://twitter.com/argfinance",
+        "mailto:hello@argfinance.com.au",
+        "/contact",
+    ],
+)
+def test_pixels_share_buttons_and_single_posts_are_not_profiles(link):
+    assert social_audit.social_profile_links([link]) == {}
+
+
+def test_the_profile_linked_most_often_wins_and_tracking_is_dropped():
+    links = [
+        "https://www.linkedin.com/company/a-client-we-mention",
+        "https://www.linkedin.com/company/arg-finance-pty-ltd/",
+        "https://www.linkedin.com/company/arg-finance-pty-ltd/?originalSubdomain=au",
+        "https://m.facebook.com/argfinance?ref=footer",
+    ]
+    assert social_audit.social_profile_links(links) == {
+        "linkedin": "https://www.linkedin.com/company/arg-finance-pty-ltd",
+        "facebook": "https://www.facebook.com/argfinance",
+    }
+
+
+@pytest.mark.asyncio
+async def test_firecrawl_links_fill_only_what_the_free_read_left_open(monkeypatch):
+    monkeypatch.setattr(firecrawl_client, "is_configured", lambda: True)
+    monkeypatch.setattr(context_dev, "is_configured", lambda: True)
+
+    async def free_read(_url):
+        return ("https://www.facebook.com/acme",)
+
+    async def fake_scrape_links(url):
         assert url == "https://acme.com"
-        return firecrawl_client.SocialLinks(
-            source_url=url,
-            facebook_url="https://facebook.com/acme",
-            instagram_url="https://instagram.com/acme",
-            linkedin_url="https://linkedin.com/company/acme",
+        return (
+            "https://www.facebook.com/someone-else",  # must not override the free read's find
+            "https://www.facebook.com/tr?id=1",
+            "https://www.instagram.com/acme/",
+            "https://www.linkedin.com/company/acme",
         )
 
     async def fail_if_called(domain):
-        raise AssertionError("Context.dev should not run when Firecrawl already found every platform")
+        raise AssertionError("Context.dev should not run when the earlier tiers found every platform")
 
-    monkeypatch.setattr(firecrawl_client, "extract_social_links", fake_extract)
+    monkeypatch.setattr(social_audit, "_read_site_links", free_read)
+    monkeypatch.setattr(firecrawl_client, "scrape_links", fake_scrape_links)
     monkeypatch.setattr(context_dev, "retrieve_brand", fail_if_called)
 
     accounts = await social_audit.resolve_competitor_handles("acme.com")
 
-    # Context.dev is configured but never called — it is a fallback for what Firecrawl leaves
-    # open, not a second full lookup run on top of a complete Firecrawl answer.
-    assert set(a.platform for a in accounts) == {"facebook", "instagram", "linkedin"}
+    assert {a.platform: a.handle for a in accounts} == {
+        "facebook": "https://www.facebook.com/acme",
+        "instagram": "acme",
+        "linkedin": "https://www.linkedin.com/company/acme",
+    }
 
 
 @pytest.mark.asyncio
@@ -166,24 +266,28 @@ async def test_resolve_competitor_handles_falls_back_to_context_dev_for_the_gap(
     monkeypatch.setattr(firecrawl_client, "is_configured", lambda: True)
     monkeypatch.setattr(context_dev, "is_configured", lambda: True)
 
-    async def fake_extract(url):
-        return firecrawl_client.SocialLinks(source_url=url, facebook_url="https://facebook.com/acme")
+    async def fake_scrape_links(url):
+        return ("https://facebook.com/acme",)
 
     class _Brand:
-        socials = (("linkedin", "https://linkedin.com/company/acme"), ("instagram", "https://instagram.com/acme"))
+        socials = (
+            ("facebook", "https://facebook.com/not-this-one"),
+            ("linkedin", "https://linkedin.com/company/acme"),
+            ("instagram", "https://instagram.com/acme"),
+        )
 
     async def fake_retrieve_brand(domain):
         assert domain == "acme.com"
         return _Brand()
 
-    monkeypatch.setattr(firecrawl_client, "extract_social_links", fake_extract)
+    monkeypatch.setattr(firecrawl_client, "scrape_links", fake_scrape_links)
     monkeypatch.setattr(context_dev, "retrieve_brand", fake_retrieve_brand)
 
     accounts = await social_audit.resolve_competitor_handles("acme.com")
 
     by_platform = {a.platform: a.handle for a in accounts}
     # Facebook is Firecrawl's own find and must not be overridden by Context.dev's.
-    assert by_platform["facebook"] == "https://facebook.com/acme"
+    assert by_platform["facebook"] == "https://www.facebook.com/acme"
     assert by_platform["linkedin"] == "https://linkedin.com/company/acme"
     # Reduced to the bare username: the Instagram endpoint 400s on a profile URL.
     assert by_platform["instagram"] == "acme"
@@ -208,7 +312,7 @@ async def test_resolve_competitor_handles_uses_context_dev_when_firecrawl_is_unc
 
 
 @pytest.mark.asyncio
-async def test_resolve_competitor_handles_returns_empty_when_neither_source_is_configured(monkeypatch):
+async def test_resolve_competitor_handles_returns_empty_when_nothing_finds_a_profile(monkeypatch):
     monkeypatch.setattr(firecrawl_client, "is_configured", lambda: False)
     monkeypatch.setattr(context_dev, "is_configured", lambda: False)
 
@@ -220,7 +324,7 @@ async def test_resolve_competitor_handles_degrades_when_firecrawl_errors(monkeyp
     monkeypatch.setattr(firecrawl_client, "is_configured", lambda: True)
     monkeypatch.setattr(context_dev, "is_configured", lambda: True)
 
-    async def fake_extract(url):
+    async def fake_scrape_links(url):
         raise firecrawl_client.FirecrawlError("timed out")
 
     class _Brand:
@@ -229,12 +333,68 @@ async def test_resolve_competitor_handles_degrades_when_firecrawl_errors(monkeyp
     async def fake_retrieve_brand(domain):
         return _Brand()
 
-    monkeypatch.setattr(firecrawl_client, "extract_social_links", fake_extract)
+    monkeypatch.setattr(firecrawl_client, "scrape_links", fake_scrape_links)
     monkeypatch.setattr(context_dev, "retrieve_brand", fake_retrieve_brand)
 
     accounts = await social_audit.resolve_competitor_handles("acme.com")
 
     assert accounts == (social_audit.SocialAccount(platform="facebook", handle="https://facebook.com/acme"),)
+
+
+@pytest.mark.asyncio
+async def test_a_page_the_free_read_cannot_fetch_falls_through_to_firecrawl(monkeypatch):
+    monkeypatch.undo()
+    monkeypatch.setattr(firecrawl_client, "is_configured", lambda: True)
+    monkeypatch.setattr(context_dev, "is_configured", lambda: False)
+
+    async def refused(url):
+        raise scraper.ScrapeError("blocked an automated read (HTTP 403)")
+
+    async def fake_scrape_links(url):
+        return ("https://www.instagram.com/acme",)
+
+    monkeypatch.setattr(scraper, "_fetch_html", refused)
+    monkeypatch.setattr(firecrawl_client, "scrape_links", fake_scrape_links)
+
+    assert await social_audit.resolve_competitor_handles("acme.com") == (
+        social_audit.SocialAccount(platform="instagram", handle="acme"),
+    )
+
+
+def test_render_states_format_views_followers_and_pinned_posts_left_out():
+    result = SocialFetchResult(
+        platform="instagram",
+        handle="prospaau",
+        posts=(
+            SocialPost("instagram", "1", None, 1790894186, "carousel post", 91, 3, None, format="carousel"),
+            SocialPost("instagram", "2", None, 1783559453, "a reel", 4, 0, None, is_video=True, view_count=352, format="reel"),
+        ),
+        more_available=True,
+        credits_used=1,
+        follower_count=12_400,
+        pinned_excluded=3,
+    )
+
+    markdown = social_audit.render_social_data_md("Prospa", (result,), ())
+
+    assert "| Format |" in markdown and "| Views |" in markdown
+    assert "| reel |" in markdown and "| 352 |" in markdown
+    assert "Followers: 12,400" in markdown
+    assert "3 pinned post(s) were left out" in markdown
+    # The carousel has no view count: marked as absent, not printed as a measured zero.
+    assert "| — | carousel post |" in markdown
+
+    stats = social_audit.engagement_stats("Prospa", (result,))[0]
+    assert stats["follower_count"] == 12_400
+    assert stats["formats"] == {"carousel": 1, "reel": 1}
+    assert stats["median_engagement_rate_pct"] is not None
+    assert stats["top_posts"][0]["format"] == "carousel"
+    assert stats["top_posts"][1]["views"] == 352
+
+
+def test_engagement_rate_is_none_without_a_follower_count():
+    result = SocialFetchResult("facebook", "x", (SocialPost("facebook", "1", None, 1, "x", 5, 1, None),), False, 1)
+    assert social_audit.engagement_stats("X", (result,))[0]["median_engagement_rate_pct"] is None
 
 
 def test_render_reports_when_no_live_data_was_fetched():

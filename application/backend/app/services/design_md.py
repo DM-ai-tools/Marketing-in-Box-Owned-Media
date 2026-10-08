@@ -73,6 +73,7 @@ from dataclasses import dataclass, field
 from app.services import brandfetch_client, context_dev, firecrawl_client
 from app.services.design_tokens import DesignTokens, extract_design_tokens, is_neutral, tokens_to_css
 from app.services.image_briefs import ImageBrief, build_image_briefs
+from app.services.link_manifest import LinkManifest, extract_link_manifest, links_markdown
 from app.services.page_structure import PageStructure, extract_page_structure, structure_markdown
 
 logger = logging.getLogger(__name__)
@@ -520,6 +521,10 @@ class PageDesign:
     #: The page's skeleton, read off the same HTML the CSS parse fetched. Present in `design_md`
     #: and deliberately absent from `theme_brief` — see `build_design_md`.
     structure: PageStructure | None = None
+    #: Every link on the page with its real href (`link_manifest.py`). Like `structure`, rendered
+    #: into `design_md` only. Kept as data too, because the page check compares a generated page's
+    #: hrefs against it.
+    links: LinkManifest | None = None
     #: Which of the readings actually answered, for the log and the UI.
     sources: tuple[str, ...] = ()
     notes: list[str] = field(default_factory=list)
@@ -789,6 +794,7 @@ def build_design_md(
     *,
     screenshots: tuple[context_dev.Screenshot, ...] = (),
     structure: PageStructure | None = None,
+    links: LinkManifest | None = None,
     theme_only: bool = False,
     fallback: BrandFallback | None = None,
 ) -> str:
@@ -826,6 +832,10 @@ def build_design_md(
     # already started composing a page by the time it learns the page's real shape.
     if not theme_only and structure is not None:
         out += structure_markdown(structure)
+    # Right after the skeleton: the header and footer it describes are made of these links, and a
+    # model that reads the labels without the hrefs fills the hrefs in itself.
+    if not theme_only:
+        out += links_markdown(links)
 
     if colors:
         out += ["## Colors", ""]
@@ -905,6 +915,9 @@ def build_design_md(
         out.append("")
 
     if not theme_only:
+        out += _responsive_lines(tokens)
+
+    if not theme_only:
         shadows = {k: v for k, v in (guide.shadows if guide is not None else {}).items() if v and v != "none"}
         out += ["## Elevation & Depth", ""]
         if shadows:
@@ -974,6 +987,39 @@ def build_design_md(
     out.append("")
 
     return "\n".join(out)
+
+
+#: Used when the page's CSS declares no width breakpoints — the common phone / tablet / desktop
+#: split, stated as a fallback so the document never presents it as measured.
+DEFAULT_BREAKPOINTS = (640, 1024, 1280)
+
+RESPONSIVE_HEADING = "## Responsive"
+
+
+def _responsive_lines(tokens: DesignTokens | None) -> list[str]:
+    """The breakpoints the generated page switches layout at. Measured when the CSS has them."""
+    measured = list(tokens.breakpoints) if tokens is not None and tokens.available else []
+    out = [RESPONSIVE_HEADING, ""]
+    if measured:
+        widths = ", ".join(f"`{w}px`" for w in measured)
+        out.append(
+            f"The page's own CSS switches layout at {widths}. Use these as the generated page's "
+            "media-query breakpoints, mobile-first (`min-width`)."
+        )
+    else:
+        widths = ", ".join(f"`{w}px`" for w in DEFAULT_BREAKPOINTS)
+        out.append(
+            f"No width breakpoints were found in the page's CSS. Use {widths} (phone / tablet / "
+            "desktop), mobile-first — these are defaults, not measurements."
+        )
+    out += [
+        "",
+        "Every band must work from 360px wide upward with no horizontal scroll: grids collapse to "
+        "one column on a phone, the nav collapses behind an accessible toggle, and type scales with "
+        "`clamp()` between the sizes in the Typography section — never above the largest.",
+        "",
+    ]
+    return out
 
 
 def _unavailable_md(source_url: str, reason: str) -> str:
@@ -1089,12 +1135,18 @@ async def capture_page_design(
     # Free, and from the HTML the CSS parse has already fetched — `DesignTokens.html` exists for
     # exactly this, so reading the page's skeleton costs no request and no Context.dev credit.
     structure: PageStructure | None = None
+    links: LinkManifest | None = None
     if tokens is not None and tokens.html:
         structure = extract_page_structure(tokens.html, tokens.source_url or url)
         if structure.available:
             sources.append("page structure")
         else:
             notes.append(f"The page structure could not be read: {structure.reason}")
+        links = extract_link_manifest(tokens.html, tokens.source_url or url)
+        if links.available:
+            sources.append("links")
+        else:
+            notes.append(f"The page's links could not be read: {links.reason}")
 
     if guide is not None and not guide.available:
         notes.append("The styleguide came back empty — the page may render nothing to a crawler.")
@@ -1150,6 +1202,11 @@ async def capture_page_design(
         document = unavailable
         if structure is not None and structure.available:
             document = unavailable + "\n\n" + "\n".join(structure_markdown(structure))
+        # The links travel for the same reason: a page that refuses a palette still links to its
+        # own contact page, and a placeholder-grey page with real links is still deployable.
+        link_lines = links_markdown(links)
+        if link_lines:
+            document += "\n\n" + "\n".join(link_lines)
         return PageDesign(
             source_url=url,
             available=False,
@@ -1158,13 +1215,21 @@ async def capture_page_design(
             theme_brief=unavailable,
             screenshots=screenshots,
             structure=structure,
+            links=links,
             sources=tuple(sources),
             notes=notes,
             image_briefs=(),
         )
 
     design_md = build_design_md(
-        url, guide, fonts_data, tokens, screenshots=screenshots, structure=structure, fallback=fallback
+        url,
+        guide,
+        fonts_data,
+        tokens,
+        screenshots=screenshots,
+        structure=structure,
+        links=links,
+        fallback=fallback,
     )
     # Specs only — role, ratio, prompt. What actually reaches the model is real hosted URLs,
     # generated server-side once real ones exist (`image_briefs.generate_all`, wired from
@@ -1194,6 +1259,7 @@ async def capture_page_design(
         theme_brief=theme_brief,
         screenshots=screenshots,
         structure=structure,
+        links=links,
         sources=tuple(sources),
         notes=notes,
         image_briefs=image_briefs,

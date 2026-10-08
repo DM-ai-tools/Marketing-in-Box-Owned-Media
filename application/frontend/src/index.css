@@ -249,6 +249,74 @@ body {
   .plan-flow { animation: none; stroke-dasharray: none; }
 }
 
+/*
+  Plan map families. Five, not one per asset kind: a node's family answers "what job does this
+  asset do in the funnel", which is the question the map is opened to answer, and five hues stay
+  learnable where eighteen become a legend nobody reads. They are muted and appear only as a card's
+  edge bar, its tag chip and its outgoing connectors, never as a card fill, so they cannot be
+  mistaken for the three state accents (blue running, amber review, green done) used elsewhere.
+  Structure (root, phase) keeps the electric blue it always had.
+*/
+:root {
+  --plan-structure: var(--color-electric-blue);
+  --plan-content: #0f8a7e;
+  --plan-convert: #c2366a;
+  --plan-nurture: #6d4fd1;
+  --plan-target: #5f7f1c;
+  --plan-strategy: color-mix(in srgb, var(--color-ink) 55%, var(--color-paper) 45%);
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --plan-structure: #5b93ff;
+    --plan-content: #3cc3b4;
+    --plan-convert: #f0709f;
+    --plan-nurture: #a48dff;
+    --plan-target: #a5c95a;
+    --plan-strategy: color-mix(in srgb, var(--color-paper) 62%, var(--color-ink) 38%);
+  }
+}
+:root[data-theme="dark"] {
+  --plan-structure: #5b93ff;
+  --plan-content: #3cc3b4;
+  --plan-convert: #f0709f;
+  --plan-nurture: #a48dff;
+  --plan-target: #a5c95a;
+  --plan-strategy: color-mix(in srgb, var(--color-paper) 62%, var(--color-ink) 38%);
+}
+
+/* Nodes glide to their new place when a branch opens or a card grows, instead of jumping. Only
+   `transform` is transitioned, never top/left, so it stays on the compositor. */
+.plan-node {
+  transition: transform 0.32s cubic-bezier(0.16, 1, 0.3, 1), box-shadow 0.2s ease, border-color 0.2s ease;
+}
+.plan-node-enter {
+  animation: plan-node-in 0.28s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+@keyframes plan-node-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+/* The selected card's extra detail unfolds rather than appearing. */
+.plan-detail-in {
+  animation: plan-detail-in 0.34s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+@keyframes plan-detail-in {
+  from { opacity: 0; transform: translateY(-4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+/* A soft ring that breathes once when a card is selected: feedback that the click landed. */
+.plan-selected-pulse {
+  animation: plan-pulse 1.1s cubic-bezier(0.16, 1, 0.3, 1) 1;
+}
+@keyframes plan-pulse {
+  0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--plan-accent, var(--color-electric-blue)) 45%, transparent); }
+  100% { box-shadow: 0 0 0 10px color-mix(in srgb, var(--plan-accent, var(--color-electric-blue)) 0%, transparent); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .plan-node { transition: none; }
+  .plan-node-enter, .plan-detail-in, .plan-selected-pulse { animation: none; }
+}
+
 @keyframes signal-travel {
   0% { top: -15%; opacity: 0; }
   15% { opacity: 1; }

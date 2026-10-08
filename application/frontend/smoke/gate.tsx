@@ -290,12 +290,12 @@ function card(gate: Partial<StageGateState>): PipelineMessage {
   const html = renderToStaticMarkup(<PipelineDiagram />);
   // The arrow is what distinguishes the button from the hint that explains it.
   const starts = html.match(/Start here →/g) ?? [];
-  // 15 stages, minus the one under the cursor. The two the cursor has passed are *not* excluded:
-  // nothing here has been approved, so they were skipped rather than done, and being able to go
-  // back into them is the point.
-  ok("diagram: every stage but the current one offers a start", starts.length === 14, String(starts.length));
+  // 14 stages (the Plan of Action is written after Phase 2), minus the one under the cursor. The
+  // two the cursor has passed are *not* excluded: nothing here has been approved, so they were
+  // skipped rather than done, and being able to go back into them is the point.
+  ok("diagram: every stage but the current one offers a start", starts.length === 13, String(starts.length));
   ok("diagram: nothing claims to be saved", !html.includes("✓ Saved"), html.slice(0, 1500));
-  ok("diagram: progress counts nothing done", html.includes("0 / 15 Complete"), html.slice(-900));
+  ok("diagram: progress counts nothing done", html.includes("0 / 14 Complete"), html.slice(-900));
   ok("diagram: the hint explains it", html.includes("out of order"), html.slice(0, 1200));
 }
 
@@ -322,9 +322,9 @@ function card(gate: Partial<StageGateState>): PipelineMessage {
   });
   const html = renderToStaticMarkup(<PipelineDiagram />);
   ok("diagram: only the approved stage is done", (html.match(/✓ Saved/g) ?? []).length === 1, String((html.match(/✓ Saved/g) ?? []).length));
-  ok("diagram: progress counts approvals, not the cursor", html.includes("1 / 15 Complete"), html.slice(-900));
-  // 15 stages, minus the approved one (done, no offer) and the one under the cursor.
-  ok("diagram: the skipped-over stages are still enterable", (html.match(/Start here →/g) ?? []).length === 13, String((html.match(/Start here →/g) ?? []).length));
+  ok("diagram: progress counts approvals, not the cursor", html.includes("1 / 14 Complete"), html.slice(-900));
+  // 14 stages, minus the approved one (done, no offer) and the one under the cursor.
+  ok("diagram: the skipped-over stages are still enterable", (html.match(/Start here →/g) ?? []).length === 12, String((html.match(/Start here →/g) ?? []).length));
 }
 
 {

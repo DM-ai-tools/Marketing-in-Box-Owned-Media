@@ -6,6 +6,8 @@ Four checks, each scored where it applies:
   * `funnel_relevance` — does it route the buyer through the client's real offers and funnel?
   * `business_logic`   — are its claims, prices, testimonials and vocabulary allowed for this client?
   * `virality`         — how likely is it to travel? A **prediction**, never a measurement.
+  * `page_readiness`   — is the page in the draft deployable as delivered? Pillar page only, and
+                         rules only (`page_check.py`): its score is computed, never judged.
 
 Measure first, then judge. The same fix `design_tokens.py` documents for colours applies here:
 deterministic rules run against the facts on record (`business_facts.py`) before any model is
@@ -26,22 +28,28 @@ import re
 import time
 from dataclasses import asdict, dataclass, field
 
+from app.services import page_check
 from app.services.business_facts import BusinessFacts, amount_of, money_matches
 from app.services.claude_client import get_client
 from app.services.generation import EFFORT_CAPABLE_MODELS, SONNET, OnUsage
 from app.services.html_dom import parse_html
+from app.services.link_manifest import links_markdown
 from app.services.usage import CallUsage
 
 logger = logging.getLogger(__name__)
 
-CHECKS = ("offer_relevance", "funnel_relevance", "business_logic", "virality")
+CHECKS = ("offer_relevance", "funnel_relevance", "business_logic", "virality", page_check.CHECK)
+
+#: Checks scored by rules alone. The judge is never asked about them: whether an href matches the
+#: client's site is a fact to look up, not an opinion, and a judge score would only add noise.
+RULE_ONLY_CHECKS = frozenset({page_check.CHECK})
 
 #: Which checks apply to which asset. Every stage in both phases is listed, so a stage added later
 #: fails `test_every_stage_has_checks` instead of silently being unchecked.
 CHECKS_BY_ASSET: dict[str, tuple[str, ...]] = {
     "icp": ("business_logic",),
     "cro": ("offer_relevance", "business_logic"),
-    "pillar_page": ("offer_relevance", "business_logic"),
+    "pillar_page": ("offer_relevance", "business_logic", page_check.CHECK),
     "funnel": ("offer_relevance", "funnel_relevance", "business_logic"),
     "funnel_hub_media": ("funnel_relevance", "business_logic"),
     "offers": ("offer_relevance", "business_logic"),
@@ -411,7 +419,13 @@ _RUBRIC = {
 def fix_context(facts: BusinessFacts) -> str:
     """The facts a "Fix with Refine" revision is written against: the same summary and ICP excerpt
     the judge checked the draft against, so a fix and the re-check agree on what is true."""
-    return facts.summary() + (f"\n\nICP (excerpt):\n{facts.icp[:6000]}" if facts.icp else "")
+    context = facts.summary() + (f"\n\nICP (excerpt):\n{facts.icp[:6000]}" if facts.icp else "")
+    # A page fix ("the footer's LinkedIn link is missing") can only be made correctly with the real
+    # href in hand; without the list, the reviser guesses one, which is the bug being fixed.
+    link_lines = links_markdown(facts.links)
+    if link_lines:
+        context += "\n\n" + "\n".join(link_lines)
+    return context
 
 
 def _previous_block(previous: list[CheckResult] | None, checks: tuple[str, ...]) -> str:
@@ -545,6 +559,9 @@ def _hold_unexplained_drops(results: dict[str, CheckResult], previous: list[Chec
     is what made "Fix with Refine" look as if it had made the draft worse."""
     before = {p.check: p.score for p in previous if p.score is not None}
     for name, result in results.items():
+        if name in RULE_ONLY_CHECKS:
+            # Computed from the page, so a lower score always has findings behind it.
+            continue
         was = before.get(name)
         if was is None or result.score is None or result.score >= was:
             continue
@@ -573,18 +590,32 @@ async def check_asset(
     for f in rule_findings:
         results.setdefault(f.check, CheckResult(f.check)).findings.append(f)
 
+    if page_check.CHECK in checks:
+        page_result = results[page_check.CHECK]
+        issues, page_used = page_check.check_page(raw, facts.links, facts.design_md)
+        used = [*used, *page_used]
+        if page_check.extract_page_html(raw):
+            page_result.findings.extend(
+                Finding(page_check.CHECK, issue.severity, issue.quote, issue.why, issue.fix) for issue in issues
+            )
+            page_result.score = page_check.score(issues)
+            page_result.verdict = page_check.verdict(issues)
+        else:
+            page_result.verdict = "The draft holds no HTML page to check."
+    judged = tuple(c for c in checks if c not in RULE_ONLY_CHECKS)
+
     benchmarks, benchmarked = virality_benchmarks(text, facts) if "virality" in checks else ("", False)
     judge_state = "skipped"
     dropped = 0
 
-    if use_judge and text.strip():
+    if use_judge and text.strip() and judged:
         try:
-            data = _parse_judge(await _call_judge(_judge_prompt(asset_id, checks, facts, text, rule_findings, benchmarks, previous), on_usage))
+            data = _parse_judge(await _call_judge(_judge_prompt(asset_id, judged, facts, text, rule_findings, benchmarks, previous), on_usage))
             if data is None:
                 raise ValueError("the judge's reply was not the requested JSON")
             judge_state = "ok"
             for name, body in data["checks"].items():  # type: ignore[union-attr]
-                if name not in results or not isinstance(body, dict):
+                if name not in results or name in RULE_ONLY_CHECKS or not isinstance(body, dict):
                     continue
                 result = results[name]
                 result.score = _score_of(body.get("score"))

@@ -70,7 +70,20 @@ const PHASE2_ASSET_IDS = [
   "sms_sequence",
   "content_marketing_strategy",
   "funnel_hub_media",
+  // Last, and about the whole engagement rather than this sub-service: it reads the Phase 1 run and
+  // every sub-service built under it (`app/services/plan_context.py`). See `DEFERRED_TO_PHASE2`.
+  "plan_of_action",
 ] as const;
+
+/** Assets the Phase 1 walk does not build, because they are written after Phase 2.
+ *
+ * The Plan of Action's roadmap has a "Phase 2" of its own — expand into sub-services — and that is
+ * this app's Phase 2. Run at the end of Phase 1 it had nothing to say about them: it scheduled work
+ * that was about to be built and reported finished sub-services as missing. So Phase 1 stops one
+ * stage earlier and says so (`finishPhase`); the plan is the last stage of Phase 2, where every
+ * sub-service built so far can be read. Still in `ASSET_CATALOG`, so existing chats that already
+ * hold an approved Phase 1 plan keep resolving it. */
+export const DEFERRED_TO_PHASE2: ReadonlySet<string> = new Set(["plan_of_action"]);
 
 /** Number a run of assets 1..n and attach its display metadata.
  *
@@ -92,7 +105,7 @@ function buildStages(assets: AssetDefinition[]): PipelineStageDef[] {
  * `pipeline.py`), so it never gets its own review gate — the operator reviews the main asset
  * that consumed it. */
 export const PHASE1_STAGES: PipelineStageDef[] = buildStages(
-  ASSET_CATALOG.filter((a) => a.category !== "Competitor Research"),
+  ASSET_CATALOG.filter((a) => a.category !== "Competitor Research" && !DEFERRED_TO_PHASE2.has(a.asset_id)),
 );
 
 /** The Phase 2 stages, in Phase 2's own order, using Phase 2's own intake.

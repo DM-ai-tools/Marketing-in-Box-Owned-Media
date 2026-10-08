@@ -61,24 +61,10 @@ def _token(document: str, name: str, fallback: str) -> str:
     return match.group(1).strip() if match else fallback
 
 
-def build_image_briefs(
-    design_md: str,
-    *,
-    asset_label: str = "the HTML asset",
-    subject_context: str = "",
-    reference_image_urls: tuple[str, ...] = (),
-) -> tuple[ImageBrief, ...]:
-    """Create prompts that bind subject matter to the measured brand system.
-
-    `subject_context` and `reference_image_urls` are what stop the output being a plausible but
-    unrelated scene ("random character images"): a brief built from brand tokens alone tells the
-    model what colours and typography to use, never what the business *is*, so the model filled
-    that gap itself. `subject_context` is a short description of the actual service (from the
-    stage's own intake — see `pipeline._image_subject_context`); `reference_image_urls` are real
-    photographs off the client's page (`firecrawl_client.extract_reference_images`), which
-    `generate_all` uses to ground the image via `openai_image_client.edit_image` rather than a
-    text-only generation.
-    """
+def _brand_base(
+    design_md: str, *, asset_label: str, subject_context: str, reference_image_urls: tuple[str, ...]
+) -> str:
+    """The shared half of every brief: subject, reference grounding and the measured brand system."""
     primary = _token(design_md, "primary", "the measured primary brand colour")
     surface = _token(design_md, "surface", "the measured surface colour")
     ink = _token(design_md, "on-surface", "the measured text colour")
@@ -107,7 +93,7 @@ def build_image_briefs(
     else:
         reference_line = ""
 
-    base = " ".join(
+    return " ".join(
         part
         for part in (
             f"Photorealistic editorial image for {asset_label}.",
@@ -121,6 +107,32 @@ def build_image_briefs(
             "illustration, or generic stock-photo styling.",
         )
         if part
+    )
+
+
+def build_image_briefs(
+    design_md: str,
+    *,
+    asset_label: str = "the HTML asset",
+    subject_context: str = "",
+    reference_image_urls: tuple[str, ...] = (),
+) -> tuple[ImageBrief, ...]:
+    """Create prompts that bind subject matter to the measured brand system.
+
+    `subject_context` and `reference_image_urls` are what stop the output being a plausible but
+    unrelated scene ("random character images"): a brief built from brand tokens alone tells the
+    model what colours and typography to use, never what the business *is*, so the model filled
+    that gap itself. `subject_context` is a short description of the actual service (from the
+    stage's own intake — see `pipeline._image_subject_context`); `reference_image_urls` are real
+    photographs off the client's page (`firecrawl_client.extract_reference_images`), which
+    `generate_all` uses to ground the image via `openai_image_client.edit_image` rather than a
+    text-only generation.
+    """
+    base = _brand_base(
+        design_md,
+        asset_label=asset_label,
+        subject_context=subject_context,
+        reference_image_urls=reference_image_urls,
     )
     return (
         ImageBrief(
@@ -145,6 +157,87 @@ def build_image_briefs(
             reference_image_urls=reference_image_urls,
         ),
     )
+
+
+#: Section images on top of the three page-level ones, per run. Image generation is money exactly as
+#: a Context.dev credit is, so the count is fixed rather than following the number of sections.
+MAX_SECTION_IMAGES = 2
+
+#: A section image's role starts with this, followed by the section heading. The prompt block lists
+#: the role, so the model knows which section the URL belongs to.
+SECTION_ROLE_PREFIX = "section: "
+
+_MARKDOWN_HEADING = re.compile(r"^(#{2,3})\s+(.+?)\s*#*\s*$", re.MULTILINE)
+
+# Sections the three page-level briefs already illustrate, or that never carry a photograph. An FAQ
+# with a photo is padding; the hero, proof and closing CTA have their own images.
+_NOT_A_PICTURE_SECTION = re.compile(
+    r"\b(faq|faqs|question|questions|contents|table of contents|testimonial|testimonials|review|"
+    r"reviews|pricing|price|cost|investment|contact|get in touch|call to action|cta|footer|"
+    r"related|resources|book|ready to|next step|summary|conclusion|hero|overview of this page)\b",
+    re.IGNORECASE,
+)
+
+
+def content_section_headings(content: str, limit: int = MAX_SECTION_IMAGES) -> tuple[str, ...]:
+    """The improved content's section headings that deserve an image of their own.
+
+    Reads `##` headings (falling back to `###` when the copy has no `##`), skips the first — it is
+    the hero, which already has an image — and skips sections that never carry a photograph.
+    Formatting marks are stripped; an empty or unparseable document yields none.
+    """
+    found = _MARKDOWN_HEADING.findall(content or "")
+    if not found:
+        return ()
+    level = "##" if any(marks == "##" for marks, _ in found) else "###"
+    headings = [re.sub(r"[*_`\[\]]", "", text).strip() for marks, text in found if marks == level]
+    out: list[str] = []
+    for heading in headings[1:]:
+        if not heading or len(heading) > 90 or _NOT_A_PICTURE_SECTION.search(heading):
+            continue
+        if heading.lower() in {h.lower() for h in out}:
+            continue
+        out.append(heading)
+        if len(out) >= limit:
+            break
+    return tuple(out)
+
+
+def build_section_briefs(
+    design_md: str,
+    headings: tuple[str, ...],
+    *,
+    asset_label: str = "the HTML asset",
+    subject_context: str = "",
+    reference_image_urls: tuple[str, ...] = (),
+) -> tuple[ImageBrief, ...]:
+    """One brief per content section that needs its own image (a pillar page's body sections).
+
+    Same brand binding and grounding as `build_image_briefs`; the composition names the section so
+    the image shows what that part of the page is about. Sizes alternate wide / square so a split
+    layout and a card both have something that crops well.
+    """
+    base = _brand_base(
+        design_md,
+        asset_label=asset_label,
+        subject_context=subject_context,
+        reference_image_urls=reference_image_urls,
+    )
+    briefs = []
+    for index, heading in enumerate(headings[:MAX_SECTION_IMAGES]):
+        briefs.append(
+            ImageBrief(
+                role=f"{SECTION_ROLE_PREFIX}{heading}",
+                size="1536x1024" if index % 2 == 0 else "1024x1024",
+                prompt=(
+                    f"{base} Section image for the part of the page headed \"{heading}\": a concrete, "
+                    "believable scene that shows what this section describes, for a split image-and-"
+                    "text layout, with the subject clear at small sizes."
+                ),
+                reference_image_urls=reference_image_urls,
+            )
+        )
+    return tuple(briefs)
 
 
 async def generate_all(

@@ -81,6 +81,18 @@
       "raw_explanation": "YOUR ANSWER or leave blank — if a CRO audit, rebuilt pillar page, lead magnet, funnel, blog, SMS sequence, or SEO pass already exists for the primary service, reference or attach it here so Phase 1 is marked complete rather than re-planned from scratch. If nothing exists yet, say \"greenfield — Phase 1 not started.\""
     },
     {
+      "field_id": "phase_2_sub_services_already_built_optional",
+      "label": "Phase 2 Sub-Services Already Built (optional)",
+      "kind": "file_attach",
+      "required": false,
+      "source": "user_input",
+      "accepted_types": [
+        "file",
+        "text"
+      ],
+      "raw_explanation": "YOUR ANSWER or leave blank — every sub-service whose pillar page, funnel, lead magnet or other assets are already built, so the sub-service expansion marks them complete rather than re-briefing them. If none are built yet, say \"none — Phase 2 not started.\""
+    },
+    {
       "field_id": "sub_services_to_expand_into_phase_2",
       "label": "Sub-Services to Expand Into (Phase 2)",
       "kind": "text",

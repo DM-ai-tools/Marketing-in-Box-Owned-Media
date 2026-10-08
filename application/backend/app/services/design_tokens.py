@@ -886,6 +886,10 @@ class DesignTokens:
     stylesheet_urls: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
     logo: Logo | None = None
+    #: The `@media` width breakpoints the page's own CSS uses, most-used first then sorted
+    #: ascending, in px. What a generated page's responsive rules should switch at, rather than a
+    #: framework's defaults. Empty when the CSS declares none.
+    breakpoints: list[int] = field(default_factory=list)
     #: The page's HTML, as fetched. Not a token — a byproduct of the fetch, kept so
     #: `page_structure.py` can read the DOM without a second request for the same document. Excluded
     #: from `repr` because it is a whole web page and this dataclass is logged.
@@ -999,6 +1003,43 @@ def _is_useful_token(name: str, value: str) -> bool:
     )
 
 
+_MEDIA_WIDTH = re.compile(
+    r"\(\s*(?:min|max)-width\s*:\s*(\d+(?:\.\d+)?)\s*(px|em|rem)\s*\)", re.IGNORECASE
+)
+_MEDIA_RULE = re.compile(r"@media([^{]*)\{")
+_MAX_BREAKPOINTS = 4
+# Below a phone or above a wide desktop, a "breakpoint" is a print or edge-case rule, not a layout.
+_BREAKPOINT_RANGE = (320, 1920)
+
+
+def collect_breakpoints(css_blocks: list[str]) -> list[int]:
+    """The page's own responsive breakpoints, in px, ascending.
+
+    Counted per `@media` rule rather than per stylesheet, so the widths the theme actually switches
+    at outrank a one-off rule in a plugin's sheet. `em`/`rem` are taken at 16px, which is what every
+    browser resolves a media-query em against regardless of the page's root font size. Width values
+    within 8px of each other are one breakpoint written two ways (`max-width: 767px` and
+    `min-width: 768px`) and are merged onto the more common one.
+    """
+    counts: dict[int, int] = {}
+    for css in css_blocks:
+        for query in _MEDIA_RULE.findall(css):
+            for value, unit in _MEDIA_WIDTH.findall(query):
+                px = float(value) * (16 if unit.lower() in {"em", "rem"} else 1)
+                width = int(round(px))
+                if _BREAKPOINT_RANGE[0] <= width <= _BREAKPOINT_RANGE[1]:
+                    counts[width] = counts.get(width, 0) + 1
+    merged: dict[int, int] = {}
+    for width, count in sorted(counts.items(), key=lambda item: -item[1]):
+        near = next((kept for kept in merged if abs(kept - width) <= 8), None)
+        if near is None:
+            merged[width] = count
+        else:
+            merged[near] += count
+    top = sorted(merged.items(), key=lambda item: -item[1])[:_MAX_BREAKPOINTS]
+    return sorted(width for width, _count in top)
+
+
 def _build_tokens(source_url: str, sources: _Sources) -> DesignTokens:
     declared = _collect_custom_properties(sources)
     # Custom properties are resolved against each other first, so everything downstream — the
@@ -1019,6 +1060,7 @@ def _build_tokens(source_url: str, sources: _Sources) -> DesignTokens:
         font_links=sources.font_links,
         radii=_collect_values(sources, "border-radius", limit=8, properties=declared),
         buttons=_collect_buttons(sources, properties=declared),
+        breakpoints=collect_breakpoints(sources.css),
         stylesheet_urls=sources.stylesheet_urls,
         notes=sources.notes,
         html=sources.html,

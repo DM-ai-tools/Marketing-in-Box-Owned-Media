@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
@@ -25,7 +26,9 @@ from pathlib import Path
 from app.services.claude_client import get_client
 from app.services.image_briefs import GeneratedImage
 from app.services.industry_voice import IndustryProfile, voice_block
-from app.services.page_structure import STRUCTURE_HEADING
+from app.services.design_md import RESPONSIVE_HEADING
+from app.services.link_manifest import LINKS_HEADING
+from app.services.page_structure import COMPONENT_VOCABULARY_HEADING, STRUCTURE_HEADING, as_component_vocabulary
 from app.services.usage import CallUsage
 
 logger = logging.getLogger(__name__)
@@ -320,6 +323,26 @@ PHASE2_OVERRIDES: dict[str, Phase2Override] = {
     "funnel_hub_media": Phase2Override(
         "Funnel-Hub-Media-Architect-Prompt_phase2.md",
         label_overrides=(("service_or_product_line_being_funnel_mapped", "sub-service or product line being funnel-mapped"),),
+    ),
+    # The last stage of Phase 2, and the only one that covers the whole engagement rather than one
+    # sub-service. The plan's roadmap Phase 2 *is* this app's Phase 2, so it has to be written after
+    # it: run at the end of Phase 1 it scheduled sub-service work that was about to be built, and
+    # reported finished work as missing. See `app/services/plan_context.py`.
+    #
+    # Three inputs are dropped because the engagement-wide documents carry them. A Phase 2 run's own
+    # CRO rewrite, funnel and value ladder are the *sub-service's*, and the ordinary context lookup
+    # would hand the plan one sub-service's page copy as "the CRO framework" for the whole client.
+    # The headline service's versions are inside "Existing Phase 1 Assets", and each sub-service's
+    # are inside "Phase 2 Sub-Services Already Built".
+    "plan_of_action": Phase2Override(
+        "Plan-of-Action-Architect-Prompt_phase2.md",
+        drop_fields=frozenset(
+            {
+                "cro_messaging_framework_optional",
+                "existing_funnels_lead_magnets_optional",
+                "existing_value_ladder_offers_optional",
+            }
+        ),
     ),
 }
 
@@ -627,6 +650,86 @@ _PAGE_STRUCTURE_DIRECTIVE = (
     "for it; do not delete it, and do not invent an extra band to use up material."
 )
 
+# The replica stages that build a *new* page in the client's design language rather than cloning
+# the reference band for band. The pillar page is a page the client does not have yet, laid out for
+# copy of a different length and shape than the reference's, so its sections follow the content
+# while every visual decision, header, footer and link still comes from the reference. `cro` stays a
+# clone: its job is to rewrite the page it was given. A stage here is also never handed the page
+# template (`resolve_page_template` in the router), whose whole mechanism is "same markup, new words".
+DESIGN_LANGUAGE_STAGES: frozenset[str] = frozenset({"pillar_page"})
+
+# Replaces `_PAGE_STRUCTURE_DIRECTIVE` for a design-language stage. The binding directive above says
+# to follow the reference's layout strictly; this states which half of the page that means.
+_DESIGN_LANGUAGE_DIRECTIVE = (
+    "\n  - **Design language, not a clone of the page.** Wherever this directive says to follow the "
+    "reference's layout strictly, it means: the header and footer are reproduced, and every body "
+    "section is built from the reference's own components, spacing scale and type. The order and "
+    "number of body sections follow the new content. A grid holds as many items as the copy has "
+    "(five services means five cards, wrapping), never padded or cut to the reference's count."
+)
+
+# Read off the sheet, like `_PAGE_STRUCTURE_DIRECTIVE`: appended only when the re-framed section is
+# present, so it can never point at a section the document lacks.
+_COMPONENT_VOCABULARY_DIRECTIVE = (
+    "\n  - **The Page structure section is a component vocabulary.** Its bands show the section types "
+    "this site uses and how each is built. Pick the closest one for each section of the new content "
+    "and build it that way. Keep the logo placement, nav labels, contact details, client / partner "
+    "logo URLs and alt text, and icons from that section verbatim."
+)
+
+_LINKS_DIRECTIVE = (
+    "\n  - **Every link comes from the Links section.** Header menu items (sub-menus under their "
+    "parent), footer columns, social icons, contact links and legal links use the href given there, "
+    "character for character. Never `#`, never an empty href, never a path on the client's site that "
+    "is not listed. Calls to action point at the primary call to action that section names unless "
+    "the copy names another listed link. Social icons carry an `aria-label` naming the platform."
+)
+
+_RESPONSIVE_DIRECTIVE = (
+    "\n  - **Responsive and flexible.** Mobile-first: base styles for a 360px phone, then `min-width` "
+    "media queries at the breakpoints in the Responsive section. Grids use `auto-fit`/`minmax()` or "
+    "wrapping flex so they grow with the content; no fixed heights on text, no horizontal scroll, "
+    "images `max-width:100%; height:auto`; the nav collapses behind a menu `<button aria-expanded>` "
+    "on small screens. Header sub-menus are closed on load and open on hover or focus: style the "
+    "top-level menu with a child selector (`nav > ul`), never `nav ul`, which also matches the "
+    "sub-menus and forces them all open, and put no `tabindex` on the `<li>`."
+)
+
+_DEPLOY_READY_DIRECTIVE = (
+    "\n  - **Deploy-ready.** One complete HTML document a developer can publish as delivered: "
+    "doctype, `<html lang>`, charset and viewport meta, `<title>`, meta description, canonical and "
+    "Open Graph tags, the webfont links, one inline `<style>`, `header`/`nav`/`main`/`footer` "
+    "landmarks, exactly one `h1`, `alt` and `width`/`height` on every image, `loading=\"lazy\"` below "
+    "the fold, visible focus styles, a skip link, FAQPage JSON-LD when there is an FAQ, and no "
+    "external CSS/JS frameworks. No lorem ipsum, no placeholder links."
+)
+
+#: The build-quality bar for a design-language page — composition, responsiveness, accessibility,
+#: performance, SEO and links — distilled from the design skills, with every aesthetic opinion
+#: removed so it cannot compete with the client's DESIGN.md.
+PAGE_BUILD_STANDARDS = "PAGE_BUILD_STANDARDS.md"
+
+
+def _page_build_standards_block(asset_id: str) -> str:
+    """The standards document for a design-language stage, fenced and bound, else "".
+
+    Deliberately in the per-stage tail, not `REFERENCE_LIBRARY`. The library is one cached system
+    block shared by eleven stages; adding a document for one of them would give that stage a cache
+    entry of its own, costing a ~12k-token cache write to save a ~2.5k-token uncached read.
+    """
+    if asset_id not in DESIGN_LANGUAGE_STAGES:
+        return ""
+    text = (_PROMPTS_DIR / PAGE_BUILD_STANDARDS).read_text(encoding="utf-8").strip()
+    return (
+        f"===== BEGIN assets/Prompts/{PAGE_BUILD_STANDARDS} =====\n"
+        "HOW THIS DOCUMENT BINDS YOUR RESPONSE:\nThe quality bar for the HTML page you build — "
+        "structure, responsiveness, accessibility, performance and links. It sets no colours, fonts "
+        f"or style of its own: where it seems to conflict with {BRAND_DESIGN_TOKENS}, the tokens win.\n\n"
+        f"{text}\n"
+        f"===== END assets/Prompts/{PAGE_BUILD_STANDARDS} =====\n\n"
+    )
+
+
 # Appended for the theme stages. Without it a lead magnet handed a landing page's design system
 # builds a landing page.
 _THEME_ONLY_DIRECTIVE = (
@@ -658,7 +761,13 @@ def _generated_images_block(images: tuple[GeneratedImage, ...]) -> str:
     return "".join(lines)
 
 
-def _brand_token_block(design_markdown: str | None, *, theme_only: bool = False, has_screenshots: bool = False) -> str:
+def _brand_token_block(
+    design_markdown: str | None,
+    *,
+    theme_only: bool = False,
+    has_screenshots: bool = False,
+    design_language: bool = False,
+) -> str:
     """The extracted design sheet, fenced and bound, or "" when the stage has none.
 
     Deliberately shares the reference-library framing rather than arriving as another INPUTS line.
@@ -679,8 +788,20 @@ def _brand_token_block(design_markdown: str | None, *, theme_only: bool = False,
     # deriving the flag from the text about to be sent makes the two incapable of drifting. It also
     # means an older stored sheet, captured before the structure walk existed, simply does not get
     # the clause — which is correct, because it does not have the section either.
-    if not theme_only and STRUCTURE_HEADING in design_markdown:
+    design_language = design_language and not theme_only
+    if design_language:
+        design_markdown = as_component_vocabulary(design_markdown)
+        directive += _DESIGN_LANGUAGE_DIRECTIVE
+        if COMPONENT_VOCABULARY_HEADING in design_markdown:
+            directive += _COMPONENT_VOCABULARY_DIRECTIVE
+    elif not theme_only and STRUCTURE_HEADING in design_markdown:
         directive += _PAGE_STRUCTURE_DIRECTIVE
+    if not theme_only and LINKS_HEADING in design_markdown:
+        directive += _LINKS_DIRECTIVE
+    if design_language:
+        if RESPONSIVE_HEADING in design_markdown:
+            directive += _RESPONSIVE_DIRECTIVE
+        directive += _DEPLOY_READY_DIRECTIVE
     if has_screenshots:
         directive += _SCREENSHOT_DIRECTIVE
     return (
@@ -851,12 +972,14 @@ def _prompt_parts(
             page_design.sheet_for(asset_id),
             theme_only=asset_id in BRAND_THEME_STAGES,
             has_screenshots=bool(page_design.screenshots_for(asset_id)),
+            design_language=asset_id in DESIGN_LANGUAGE_STAGES,
         )
 
     return (
         _load_reference_library(asset_id),
         voice_block(voice)
         + brand
+        + _page_build_standards_block(asset_id)
         + "— INPUTS (fill in before submitting) —\n\n"
         + "\n".join(lines)
         + "\n\n— END OF INPUTS —\n\n"
@@ -950,16 +1073,22 @@ def _stream_kwargs(
     cfg: StageConfig,
     system_blocks: list[dict[str, object]] | None,
     user_content: str | list[dict[str, object]],
+    extra_messages: list[dict[str, object]] | None = None,
 ) -> dict[str, object]:
-    """The request body shared by the generation and revision streams.
+    """The request body shared by the generation, revision and continuation streams.
 
     `effort` is gated on the model as well as on the config, because it is rejected outright on
     Haiku 4.5 rather than ignored — see `EFFORT_CAPABLE_MODELS`.
+
+    `extra_messages` are appended after the opening user turn, which is how the continuation stream
+    replays a cut-off draft (see `generate_continuation_stream`). It goes through here rather than
+    building its own body so that `effort`, the model and the token ceiling cannot drift between the
+    original call and the one that finishes its document.
     """
     kwargs: dict[str, object] = {
         "model": cfg.model,
         "max_tokens": cfg.max_tokens,
-        "messages": [{"role": "user", "content": user_content}],
+        "messages": [{"role": "user", "content": user_content}, *(extra_messages or [])],
     }
     if system_blocks is not None:
         kwargs["system"] = system_blocks
@@ -1013,6 +1142,16 @@ def build_revision_prompt(
 # row (see `app/services/usage.py`); this module never touches the database itself.
 OnUsage = Callable[[CallUsage], Awaitable[None]]
 
+# Called once, with the finished response's `stop_reason`, after the last delta has been yielded.
+#
+# It exists because `max_tokens` was previously *only* logged. A caller consuming these iterators saw
+# a stream that ended, which is indistinguishable from a stream that finished — so a document cut
+# off two thirds of the way through was handed to the business check, offered for approval, and
+# written to the Context Store as the stage's output, with the one record of the problem sitting in
+# a WARNING line nobody reads mid-run. Synchronous because the only implementations set a variable;
+# anything that needs to await belongs in `OnUsage`, which already runs at the same moment.
+OnComplete = Callable[[str | None], None]
+
 
 async def generate_stage_stream(
     asset_id: str,
@@ -1021,6 +1160,7 @@ async def generate_stage_stream(
     on_usage: OnUsage | None = None,
     page_design: PageDesignInput | None = None,
     voice: IndustryProfile | None = None,
+    on_complete: OnComplete | None = None,
 ) -> AsyncIterator[str]:
     """Stream this stage's real generation as Markdown text deltas."""
     cfg = _config(asset_id, phase)
@@ -1068,6 +1208,8 @@ async def generate_stage_stream(
         )
         if final.stop_reason == "max_tokens":
             logger.warning("Stage=%s hit the %s-token cap and was truncated", asset_id, cfg.max_tokens)
+        if on_complete is not None:
+            on_complete(final.stop_reason)
         if on_usage is not None:
             await on_usage(
                 CallUsage.from_response(
@@ -1086,6 +1228,7 @@ async def generate_revision_stream(
     on_usage: OnUsage | None = None,
     voice: IndustryProfile | None = None,
     business_facts: str | None = None,
+    on_complete: OnComplete | None = None,
 ) -> AsyncIterator[str]:
     """Stream a revision of `previous_draft` per the operator's `note`, using the same model
     tier as the stage's original generation."""
@@ -1113,6 +1256,262 @@ async def generate_revision_stream(
         )
         if final.stop_reason == "max_tokens":
             logger.warning("Revision for stage=%s hit the %s-token cap and was truncated", asset_id, cfg.max_tokens)
+        if on_complete is not None:
+            on_complete(final.stop_reason)
+        if on_usage is not None:
+            await on_usage(
+                CallUsage.from_response(
+                    final,
+                    requested_model=cfg.model,
+                    duration_ms=int((time.monotonic() - started) * 1000),
+                )
+            )
+
+
+# ----------------------------------------------------------------------------------------------
+# Continuing a draft the output cap cut off
+#
+# `stop_reason == "max_tokens"` means the document stopped mid-sentence with everything up to the
+# cut already paid for. Re-running the stage from scratch throws that away and is no more likely to
+# fit the second time; the only way to end up with the whole deliverable is to ask for the rest.
+#
+# This is a **second billed call, started by the operator**, never automatically. A continuation
+# resends the stage's whole prompt plus the partial draft as input, so it is not free, and "finish
+# it" is a judgement about a particular document — a webinar set cut off after its second of three
+# packages may well be enough. So the stage reports the cut-off (`OnComplete` above, the SSE `done`
+# event's `truncated` flag) and the card offers a Continue button next to Regenerate.
+#
+# Two things decide whether the join is invisible, and neither can be left to the prompt alone:
+#
+#   * **The partial is replayed as a completed assistant turn, not as a prefill.** Prefilling (a
+#     trailing assistant message the model extends directly) would give a seamless join for free,
+#     and it is unavailable here: `output_config.effort` means adaptive thinking is on for every
+#     Sonnet stage in this module, and the API rejects a prefilled assistant turn when thinking is
+#     enabled. So the shape is user prompt -> assistant partial -> user "carry on", which is an
+#     ordinary multi-turn request and is compatible with thinking.
+#   * **Which means the model starts a fresh message, and may restate itself.** `join_continuation`
+#     removes the overlap deterministically rather than trusting the instruction not to produce one.
+#     A measured instruction plus an unmeasured join is the failure this codebase documents
+#     everywhere else (`design_tokens.py` for colours, `image_briefs.py` for a hosted URL): the
+#     model is told the rule, mostly follows it, and the one time it does not the operator gets a
+#     document with a paragraph written twice.
+# ----------------------------------------------------------------------------------------------
+
+#: How far back into the partial draft `join_continuation` looks for a restated run.
+#:
+#: A model that repeats itself repeats the line, the sentence, or at most the paragraph it was in
+#: the middle of — not a page. The window is a bound on the search, and a small one keeps a long
+#: document from matching some much earlier passage that happens to recur (a table header, a
+#: repeated "[CLIENT TO CONFIRM]").
+CONTINUATION_OVERLAP_WINDOW = 600
+
+#: Shortest repeat treated as the model restating itself.
+#:
+#: Below this, an identical run is ordinary English rather than evidence of a restatement: a draft
+#: ending in `"\n\n## "` and a continuation opening the same way is two documents using markdown,
+#: and trimming it would eat a real heading. 24 characters is long enough that a coincidence is
+#: implausible and short enough to catch a restated half-sentence.
+CONTINUATION_MIN_OVERLAP = 24
+
+#: How much of the draft's tail the model is shown as its resume point. One or two lines is enough
+#: to locate itself; more is input tokens spent restating what is already in the replayed turn.
+_CONTINUATION_TAIL_CHARS = 400
+
+# A first line that announces the continuation rather than being part of it ("Continuing from where
+# the document left off:"). Narrow on purpose — it has to not match a real heading or table row, so
+# the structural markdown leads are excluded by the caller and this only decides the wording.
+_CONTINUATION_PREAMBLE = re.compile(
+    r"^.{0,120}?(continu|carry\s*ing?\s+on|picking\s+up|resum|where\s+(?:i|it|we)\s+(?:left\s+off|stopped))",
+    re.IGNORECASE,
+)
+
+
+def _looks_like_preamble(line: str) -> bool:
+    """Whether `line` is an acknowledgement to drop rather than document text.
+
+    Structural markdown is excluded first: a heading, list item, table row, blockquote or fence is
+    part of the deliverable whatever words it contains, and a document whose next real line happened
+    to be `## Continuing education` must not lose it.
+    """
+    stripped = line.strip()
+    if not stripped or len(stripped) > 120:
+        return False
+    if stripped[0] in "#|>-*`+=" or re.match(r"^\d+[.)]", stripped):
+        return False
+    return bool(_CONTINUATION_PREAMBLE.match(stripped))
+
+
+def join_continuation(partial: str, continuation: str) -> str:
+    """The text to append to `partial`, with any restatement of its tail removed.
+
+    Returns only the *new* text, not the joined document, because the caller is a stream: the
+    partial is already on the operator's screen and in the message it will be saved from.
+
+    Two trims, in this order:
+
+      1. A leading acknowledgement line ("Continuing from where it stopped:"), which is the model
+         talking to the operator rather than writing the deliverable.
+      2. The longest run of at least `CONTINUATION_MIN_OVERLAP` characters that both ends `partial`
+         and begins `continuation` — the model having restated the line it was cut off inside.
+
+    Longest-first matters. Trying short overlaps first would stop at the first match and leave the
+    rest of a restated paragraph in place.
+    """
+    if not partial or not continuation:
+        return continuation
+
+    text = continuation
+    head, sep, rest = text.partition("\n")
+    if sep and _looks_like_preamble(head):
+        text = rest.lstrip("\n")
+    elif not sep and _looks_like_preamble(head):
+        # The whole continuation is the acknowledgement and nothing else. Keep it rather than
+        # returning an empty string: a caller that received no text at all would report the
+        # continuation as having produced nothing, which is a different and wronger story than
+        # "it produced one useless line".
+        return text
+
+    window = min(len(partial), len(text), CONTINUATION_OVERLAP_WINDOW)
+    for size in range(window, CONTINUATION_MIN_OVERLAP - 1, -1):
+        if text[:size] == partial[-size:]:
+            return text[size:]
+    return text
+
+
+class ContinuationJoiner:
+    """Applies `join_continuation` to a stream, one chunk at a time.
+
+    The trim needs up to `CONTINUATION_OVERLAP_WINDOW` characters of the continuation before it can
+    be decided, and deltas arrive a few characters at a time — so the head is held back until there
+    is enough of it, or until the stream ends. That delay is the cost of the join being invisible,
+    and it is a fraction of a second against a call that runs for minutes.
+    """
+
+    def __init__(self, partial: str) -> None:
+        self._partial = partial
+        self._buffer = ""
+        self._joined = False
+
+    def feed(self, chunk: str) -> str:
+        """The text to emit for `chunk` — usually `chunk` itself, empty while still buffering, and
+        the whole trimmed head on the chunk that completes the window."""
+        if self._joined:
+            return chunk
+        self._buffer += chunk
+        if len(self._buffer) < CONTINUATION_OVERLAP_WINDOW:
+            return ""
+        return self.flush()
+
+    def flush(self) -> str:
+        """Emit whatever is still buffered. Called when the stream ends before the window filled,
+        which is the ordinary case for a continuation that only had a paragraph left to write."""
+        if self._joined:
+            return ""
+        self._joined = True
+        buffered, self._buffer = self._buffer, ""
+        return join_continuation(self._partial, buffered)
+
+
+def build_continuation_messages(partial_draft: str, asset_id: str) -> list[dict[str, object]]:
+    """The two turns that follow the stage's own prompt: the draft so far, then the instruction to
+    finish it.
+
+    The instruction quotes the draft's own last characters. The replayed assistant turn already
+    contains them, but a model reading a 60,000-token message it is being told to extend benefits
+    from being shown the exact resume point immediately before the instruction — the same ordering
+    argument `build_prompt` makes for putting the master prompt last.
+    """
+    tail = partial_draft[-_CONTINUATION_TAIL_CHARS:]
+    instruction = (
+        "Your previous response was cut off by the output token limit, part-way through the "
+        "document. Nothing is wrong with what you wrote and none of it needs changing — it is "
+        "simply unfinished.\n\n"
+        "Continue it from exactly where it stopped, so that your reply joins onto it as one "
+        "seamless document.\n\n"
+        "The last characters you emitted were:\n"
+        "-----\n"
+        f"{tail}\n"
+        "-----\n\n"
+        "Rules for this reply:\n"
+        "- Begin with the very next character of the document. Your first character is joined "
+        "directly onto the text above with nothing inserted between them.\n"
+        "- Do not repeat anything you already wrote, including the line or table row you were in "
+        "the middle of.\n"
+        "- Do not re-open a heading or section you were already inside; carry on within it.\n"
+        "- Do not write a preamble, an apology, a summary of where you got to, or a phrase such as "
+        '"continuing from" — none of that is part of the deliverable.\n'
+        "- Keep the same heading levels, table shapes, formatting and voice.\n"
+        f"- Write every remaining part of the {asset_id} deliverable the instructions above asked "
+        "for, in order, and then stop."
+    )
+    return [
+        {"role": "assistant", "content": partial_draft},
+        {"role": "user", "content": instruction},
+    ]
+
+
+async def generate_continuation_stream(
+    asset_id: str,
+    answers: dict[str, str],
+    partial_draft: str,
+    phase: str = DEFAULT_PHASE,
+    on_usage: OnUsage | None = None,
+    page_design: PageDesignInput | None = None,
+    voice: IndustryProfile | None = None,
+    on_complete: OnComplete | None = None,
+) -> AsyncIterator[str]:
+    """Stream the rest of a draft that `max_tokens` cut off, as text to append to `partial_draft`.
+
+    The same prompt, model, ceiling and effort as the original call — the stage is being finished,
+    not re-interpreted — plus the partial replayed as an assistant turn. Yields only the new text;
+    the overlap trim is applied on the way out (see `ContinuationJoiner`).
+
+    `on_complete` can report `max_tokens` again, for a document long enough to need a third call.
+    That is the operator's decision to make again rather than a loop this function runs.
+    """
+    cfg = _config(asset_id, phase)
+    client = get_client()
+    system_blocks, user_content = build_stage_request(asset_id, answers, phase, page_design, voice)
+    extra = build_continuation_messages(partial_draft, asset_id)
+
+    logger.info(
+        "Continuing stage=%s phase=%s model=%s partial_chars=%s",
+        asset_id,
+        phase,
+        cfg.model,
+        len(partial_draft),
+    )
+    started = time.monotonic()
+    joiner = ContinuationJoiner(partial_draft)
+
+    async with client.messages.stream(**_stream_kwargs(cfg, system_blocks, user_content, extra)) as stream:
+        async for text in stream.text_stream:
+            emit = joiner.feed(text)
+            if emit:
+                yield emit
+        tail = joiner.flush()
+        if tail:
+            yield tail
+
+        final = await stream.get_final_message()
+        logger.info(
+            "Continuation done stage=%s model=%s stop_reason=%s input_tokens=%s output_tokens=%s "
+            "cache_read=%s",
+            asset_id,
+            final.model,
+            final.stop_reason,
+            final.usage.input_tokens,
+            final.usage.output_tokens,
+            getattr(final.usage, "cache_read_input_tokens", None),
+        )
+        if final.stop_reason == "max_tokens":
+            logger.warning(
+                "Continuation of stage=%s hit the %s-token cap as well and is still unfinished",
+                asset_id,
+                cfg.max_tokens,
+            )
+        if on_complete is not None:
+            on_complete(final.stop_reason)
         if on_usage is not None:
             await on_usage(
                 CallUsage.from_response(

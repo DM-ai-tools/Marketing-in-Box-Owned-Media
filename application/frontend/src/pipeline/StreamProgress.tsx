@@ -49,7 +49,23 @@ function tailLines(text: string): string[] {
   return lines.slice(-TICKER_LINES);
 }
 
-export function StreamProgress({ text, label }: { text: string; label: string }) {
+export function StreamProgress({
+  text,
+  label,
+  /** Set while a continuation is appending to a draft that was cut off at the output ceiling. Only
+   * changes the wording: the operator is watching the *end* of a document they have already been
+   * reading, and "Starting CRO — Page Rewrite…" over it reads as the stage having restarted and
+   * thrown their draft away. */
+  continuing,
+  /** A stream that produced nothing is being restarted — see `streamWithRetry` in `pipelineApi.ts`.
+   * Named plainly, because a silent 3-second gap before a retry looks like the app has hung. */
+  reconnecting,
+}: {
+  text: string;
+  label: string;
+  continuing?: boolean;
+  reconnecting?: { attempt: number; of: number };
+}) {
   const [steps, setSteps] = useState<string[]>([]);
   const [expanded, setExpanded] = useState(false);
   const bucket = useRef(-1);
@@ -80,10 +96,27 @@ export function StreamProgress({ text, label }: { text: string; label: string })
         ) : (
           <>
             <TypingIndicator />
-            <span className="text-[var(--fg-muted)]">Starting {label}…</span>
+            <span className="text-[var(--fg-muted)]">
+              {continuing ? `Finishing ${label} — picking up where it stopped…` : `Starting ${label}…`}
+            </span>
           </>
         )}
       </div>
+
+      {reconnecting && (
+        <div
+          className="mt-1.5 rounded-lg border px-2.5 py-1.5 text-[0.72rem]"
+          style={{ borderColor: "var(--color-signal-orange)" }}
+          aria-live="polite"
+        >
+          <span style={{ color: "var(--color-signal-orange)" }}>Reconnecting</span>
+          <span className="text-[var(--fg-muted)]">
+            {" "}
+            — the connection dropped before anything was generated. Attempt {reconnecting.attempt} of{" "}
+            {reconnecting.of}.
+          </span>
+        </div>
+      )}
 
       <div className="progress-shimmer relative mt-1.5 h-[3px] overflow-hidden rounded-full bg-[var(--bg-sunken)]">
         <span

@@ -43,6 +43,9 @@ function when(iso: string | null): string {
 
 const KIND_LABEL: Record<string, string> = {
   generation: "Generated",
+  // Its own kind, so the second call a cut-off stage needs to finish its document reads as that
+  // rather than as the stage inexplicably having been generated twice.
+  continuation: "Continued",
   revision: "Refined",
   competitor: "Competitor search",
   briefing: "Briefing",

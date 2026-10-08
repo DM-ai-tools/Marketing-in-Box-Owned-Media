@@ -5,7 +5,8 @@ import { fileURLToPath } from "node:url";
 import { renderToStaticMarkup } from "react-dom/server";
 import { PlanMindMap } from "../src/pipeline/PlanMindMap";
 import { buildPlanMindMapHtml } from "../src/lib/planMindMapHtml";
-import { layoutPlan, NODE_W, ROW_H } from "../src/lib/planLayout";
+import { DETAIL_W, detailIdFor, estimateNodeHeight, layoutPlan, NODE_H, NODE_W, ROW_GAP, ROW_H } from "../src/lib/planLayout";
+import { plainExcerpt } from "../src/lib/planFamilies";
 import { buildPlanTree, flattenPlan, type PlanNode } from "../src/lib/planTree";
 import { DEMO_PLAN } from "../src/pipeline/planFixture";
 
@@ -216,6 +217,58 @@ ok("totals: assets counted", tree.totals.assets > 5, String(tree.totals.assets))
     return !!phase && kidsY.length > 1 && phase.y > Math.min(...kidsY) && phase.y < Math.max(...kidsY);
   })());
   ok("layout: collapsed nodes are flagged", layout.nodes.some((n) => n.collapsed));
+
+  /* Cards are as tall as their text. A fixed 40px box with a truncated title cut the plan's
+   * longer node names in half; a long title must now be given more height than a short one, and a
+   * measured height must win over the estimate. */
+  const long = layout.nodes.reduce((a, b) => (b.node.title.length > a.node.title.length ? b : a));
+  ok("layout: a long title gets a taller card", long.h > NODE_H, `${long.node.title.length} chars -> ${long.h}px`);
+  ok("layout: estimate never below the minimum", layout.nodes.every((n) => n.h >= NODE_H && n.h === estimateNodeHeight(n.node)));
+  const grown = layoutPlan(tree.root, open, new Map([[long.node.id, 260]]));
+  ok("layout: a measured height is used", grown.nodes.find((n) => n.node.id === long.node.id)?.h === 260);
+
+  /* With variable heights, "no overlap" means boxes, not row numbers. */
+  const noOverlap = (l: ReturnType<typeof layoutPlan>) => {
+    const cols = new Map<number, { y: number; h: number }[]>();
+    for (const n of l.nodes) cols.set(n.x, [...(cols.get(n.x) ?? []), { y: n.y, h: n.h }]);
+    return [...cols.values()].every((boxes) =>
+      boxes
+        .sort((a, b) => a.y - b.y)
+        .every((b, i) => i === 0 || b.y >= boxes[i - 1].y + boxes[i - 1].h + ROW_GAP - 0.01),
+    );
+  };
+  ok("layout: no two cards overlap within a column", noOverlap(layout));
+  ok("layout: still no overlap after a card grows", noOverlap(grown));
+  // A parent taller than its only child must push its subtree down rather than poke above it.
+  const tall = new Map(layout.nodes.filter((n) => n.hasChildren).map((n) => [n.node.id, 400]));
+  ok("layout: tall parents never overlap the sibling above", noOverlap(layoutPlan(tree.root, open, tall)));
+  /* A selected node's text opens as one more card at the end of its branch, not in a side panel.
+   * It must be a real child in the layout: one column right, joined by an edge, and pushing the
+   * column down rather than covering it, however tall the text is. */
+  {
+    const leaf = layout.nodes.find((n) => !n.hasChildren && n.node.body.trim().length > 40)!;
+    const withText = layoutPlan(tree.root, open, new Map([[detailIdFor(leaf.node.id), 900]]), leaf.node.id);
+    const card = withText.nodes.find((n) => n.detailOf === leaf.node.id);
+    const owner = withText.nodes.find((n) => n.node.id === leaf.node.id)!;
+    ok("detail: the selected node's text is one more card", !!card && withText.nodes.length === layout.nodes.length + 1);
+    ok("detail: in the next column", card?.x === owner.x + NODE_W + 48);
+    ok("detail: wider than a node", card?.w === DETAIL_W && DETAIL_W > NODE_W);
+    ok("detail: carries the node's own text", card?.node.body === leaf.node.body);
+    ok("detail: joined to its node by an edge", withText.edges.some((e) => e.fromId === leaf.node.id && e.toId === card?.node.id));
+    ok("detail: a 900px card overlaps nothing", noOverlap(withText));
+    ok("detail: and nothing to its right shares its band", withText.nodes.every((n) =>
+      n === card || n.x <= card!.x || n.y + n.h <= card!.y || n.y >= card!.y + card!.h));
+    const parent = layout.nodes.find((n) => n.hasChildren && !n.collapsed && n.node.depth > 0)!;
+    const afterKids = layoutPlan(tree.root, open, undefined, parent.node.id);
+    const kidYs = afterKids.nodes.filter((n) => parent.node.children.some((c) => c.id === n.node.id)).map((n) => n.y);
+    ok("detail: comes after a parent's real children", (afterKids.nodes.find((n) => n.detailOf === parent.node.id)?.y ?? -1) > Math.max(...kidYs));
+    ok("detail: none without a selection", layout.nodes.every((n) => !n.detailOf));
+  }
+
+  ok("layout: edges end at card centres", grown.edges.every((e) => {
+    const to = grown.nodes.find((n) => n.node.id === e.toId)!;
+    return e.path.endsWith(` ${to.x} ${to.y + to.h / 2}`);
+  }));
 }
 
 /* ---------- the diagram renders ---------- */
@@ -232,6 +285,17 @@ ok("totals: assets counted", tree.totals.assets > 5, String(tree.totals.assets))
   ok("map: detail panel prompts a click", html.includes("Click any node"), html.slice(-500));
   ok("map: deeper nodes closed on mount", !html.includes("TARGET KEYWORD CLUSTER"));
   ok("map: no flow animation until something is selected", !html.includes("plan-flow"));
+  ok("map: titles wrap, never truncate", !/class="[^"]*\btruncate\b[^"]*"[^>]*>[^<]*Phase 1/.test(html));
+  ok("map: legend names the families present", html.includes("Conversion") && html.includes("Plan &amp; phases"));
+  ok("map: touch zoom controls offered", html.includes('aria-label="Zoom in"') && html.includes('aria-label="Zoom out"'));
+
+  // The inline detail a selected card unfolds: plain text, no table or markdown noise.
+  const withBody = all.find((n) => n.body.includes("|") && n.body.replace(/^\s*\|.*$/gm, "").trim().length > 40);
+  if (withBody) {
+    const excerpt = plainExcerpt(withBody);
+    ok("excerpt: drops table rows and markdown", !excerpt.includes("|") && !excerpt.includes("**"), excerpt);
+    ok("excerpt: bounded", excerpt.length <= 221, String(excerpt.length));
+  }
 
   const unusable = renderToStaticMarkup(<PlanMindMap text="just prose, no structure at all here" label="X" />);
   ok("map: says so when it cannot draw a plan", unusable.includes("No diagram for this plan"), unusable.slice(0, 200));

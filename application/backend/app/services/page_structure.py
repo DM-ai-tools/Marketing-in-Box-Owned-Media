@@ -996,6 +996,41 @@ _STRUCTURE_INTRO = (
 )
 
 
+#: The same section, re-headed for a design-language stage (`generation.DESIGN_LANGUAGE_STAGES`).
+#: There the bands are the site's component vocabulary rather than a sequence to clone, and a sheet
+#: still saying "reproduce this sequence exactly" would argue with the directive bound to it.
+COMPONENT_VOCABULARY_HEADING = "## Page structure — the reference's components (design language)"
+
+_COMPONENT_INTRO = (
+    "Read off the live DOM at <{url}>. These are the section types this site is built from, in the "
+    "order the reference page happens to use them, and how each one is laid out. For this page they "
+    "are a **component vocabulary, not a sequence to copy**: order the body sections by the new "
+    "content, build each from the closest component listed here, repeat a component when the content "
+    "has more to say, and leave one out when it has nothing for it.\n\n"
+    "What does not change: the header and footer, the logo and its placement, the nav labels, the "
+    "client logos, the contact details, and the icons — those are reproduced as listed."
+)
+
+_INTRO_PATTERN = re.compile(
+    re.escape(_STRUCTURE_INTRO).replace(re.escape("{url}"), "(?P<url>[^>]*)")
+)
+
+
+def as_component_vocabulary(sheet: str) -> str:
+    """Re-frame a DESIGN.md's `## Page structure` section for a design-language stage.
+
+    The stored sheet is shared by every replica stage on the run (it is captured once), so the
+    re-framing happens on the way into the prompt rather than at capture. Only the heading and its
+    intro paragraph change; every measured row stays exactly as captured. A sheet without the
+    section is returned unchanged.
+    """
+    if STRUCTURE_HEADING not in sheet:
+        return sheet
+    sheet = _INTRO_PATTERN.sub(lambda m: _COMPONENT_INTRO.format(url=m.group("url")), sheet, count=1)
+    sheet = re.sub(r"^### The (\d+) bands, in order$", r"### The \1 bands on the reference page", sheet, flags=re.M)
+    return sheet.replace(STRUCTURE_HEADING, COMPONENT_VOCABULARY_HEADING, 1)
+
+
 def _escape_cell(value: str) -> str:
     """A table cell that cannot break the table. A pipe in a heading ("Fast | Cheap | Good") ends
     the cell early and shifts every column after it."""

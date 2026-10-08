@@ -192,20 +192,17 @@ async def test_a_rate_limited_submit_waits_once_then_succeeds(monkeypatch):
 
     async def post(path, json):
         posts["n"] += 1
-        return _limited(_LIVE_429) if posts["n"] == 1 else _Response({"success": True, "id": "job"})
-
-    async def get(path):
-        return _Response({"status": "completed", "data": {"instagramUrl": "https://instagram.com/acme"}})
+        return _limited(_LIVE_429) if posts["n"] == 1 else _Response({"success": True, "data": {"links": ["https://instagram.com/acme"]}})
 
     async def sleep(seconds):
         slept.append(seconds)
 
-    monkeypatch.setattr(firecrawl_client, "_client", lambda: types.SimpleNamespace(post=post, get=get))
+    monkeypatch.setattr(firecrawl_client, "_client", lambda: types.SimpleNamespace(post=post, get=None))
     monkeypatch.setattr(firecrawl_client.asyncio, "sleep", sleep)
 
-    links = await firecrawl_client.extract_social_links("https://acme.com")
+    links = await firecrawl_client.scrape_links("https://acme.com")
 
-    assert links.instagram_url == "https://instagram.com/acme"
+    assert links == ("https://instagram.com/acme",)
     assert posts["n"] == 2 and slept == [37]
 
 
@@ -224,5 +221,42 @@ async def test_a_second_rate_limit_is_reported_not_retried_again(monkeypatch):
     monkeypatch.setattr(firecrawl_client.asyncio, "sleep", sleep)
 
     with pytest.raises(firecrawl_client.FirecrawlError, match="429"):
-        await firecrawl_client.extract_social_links("https://acme.com")
+        await firecrawl_client.scrape_links("https://acme.com")
     assert posts["n"] == 2
+
+
+@pytest.mark.asyncio
+async def test_scrape_links_asks_for_every_href_on_the_whole_page(monkeypatch):
+    """A links scrape, not an `/extract`: icon-only profile links never reach a page's markdown, so a
+    model reading the markdown found none of entourage.com.au's three. The `links` format lists every
+    href, text or not; picking out the profiles is `social_audit`'s job, so the wrapper returns all."""
+    sent = {}
+
+    async def post(path, json):
+        sent.update(path=path, body=json)
+        return _Response(
+            {
+                "success": True,
+                "data": {
+                    "links": [
+                        "https://entourage.com.au/contact",
+                        "https://www.facebook.com/entouragefinance",
+                        "https://www.instagram.com/entourage_au/",
+                        "",
+                        None,
+                    ]
+                },
+            }
+        )
+
+    monkeypatch.setattr(firecrawl_client, "_client", lambda: types.SimpleNamespace(post=post, get=None))
+
+    links = await firecrawl_client.scrape_links("https://entourage.com.au")
+
+    assert sent["path"] == "/scrape"
+    assert sent["body"] == {"url": "https://entourage.com.au", "formats": ["links"], "onlyMainContent": False}
+    assert links == (
+        "https://entourage.com.au/contact",
+        "https://www.facebook.com/entouragefinance",
+        "https://www.instagram.com/entourage_au/",
+    )

@@ -6,6 +6,7 @@ import { ChatHistorySidebar } from "./pipeline/ChatHistorySidebar";
 import { FaultDialog } from "./pipeline/FaultDialog";
 import { GenerationStream } from "./pipeline/GenerationStream";
 import { PipelineDiagram } from "./pipeline/PipelineDiagram";
+import { PlanRerunDialog } from "./pipeline/PlanRerunDialog";
 import { ViewBar } from "./pipeline/ViewBar";
 import { TopNav } from "./pipeline/TopNav";
 import { UsagePanel } from "./pipeline/UsagePanel";
@@ -114,6 +115,8 @@ function App() {
       {/* Root-mounted for a different reason: the sidebar that raises it is a drawer below `xl`,
           and a transformed ancestor would become the containing block for the fixed overlay. */}
       <ChatDeleteDialog />
+      {/* Raised from the pipeline store when a sub-service lands after the plan was approved. */}
+      <PlanRerunDialog />
 
       {/* Docked from `xl` up, where a third column still leaves the transcript a workable width;
           below that the same sidebar is reachable from the nav as a drawer. */}
