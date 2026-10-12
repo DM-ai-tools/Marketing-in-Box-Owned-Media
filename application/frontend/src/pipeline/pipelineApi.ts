@@ -239,8 +239,62 @@ export interface StreamStageOptions {
   /** A stream that produced nothing is being restarted. `attempt` counts from 2 (the first retry),
    * so it can be shown as-is. Purely for the UI — nothing branches on it. */
   onRetry?: (attempt: number, of: number) => void;
+  /** CRO's assembly of the client's real page: the template it found, the assembly starting, its
+   * report, or its failure. Only a replica stage with a page to rebuild emits these — never the
+   * pillar page, never a copy-only CRO. The assembled HTML is not on the wire; it is read from
+   * `GET /runs/{run_id}/replica/output` (`fetchReplicaOutput`). */
+  onReplica?: (event: ReplicaStreamEvent) => void;
+  /** Image generation that failed for this stage (a brief rejected, OpenAI unreachable). The stage
+   * still runs without that image; these say so on the card. */
+  onImageNotes?: (notes: string[]) => void;
+  /** A page Refine's report: the page is changed by exact edits, never retyped, and this says how
+   * many landed and why any did not. Only a built pillar page's Refine sends it. */
+  onRevisionEdits?: (report: RevisionEditReport) => void;
   signal?: AbortSignal;
 }
+
+/** The `revision_edits` event. `rejected` rows are [start of the text to change, why it was not]. */
+export interface RevisionEditReport {
+  applied: number;
+  rejected: [string, string][];
+  /** [finding, why] — requests the model left alone on purpose (a layout change under the lock).
+   * Absent from a server that predates it. */
+  skipped?: [string, string][];
+  unreadable: boolean;
+  /** Set on every "Fix with Refine": copy and links could change, the page's layout could not. */
+  layout_locked?: boolean;
+}
+
+/** What `replica_template` says about the client page the assembly will rebuild. */
+export interface ReplicaTemplateInfo {
+  available: boolean;
+  reason?: string | null;
+  source_url?: string | null;
+  /** Which reader answered: `direct` (free) or `context.dev` (the rendered fallback, 1 credit). */
+  source?: string;
+  open_slots?: number;
+  locked_slots?: number;
+  notes?: string[];
+}
+
+/** The assembly report — the `replica` event, and the same fields `GET .../replica/output` returns
+ * alongside the HTML. Rows stay as the server's tuples: they are shown, not branched on. */
+export interface ReplicaReport {
+  source_url: string;
+  filled: number;
+  kept: number;
+  intact: boolean;
+  rejected: string[][];
+  warnings: string[][];
+  checks: [string, boolean, string][];
+  structural: string[][];
+}
+
+export type ReplicaStreamEvent =
+  | ({ type: "replica_template" } & ReplicaTemplateInfo)
+  | { type: "replica_start" }
+  | ({ type: "replica"; asset_id?: string } & ReplicaReport)
+  | { type: "replica_error"; message: string; code?: string };
 
 type SseEvent =
   | { type: "delta"; text: string }
@@ -248,7 +302,10 @@ type SseEvent =
   | ({ type: "error"; message: string } & Partial<ApiFault>)
   | { type: "prepass_start"; asset_id: string }
   | ({ type: "prepass" } & PrepassEvent)
-  | { type: "social_prepass"; skipped?: boolean; content?: string; error?: string };
+  | { type: "social_prepass"; skipped?: boolean; content?: string; error?: string }
+  | ReplicaStreamEvent
+  | { type: "image_notes"; notes: string[] }
+  | ({ type: "revision_edits" } & RevisionEditReport);
 
 /** The field `social_prepass` fills, so a continuation can hand back what the first attempt paid
  * for. Named here rather than inferred, because the event — unlike `prepass` — does not say which
@@ -327,6 +384,23 @@ async function consumeSseStream(
             content: event.content,
           });
         }
+      }
+      else if (
+        event.type === "replica_template" ||
+        event.type === "replica_start" ||
+        event.type === "replica" ||
+        event.type === "replica_error"
+      ) {
+        // A `replica_error` is the extra artifact failing, never the stage: the document has
+        // already streamed in full. So it is reported, not thrown.
+        opts.onReplica?.(event);
+      }
+      else if (event.type === "image_notes") {
+        if (event.notes?.length) opts.onImageNotes?.(event.notes);
+      }
+      else if (event.type === "revision_edits") {
+        const { type: _t, ...report } = event;
+        opts.onRevisionEdits?.(report);
       }
       else if (event.type === "error") {
         const fault = faultFromUnknown(event);
@@ -451,8 +525,9 @@ export async function streamRefineStage(
    * checked against, so it can use the real price or offer instead of guessing one. */
   businessFix?: { clientProfile: Record<string, string> },
   /** The same two callbacks a generation gets. A revision is asked for the whole document, so it
-   * can be cut off by the ceiling exactly as a generation can. */
-  opts: Pick<StreamStageOptions, "onDone" | "onRetry"> = {},
+   * can be cut off by the ceiling exactly as a generation can. `sourceCopy` is the copy the page was
+   * built from; a built page is refined by edits written against it (see `page_revision.py`). */
+  opts: Pick<StreamStageOptions, "onDone" | "onRetry" | "onRevisionEdits"> & { sourceCopy?: string } = {},
 ): Promise<void> {
   await streamWithRetry(
     () =>
@@ -467,6 +542,7 @@ export async function streamRefineStage(
           run_id: attribution.runId ?? null,
           business_fix: Boolean(businessFix),
           client_profile: businessFix?.clientProfile ?? {},
+          source_copy: opts.sourceCopy ?? null,
         }),
         signal,
       }),
@@ -885,6 +961,13 @@ export async function saveHeadlineSelection(
 // --------------------------------------------------------------------------------------
 // Slide decks - the webinar stage's Step 5 brief as a .pptx
 // --------------------------------------------------------------------------------------
+
+/** The page CRO assembled from the client's real markup, as stored. Free — the generation already
+ * happened. 404 (thrown) when nothing has been assembled for the run. */
+export async function fetchReplicaOutput(runId: string): Promise<ReplicaReport & { html: string }> {
+  const res = await fetch(`/api/pipeline/runs/${runId}/replica/output`);
+  return unwrap(res, "Assembled page");
+}
 
 export interface SlideDeckSummary {
   index: number;

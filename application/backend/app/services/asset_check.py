@@ -592,7 +592,7 @@ async def check_asset(
 
     if page_check.CHECK in checks:
         page_result = results[page_check.CHECK]
-        issues, page_used = page_check.check_page(raw, facts.links, facts.design_md)
+        issues, page_used = page_check.check_page(raw, facts.links, facts.design_md, generated_images=facts.generated_image_urls)
         used = [*used, *page_used]
         if page_check.extract_page_html(raw):
             page_result.findings.extend(

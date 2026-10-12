@@ -87,6 +87,11 @@ interface UiState {
    * whichever pane happened to be on screen. Not persisted: the staleness itself is re-derivable
    * from the transcript, and a notice that outlived the session would be about a moment that is gone. */
   pendingPlanRerun: { subService: string } | null;
+  /** The generation card the delete confirmation is asking about. Root-mounted for the reason
+   * `pendingChatDelete` is: the card animates on `transform`. See `GenerationDeleteDialog`. */
+  pendingGenerationDelete: { messageId: string; label: string; approved: boolean } | null;
+  askDeleteGeneration: (target: { messageId: string; label: string; approved: boolean }) => void;
+  cancelDeleteGeneration: () => void;
   /** The reader's view: visuals by default, the exported text one click away. */
   readerView: ReaderView;
   setReaderView: (view: ReaderView) => void;
@@ -130,6 +135,7 @@ export const useUiStore = create<UiState>((set) => ({
   demoMode: false,
   pendingChatDelete: null,
   pendingPlanRerun: null,
+  pendingGenerationDelete: null,
   openSidebar: () => set({ sidebarOpen: true }),
   closeSidebar: () => set({ sidebarOpen: false }),
   toggleSidebar: () => set((s) => ({ sidebarOpen: !s.sidebarOpen })),
@@ -179,4 +185,6 @@ export const useUiStore = create<UiState>((set) => ({
   cancelDeleteChat: () => set({ pendingChatDelete: null }),
   askPlanRerun: (pendingPlanRerun) => set({ pendingPlanRerun }),
   dismissPlanRerun: () => set({ pendingPlanRerun: null }),
+  askDeleteGeneration: (pendingGenerationDelete) => set({ pendingGenerationDelete }),
+  cancelDeleteGeneration: () => set({ pendingGenerationDelete: null }),
 }));

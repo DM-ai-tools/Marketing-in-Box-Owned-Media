@@ -124,7 +124,7 @@ async def test_competitor_accounts_are_resolved_and_fetched_automatically(monkey
             SocialFetchResult(platform="instagram", handle="acme", posts=(), more_available=False, credits_used=1),
         ), ()
 
-    async def fake_resolve(domain):
+    async def fake_resolve(domain, **_kw):
         assert domain in ("entourage.com.au", "axtonfinance.com.au")
         return (social_audit.SocialAccount(platform="instagram", handle=f"https://instagram.com/{domain}"),)
 
@@ -176,7 +176,7 @@ async def test_competitors_are_fetched_from_the_listing_as_the_stage_actually_re
     )
     resolved_domains = []
 
-    async def fake_resolve(domain):
+    async def fake_resolve(domain, **_kw):
         resolved_domains.append(domain)
         return (social_audit.SocialAccount(platform="instagram", handle=f"https://instagram.com/{domain}"),)
 
@@ -226,7 +226,7 @@ async def test_competitor_count_is_capped_regardless_of_what_was_requested(monke
 
     resolve_calls = []
 
-    async def fake_resolve(domain):
+    async def fake_resolve(domain, **_kw):
         resolve_calls.append(domain)
         return ()  # no accounts found — keeps this test to the counting question only
 

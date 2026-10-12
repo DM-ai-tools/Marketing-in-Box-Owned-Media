@@ -170,9 +170,39 @@ re-capture (17 credits) per existing run, on that run's next stage. `REPLICA_CAP
 the same job for `page_replica_template`, where it matters more: stored slot ids are identifiers,
 so a template captured under older slot rules must be re-read rather than reinterpreted.
 
-Note that **"Refine / Request Changes" never consults the sheet at all** — `generate_revision_stream`
+Note that **"Refine / Request Changes" does not rebuild from the sheet** — `generate_revision_stream`
 builds from the previous draft plus the operator's note (`build_revision_prompt`) and is handed no
 `page_design`. Only a full re-run picks up a re-captured sheet.
+
+**Every business fix, and every Refine of a draft holding a page, is made of edits, never retyped,
+and a business fix may not change the layout** (`app/services/page_revision.py`). This has broken
+twice. First, asked for "the FULL revised document", the model re-emitted the whole page from a copy
+and "Fix with Refine" came back reordered and reworded. Then, with edits, the findings themselves
+asked for layout changes (a width, a sub-menu rule, a colour, an image source); each edit landed
+exactly where it said, and the CSS moved the logo and icons and swapped pictures between sections.
+An edit can land in the right place and still do the wrong thing, so the rule is on the outcome:
+- **Edits only.** The model returns `find`/`replace` JSON; `apply_edits` places each exactly once,
+  whitespace-tolerant. A missing or ambiguous `find` is reported and skipped, never guessed. One edit
+  is capped at `MAX_EDIT_SHARE` of the draft, and all edits together at `MAX_TOTAL_SHARE`. An
+  unreadable reply returns the draft unchanged with a note, and never falls back to a rewrite.
+- **The layout lock (every "Fix with Refine", any asset).** `layout_fingerprint` is the skeleton:
+  every non-text-level element of every HTML page in order, with its classes, ids, styles and image
+  sources, the `<style>`/`<script>` text, and for prose the Markdown heading outline. An edit that
+  changes it is rejected, whatever it says. Text-level elements (`_TEXT_LEVEL`: p, li, a, span, …)
+  are looked through, so copy, hrefs, alt text and removing a claim's paragraph stay possible; a
+  classed empty text-level element (an icon) is skeleton. The model lists what it left alone in
+  `skipped`.
+- **Do not widen `_TEXT_LEVEL` or `_FREE_ATTRS` to let a finding through.** A finding that needs a
+  layout change is the operator's call: an ordinary Refine that asks for it (edit-only, not locked),
+  or a re-run.
+- An ordinary Refine of prose is still a full revision (`build_revision_prompt`).
+- The reviser gets the page's own copy (the card's `improved_page_content` as `source_copy`, else the
+  run's CRO rewrite) for design-language stages, and DESIGN.md for any draft holding a page.
+- The stream sends `revision_edits` (applied, rejected, skipped, layout_locked), shown on the new card
+  by `RevisionNotes`, then the edited document as ordinary deltas.
+
+`tests/test_page_revision.py` pins it, including a CSS, class, image, icon, logo, section-move and
+heading-level edit each being refused under the lock.
 
 ### What is merged
 
@@ -324,7 +354,13 @@ The fix is the same shape as that one: measure first, then hand the model the re
   local dev, which is the *container's own loopback* on Railway — unreachable from outside, so
   every generated image would be a dead link in the delivered HTML. On Railway:
   `BACKEND_PUBLIC_URL=https://${{RAILWAY_PUBLIC_DOMAIN}}` (`RAILWAY_PUBLIC_DOMAIN` is injected by
-  Railway automatically).
+  Railway automatically). Two backstops, neither of which invents a host:
+  - **Read-time rewrite.** `media_storage.current_media_url` turns a stored
+    `http://127.0.0.1:8001/media/{id}` or `localhost:8001` URL into the current public base. It runs
+    in `_generated_images_from_stored` (the one read path to the prompt and the UI) and in
+    `business_facts`. A real public host is left as stored.
+  - **Startup error.** `APP_ENV=production` with no `BACKEND_PUBLIC_URL` logs an error from
+    `main.lifespan` (`warn_if_public_base_url_missing`).
 - **`image_briefs.generate_all(briefs, session)`** calls `openai_image_client.generate_image` for
   all three briefs concurrently (mirroring the two Context.dev screenshots), and lets each brief
   fail independently — a content-policy rejection on one costs that image alone, never the other
@@ -359,9 +395,17 @@ The fix is the same shape as that one: measure first, then hand the model the re
   permanent cross-check, and `openai_image_client.generate_image` rejects an invalid size, quality
   or output_format locally (`OpenAIImageInvalidRequest`, mapped to a 422) before spending a
   request on one.
-- **A failed generation degrades, it does not fail the stage.** `_ensure_generated_images` writes
-  nothing when every brief failed, so the run tries again on its next qualifying stage rather than
-  caching an empty result that looks identical to "already tried."
+- **A failed generation degrades, it does not fail the stage, and the operator is told.**
+  `_ensure_generated_images` writes nothing when every brief failed, so the run tries again on its
+  next qualifying stage rather than caching an empty result that looks identical to "already tried."
+  Both it and `_ensure_section_images` append what failed to `resolve_page_design`'s `image_notes`,
+  and the stream sends them as an `image_notes` event, shown on the card (`ImageNotes`).
+- **The page check flags an image the run did not supply.** `page_check` accepts an `<img>` whose
+  src is one of the run's generated `/media/{id}` URLs (matched on the id, any host) or an image the
+  reference page serves (`LinkManifest.images`, read free off the same HTML). Anything else is
+  `img-unknown` (warn); a loopback src is `img-localhost` (error). A manifest stored before it
+  listed images falls back to accepting the reference page's own host. It is a page-readiness rule,
+  not a new business check, so the four check lists are unchanged.
 
 ---
 
@@ -466,6 +510,13 @@ served HTML is a JS shell. Cached once per run under the `page_replica_template`
 - **Do not re-derive stored slot ids.** `_template_from_stored` rehydrates them. Re-walking would
   give the same ids today and different ones the moment the slot rules change, writing one line's
   copy into another on every previously captured run.
+- **One request policy for every free read.** Pages go through `scraper._fetch_html` (design
+  tokens, page replica, service scan, social links). A stylesheet or logo goes through
+  `scraper.fetch_asset`: the same agents and bot-wall retry, challenge headers, timeout, redirect
+  cap and a public-host check on every hop. Do not open another httpx client for a site read, and do
+  not send these through `scrape_page`, which returns copy. When a paid fallback answers, the
+  transcript says so: the replica panel shows "read via Context.dev", and a competitor's social
+  section says which reader found its profiles (`resolve_competitor_handles(readers=…)`).
 - **`scraper.py` still drops `<nav>` and `<svg>` on purpose.** That is correct: it feeds *copy* to a
   CRO audit, where a menu is link soup. The nav and the icons now reach the model properly, through
   the structure walk and the template. Do not "fix" the scraper.
@@ -481,9 +532,12 @@ served HTML is a JS shell. Cached once per run under the `page_replica_template`
 - `POST /pipeline/runs/{run_id}/replica/assemble` — re-assemble after editing the draft. One billed
   call.
 - `GET /pipeline/runs/{run_id}/replica/output` — the assembled page. Free.
-- A replica stage's SSE stream emits `replica_template`, then `replica_start`, then `replica` (the
-  report; the HTML is stored, not put on the wire) or `replica_error`. An assembly failure never
-  reports the stage as failed — the stage's own document is already complete.
+- A replica stage's SSE stream emits `replica_template` (with `source`: `direct` or `context.dev`),
+  then `replica_start`, then `replica` (the report; the HTML is stored, not put on the wire) or
+  `replica_error`. An assembly failure never reports the stage as failed — the stage's own document
+  is already complete. The client folds them into `message.replica` (`nextReplicaState`), and
+  `ReplicaPanel` shows the report and, only in the `done` state, a download that reads
+  `GET .../replica/output`.
 
 ---
 
@@ -504,7 +558,7 @@ sections follow the content.** No intake question switches this — it is how th
 | Standards | `assets/Prompts/PAGE_BUILD_STANDARDS.md` | The design skills' build-quality bar (composition, responsive, a11y, performance, SEO, links) with every aesthetic opinion stripped. In the per-stage tail, **not** `REFERENCE_LIBRARY`: adding it there would cost the pillar page its share of the 12k-token library cache. |
 | Prompt rules | both `Master_Prompt_Universal_Page_Design_v1*.md` | Rule 1 is design-language fidelity; Rule 3 uses real image URLs first; Rule 4 takes the CTA href from Links; Rule 5 reads the Responsive section; "Real links only" and "Deploy-ready" rules added. Same edit in both phases — `tests/test_design_language.py` checks both. |
 | Section images | `image_briefs.build_section_briefs`, `pipeline._ensure_section_images` | Up to `MAX_SECTION_IMAGES` (2) more gpt-image-2 images for the improved content's own `##` sections, generated on the pillar page, stored under `section_images` apart from `generated_images`, regenerated only when those sections leave the copy. |
-| Deploy check | `app/services/page_check.py`, `page_readiness` in `asset_check` | Rules only, never judged, scored 100 − 15/error − 5/warn − 1/info. Missing header/social/contact link = must fix; dead `#` (a scripted one is a warning), unlisted client-site paths, someone else's social profile, image placeholders and stock URLs, missing title/viewport/h1/lang/main, fixed widths, off-palette hexes, and a descendant `nav ul{display:…}` rule that outranks the sub-menu's `display:none` (every dropdown stuck open — must fix; a focusable `<li tabindex>` under `:focus-within` is a warning). `fix_context` carries the Links table so "Fix with Refine" copies the real href. |
+| Deploy check | `app/services/page_check.py`, `page_readiness` in `asset_check` | Rules only, never judged, scored 100 − 15/error − 5/warn − 1/info. Missing header/social/contact link = must fix; so is every visible `[CLIENT TO CONFIRM: …]` / `[… PLACEHOLDER]` marker, each listed (up to 25) since each needs its own answer — answered through Refine, or removed by "Fix with Refine", never asserted; dead `#` (a scripted one is a warning), unlisted client-site paths, someone else's social profile, image placeholders and stock URLs, missing title/viewport/h1/lang/main, fixed widths, off-palette hexes, and a descendant `nav ul{display:…}` rule that outranks the sub-menu's `display:none` (every dropdown stuck open — must fix; a focusable `<li tabindex>` under `:focus-within` is a warning). `fix_context` carries the Links table so "Fix with Refine" copies the real href. |
 
 ### Rules
 
@@ -637,8 +691,13 @@ palette.
 - **The UI never decides for itself whether a brief exists.** `SlideDeckMenuItem` probes the route
   and renders nothing until decks come back. Grepping the text in the browser would put the
   detection rule in two places, and the one that matters — can it be *parsed* into slides — is the
-  server's. The probe costs one request per menu-open, because `OverflowMenu` only renders its
-  children while open.
+  server's. Probe answers are cached per document (`probeSlideDecks`), so reopening a menu does not
+  ask again.
+- **One deck at a time.** Several decks are offered as one row per deck (`?index=N`) plus
+  **Download all** (no index, the server's zip); one deck is one `.pptx` row (`deckRows`).
+- **The card and the reader offer the same files.** `AssetFileDownloads` renders the plan map and
+  the deck controls in both places. Each renders nothing when its file cannot be built. It is given
+  the saved text, never the reader's display text.
 - **`python-pptx` pulls `lxml`.** That is for OOXML only. The HTML rule still stands: `html_dom.py`
   stays on stdlib `html.parser`, and nothing may start parsing HTML with lxml because it is now
   installed.
@@ -807,6 +866,33 @@ marks that competitor's post-level metrics `N/D` per its own brief rule, and the
 
 Emits a `social_prepass` SSE event (`skipped`, and either `content`/`accounts` or `error`) so the
 transcript shows what was fetched, the same shape the `prepass` event already has for competitors.
+
+### Competitor content intelligence — Step 7, measured then judged
+
+The audit's Steps 1-6 describe what each account posts. They do not say what earned competitors
+interaction, or what the client should change because of it. `app/services/social_intel.py` counts
+that over the posts the prepass already paid for, at no extra credit cost. The prepass appends the
+result to `raw_post_data_source` under `INTEL_HEADING`, after the existing per-account tables, which
+are unchanged. Step 7 of `Social-Content-Strategy-Audit-Architect-Prompt.md` reads it. That step
+comes after Step 6 and leaves Steps 1-6 alone.
+
+- **The tables are A-G:**
+  - A: cadence and interaction per account and platform;
+  - B: platform × format, competitors pooled against the client;
+  - C: caption signals (offer, lead CTA, proof, people, timely, education, question) with lift;
+  - D: each competitor's top posts;
+  - E: offer and CTA sentences, verbatim;
+  - F: cross-posting;
+  - G: the client's lowest-interaction posts, which Step 7.6 rewrites with a justification.
+- **Interaction, never leads.** Public post data has no lead count. The block and the prompt both
+  say so, and comments plus CTA posts are named as proxies only.
+- **Signals are keyword-tagged.** The prompt has the model confirm each against the quoted captions.
+  "may" and "today" are deliberately not timely, because both read as the verb or the CTA far more
+  often.
+- **N/D, not 0.** A lift needs `_MIN_GROUP` measured posts on each side.
+- **Phase 1 only.** Phase 2 has no social audit stage.
+- **The heading is shared.** The prompt names `INTEL_HEADING`, and `tests/test_social_intel.py`
+  checks that the two agree, along with the step order.
 
 ### Routes
 
@@ -1434,6 +1520,22 @@ it would stop. `selectCanStop` / `selectStoppableStage` decide both.
 - **The `stage-stopped` card counts as the operator's turn** in `deriveResumeActivity` and
   `selectNeedsResume`. Without that the resume banner appears underneath it offering to continue the
   stage they just stopped.
+
+### Deleting one card
+
+"Delete this card" is the last row of a generation card's `⋯` menu, behind a root-mounted modal
+(`GenerationDeleteDialog`, the `ChatDeleteDialog` pattern). Rules (`selectDeleteGeneration`,
+`deleteGeneration`; `smoke/deleteCard.tsx`):
+- **A draft goes; the stage's only approved card does not.** Approval is read off the transcript
+  (`approvedAssetIds`), so deleting it would show the stage as never built while its Context Store
+  version stays in use by later stages. The menu disables the row and says why: Re-run to replace.
+  With a newer approved card present, an older one can go.
+- **A refined draft takes its note with it**, and the draft it was refined from has
+  `refineSubmitted` cleared, so its review reopens.
+- **Deleting the stage's last open draft is a stop.** The run goes back to Ready and a
+  `stage-stopped` card (`deleted: true`) offers "Start … again", rather than "Awaiting Review" of
+  nothing.
+- Nothing is deleted from the database.
 
 ### Clearing a leg, and the warning in front of every deletion
 

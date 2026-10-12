@@ -274,7 +274,7 @@ def test_engagement_stats_use_real_counts_and_never_invent_zero() -> None:
 
 
 def test_route_checks_an_unsaved_draft_and_stores_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
-    async def facts(_run_id: str | None, _profile: dict[str, str], _asset: str) -> BusinessFacts:
+    async def facts(_run_id: str | None, _profile: dict[str, str], _asset: str, _phase: str = "phase1") -> BusinessFacts:
         return _facts()
 
     async def judge(_prompt: str, _on_usage: Any) -> str:
@@ -299,7 +299,7 @@ def test_route_404s_for_a_stage_the_phase_does_not_run() -> None:
 def test_phase2_icp_is_not_checked_but_phase1_icp_is(monkeypatch: pytest.MonkeyPatch) -> None:
     called: list[str] = []
 
-    async def facts(_run_id: str | None, _profile: dict[str, str], _asset: str) -> BusinessFacts:
+    async def facts(_run_id: str | None, _profile: dict[str, str], _asset: str, _phase: str = "phase1") -> BusinessFacts:
         called.append("facts")
         return _facts()
 
@@ -404,7 +404,7 @@ async def test_a_recheck_may_score_lower_when_it_names_the_problem(monkeypatch: 
 def test_check_route_accepts_the_previous_report(monkeypatch: pytest.MonkeyPatch) -> None:
     seen: list[str] = []
 
-    async def facts(_run_id: str | None, _profile: dict[str, str], _asset: str) -> BusinessFacts:
+    async def facts(_run_id: str | None, _profile: dict[str, str], _asset: str, _phase: str = "phase1") -> BusinessFacts:
         return _facts()
 
     async def judge(prompt: str, _on_usage: Any) -> str:
@@ -435,21 +435,36 @@ def test_the_revision_prompt_carries_the_facts_only_when_given() -> None:
 def test_refine_route_hands_the_facts_over_only_for_a_business_fix(monkeypatch: pytest.MonkeyPatch, business_fix: bool) -> None:
     received: list[str | None] = []
 
-    async def facts(_run_id: str | None, _profile: dict[str, str], _asset: str) -> BusinessFacts:
+    async def facts(_run_id: str | None, _profile: dict[str, str], _asset: str, _phase: str = "phase1") -> BusinessFacts:
         return _facts()
 
     async def revise(*_args: Any, business_facts: str | None = None, **_kwargs: Any):
         received.append(business_facts)
         yield "revised"
 
+    async def edits(_asset: str, prompt: str, *_a: Any, **_k: Any):
+        # A business fix is made of edits (see `page_revision.py`); the facts ride in its prompt.
+        received.append(prompt)
+        return json.dumps({"edits": [{"find": "old offer line", "replace": "revised offer line"}]}), "end_turn"
+
     monkeypatch.setattr(pipeline_router, "_business_facts", facts)
     monkeypatch.setattr(pipeline_router, "generate_revision_stream", revise)
+    monkeypatch.setattr(pipeline_router, "generate_page_edits", edits)
     res = TestClient(app).post(
         "/pipeline/refine/blog/stream",
-        json={"previous_draft": "draft", "note": "fix it", "business_fix": business_fix},
+        # Long enough that one line is a small edit of it: a fix that rewrote most of the document
+        # would be refused (`MAX_TOTAL_SHARE`).
+        json={
+            "previous_draft": "## Offer\nThe old offer line.\n\n## Proof\nA paragraph of proof that stays as written.",
+            "note": "fix it",
+            "business_fix": business_fix,
+        },
     )
     assert res.status_code == 200 and "revised" in res.text
-    assert (received[0] is not None and "Partner-Voice Content Capture Kit" in received[0]) if business_fix else received == [None]
+    if business_fix:
+        assert "Partner-Voice Content Capture Kit" in received[0] and "THE LAYOUT IS LOCKED" in received[0]
+    else:
+        assert received == [None]
 
 
 @pytest.mark.parametrize(("raw", "expected"), [(80, 80), (79.6, 79), ("80", 80), ("80/100", 80), ("80%", 80),

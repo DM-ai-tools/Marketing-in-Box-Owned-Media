@@ -403,3 +403,26 @@ def test_render_reports_when_no_live_data_was_fetched():
     )
     assert "No live data was fetched" in markdown
     assert sociavault_client.API_KEY_ENV in markdown
+
+
+@pytest.mark.asyncio
+async def test_resolve_competitor_handles_names_each_reader_that_found_a_profile(monkeypatch):
+    """The prepass states it in the transcript when a paid fallback answered, so it needs to know."""
+    monkeypatch.setattr(firecrawl_client, "is_configured", lambda: True)
+    monkeypatch.setattr(context_dev, "is_configured", lambda: True)
+
+    async def fake_scrape_links(url):
+        return ("https://facebook.com/acme",)
+
+    class _Brand:
+        socials = (("linkedin", "https://linkedin.com/company/acme"),)
+
+    async def fake_retrieve_brand(domain):
+        return _Brand()
+
+    monkeypatch.setattr(firecrawl_client, "scrape_links", fake_scrape_links)
+    monkeypatch.setattr(context_dev, "retrieve_brand", fake_retrieve_brand)
+
+    readers: list[str] = []
+    await social_audit.resolve_competitor_handles("acme.com", readers=readers)
+    assert readers == ["Firecrawl", "Context.dev"]

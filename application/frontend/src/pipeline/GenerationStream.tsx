@@ -3,7 +3,6 @@ import { motion } from "framer-motion";
 import { useShallow } from "zustand/react/shallow";
 import { ASSET_BY_ID } from "../data/assetCatalog";
 import { AssetExportMenuItems } from "../components/AssetExportButtons";
-import { SlideDeckMenuItem } from "../components/SlideDeckMenuItem";
 import { DocumentMeta, DocumentOutline, PreviewStrip, SummaryChips } from "../components/AssetDocumentView";
 import { Hint } from "../components/Hint";
 import { FieldHint } from "../components/FieldHint";
@@ -12,7 +11,7 @@ import { Markdown } from "../components/Markdown";
 import { OverflowDivider, OverflowItem, OverflowMenu } from "../components/OverflowMenu";
 import { countWords, parseAssetDocument, type AssetDocument } from "../lib/assetDocument";
 import { summariseAsset } from "../lib/assetSummary";
-import { buildPlanMindMapHtml } from "../lib/planMindMapHtml";
+import { AssetFileDownloads } from "../components/AssetFileDownloads";
 import { splitHtmlBlocks } from "../lib/htmlBlocks";
 import { topicPreambleFor } from "../lib/topicSuggestions";
 import { assetAppendixFor } from "../lib/assetAppendix";
@@ -38,12 +37,14 @@ import { ScrapeCard } from "./ScrapeCard";
 import { ServiceChoiceCard } from "./ServiceChoiceCard";
 import { IndustryGuessOptions, StageAdvisoryCard } from "./IndustryCards";
 import { AssetCheckPanel } from "./AssetCheckPanel";
+import { ImageNotes, ReplicaPanel, RevisionNotes } from "./ReplicaPanel";
 import { NEW_PAGE_OPTIONS, PHASE_META, stageAt, stagesFor, totalStagesFor } from "./pipelineData";
 import { PipelineInputBar } from "./PipelineInputBar";
 import {
   fieldBeingAsked,
   messagesInPhase,
   selectCanRerun,
+  selectDeleteGeneration,
   selectCanStop,
   selectNeedsResume,
   selectStoppableStage,
@@ -129,36 +130,18 @@ function RerunConfirm({ messageId, onCancel }: { messageId: string; onCancel: ()
 /** The asset whose deliverable is a structure. See `PlanSwitch`. */
 const PLAN_ASSET_ID = "plan_of_action";
 
-/** The asset whose Step 5 writes a slide-by-slide brief. See `SlideDeckMenuItem`. */
-const WEBINAR_ASSET_ID = "webinar";
-
-function MapIcon() {
+function TrashIcon() {
   return (
     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden>
       <path
-        d="M5 6h5M14 6h5M5 12h14M5 18h5M14 18h5M12 6v12"
+        d="M4 7h16M10 11v6M14 11v6M6 7l1 12a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-12M9 7V4h6v3"
         stroke="currentColor"
         strokeWidth="1.8"
         strokeLinecap="round"
+        strokeLinejoin="round"
       />
     </svg>
   );
-}
-
-/** Build the standalone map and hand it to the browser as a download.
- *
- * A blob URL rather than a data URI: a full plan's map runs to a few hundred kilobytes, and a data
- * URI that long is refused outright by some browsers and silently truncated by others. Revoked on
- * the next tick, once the click has been dispatched. */
-function downloadPlanMap(text: string, label: string): void {
-  const built = buildPlanMindMapHtml(text, label);
-  if (!built) return;
-  const url = URL.createObjectURL(new Blob([built.html], { type: "text/html;charset=utf-8" }));
-  const link = document.createElement("a");
-  link.href = url;
-  link.download = built.filename;
-  link.click();
-  window.setTimeout(() => URL.revokeObjectURL(url), 0);
 }
 
 function EditIcon() {
@@ -240,6 +223,10 @@ function ActionRow({ message, label, stageNumber }: { message: PipelineMessage; 
   // with no design yet comes out in neutral greys rather than being refused.
   const runId = usePipelineStore((s) => s.runId);
   const [confirmingRerun, setConfirmingRerun] = useState(false);
+  const askDeleteGeneration = useUiStore((s) => s.askDeleteGeneration);
+  // Two primitives, not the object: a selector returning a fresh object every call re-renders forever.
+  const canDelete = usePipelineStore((s) => selectDeleteGeneration(s, message.id).ok);
+  const deleteBlockedBy = usePipelineStore((s) => selectDeleteGeneration(s, message.id).reason);
 
   // The refine form takes over the row entirely — the operator is mid-sentence, and a Download
   // button under a half-written note is a misclick waiting to happen.
@@ -288,25 +275,16 @@ function ActionRow({ message, label, stageNumber }: { message: PipelineMessage; 
           {message.text && (
             <>
               <OverflowDivider />
-              {/* Only where there is a map to download. The file is self-contained — inline CSS,
-                  inline script, the plan's own text embedded — because a plan is the asset most
-                  likely to be sent to somebody without a login. See `planMindMapHtml.ts`. */}
-              {message.assetId === PLAN_ASSET_ID && (
-                <OverflowItem
-                  onClick={() => {
-                    close();
-                    downloadPlanMap(message.text ?? "", label);
-                  }}
-                >
-                  <MapIcon />
-                  Download plan map (.html)
-                </OverflowItem>
-              )}
-              {/* Only on the webinar, and only once the server confirms the document holds a
-                  parsable Step 5 brief — the row hides itself otherwise. */}
-              {message.assetId === WEBINAR_ASSET_ID && (
-                <SlideDeckMenuItem text={message.text} runId={runId} onDone={close} />
-              )}
+              {/* The plan map and the slide decks, each only when its file can be built. The same
+                  component the reader's export row uses, so the two offer the same files. */}
+              <AssetFileDownloads
+                assetId={message.assetId}
+                text={message.text}
+                label={label}
+                runId={runId}
+                variant="menu"
+                onDone={close}
+              />
               <AssetExportMenuItems
                 text={message.text}
                 label={label}
@@ -324,6 +302,23 @@ function ActionRow({ message, label, stageNumber }: { message: PipelineMessage; 
                 onDone={close}
               />
             </>
+          )}
+          <OverflowDivider />
+          {/* Last, apart from the downloads above it, and behind a modal. An approved card the stage
+              still depends on stays, with the reason written under the row. */}
+          <OverflowItem
+            danger
+            disabled={!canDelete}
+            onClick={() => {
+              close();
+              askDeleteGeneration({ messageId: message.id, label, approved: saved });
+            }}
+          >
+            <TrashIcon />
+            Delete this card
+          </OverflowItem>
+          {!canDelete && deleteBlockedBy && (
+            <p className="px-2.5 pb-1.5 text-[0.7rem] leading-snug text-[var(--fg-faint)]">{deleteBlockedBy}</p>
           )}
         </>
       )}
@@ -803,6 +798,9 @@ function GenerationCard({ message }: { message: PipelineMessage }) {
         <TruncatedNotice message={message} />
       )}
       <GenerationBody message={message} label={stage?.asset.label ?? "Generated page"} />
+      {!message.superseded && <ImageNotes notes={message.imageNotes} />}
+      {!message.superseded && <RevisionNotes report={message.revisionReport} />}
+      {!message.superseded && <ReplicaPanel message={message} label={stage?.asset.label ?? "Generated page"} />}
       {/* Above Approve, never instead of it: the check advises, the operator decides. */}
       {!message.streaming && !message.superseded && message.check && checkAppliesTo(message.phase, message.assetId) && (
         <AssetCheckPanel message={message} />
@@ -1104,11 +1102,13 @@ function StageStoppedCard({ message }: { message: PipelineMessage }) {
 
   return (
     <div className="w-full min-w-0 max-w-[35rem] rounded-2xl border border-[var(--border)] bg-[var(--bg-raised)] px-3 py-3 msg-rise @[30rem]:px-4 @[30rem]:py-3.5">
-      <div className="text-[0.92rem] font-medium">{stopped.label} stopped</div>
+      <div className="text-[0.92rem] font-medium">{stopped.label} {stopped.deleted ? "draft deleted" : "stopped"}</div>
       <p className="mt-1 text-[0.8rem] leading-relaxed text-[var(--fg-muted)]">
-        {stopped.wasGenerating
-          ? "The request was cancelled and the part-written draft discarded. "
-          : "The answers given for it were discarded. "}
+        {stopped.deleted
+          ? "Its draft was deleted. "
+          : stopped.wasGenerating
+            ? "The request was cancelled and the part-written draft discarded. "
+            : "The answers given for it were discarded. "}
         Nothing you had already approved has changed, and {stopped.label} is still in the pipeline to
         run whenever you want it.
       </p>

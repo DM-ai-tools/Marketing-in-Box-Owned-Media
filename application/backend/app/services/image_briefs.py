@@ -47,8 +47,11 @@ class ImageBrief:
 
 @dataclass(frozen=True)
 class GeneratedImage:
-    """One brief, fulfilled. `url` is this backend's own `/media/generated/...` — see
-    `media_storage.py` for why the bytes OpenAI returns end up there rather than inline."""
+    """One brief, fulfilled. `url` is this backend's own `GET /media/{id}`, absolute on the public
+    base (`BACKEND_PUBLIC_URL`) — the bytes are a `MediaAsset` row in Postgres. See
+    `media_storage.py` for why they end up there rather than inline or on local disk, and
+    `media_storage.current_media_url` for how a URL stored on the loopback default is corrected
+    when it is read back."""
 
     role: str
     size: str

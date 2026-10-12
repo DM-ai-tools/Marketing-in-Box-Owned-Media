@@ -85,6 +85,22 @@ async def test_missing_facts_are_named_not_guessed() -> None:
 
 
 @pytest.mark.asyncio
+async def test_the_service_is_the_phases_own_not_the_sibling_legs() -> None:
+    """The profile is chat-level, so a Phase 1 check arrives carrying the Phase 2 leg's sub-service.
+    Preferring it told the judge a Commercial Loans page was off-brief, and Refine rewrote it."""
+
+    async def nothing(_key: str) -> None:
+        return None
+
+    profile = {"target_service": "Commercial Loans", "sub_service": "Property Development Finance"}
+    phase1 = await load_business_facts(nothing, profile, asset_id="cro", phase="phase1")
+    phase2 = await load_business_facts(nothing, profile, asset_id="cro", phase="phase2")
+    assert phase1.service == "Commercial Loans"
+    assert phase2.service == "Property Development Finance"
+    assert "Property Development" not in phase1.summary()
+
+
+@pytest.mark.asyncio
 async def test_the_offers_stage_is_not_checked_against_the_ladder_it_is_replacing() -> None:
     looked: list[str] = []
 

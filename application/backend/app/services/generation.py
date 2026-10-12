@@ -748,7 +748,9 @@ def _generated_images_block(images: tuple[GeneratedImage, ...]) -> str:
     the image and place the returned URL" (the previous version of this block) was unfollowable:
     it could only fabricate a plausible-looking URL. This hands it the resolved value instead, the
     same fix `design_tokens.py` documents for a measured colour versus an invented one. The URL
-    points at this backend's own `/media/generated/...` — see `app/services/media_storage.py`.
+    points at this backend's own `GET /media/{id}` (bytes in Postgres, `MediaAsset`), already
+    rewritten onto the current public base when it was read off the run — see
+    `app/services/media_storage.py`.
     """
     lines = [
         f"\n\n{_GENERATED_IMAGES_HEADING}\n",
@@ -1590,6 +1592,40 @@ def build_assembly_request(copy_deck: str, stage_draft: str) -> str:
         f"{copy_deck.strip()}\n\n"
         f"{_ASSEMBLY_INSTRUCTION}"
     )
+
+
+async def generate_page_edits(
+    asset_id: str,
+    prompt: str,
+    phase: str = DEFAULT_PHASE,
+    on_usage: OnUsage | None = None,
+) -> tuple[str, str | None]:
+    """A page Refine's edit list: the model's raw reply and its stop reason.
+
+    Same model, effort and ceiling as the stage (`_stream_kwargs`). Streamed internally only so a
+    long call is not cut by an HTTP timeout; nothing is shown incrementally, because half a JSON
+    object is not half an answer. `page_revision` owns the prompt, the parsing and the applying.
+    """
+    cfg = _config(asset_id, phase)
+    client = get_client()
+    logger.info("Page revision by edits stage=%s model=%s prompt_chars=%d", asset_id, cfg.model, len(prompt))
+    started = time.monotonic()
+    async with client.messages.stream(**_stream_kwargs(cfg, None, prompt)) as stream:
+        final = await stream.get_final_message()
+    text = "".join(block.text for block in final.content if getattr(block, "type", "") == "text")
+    logger.info(
+        "Page revision done stage=%s stop_reason=%s input_tokens=%s output_tokens=%s reply_chars=%d",
+        asset_id,
+        final.stop_reason,
+        final.usage.input_tokens,
+        final.usage.output_tokens,
+        len(text),
+    )
+    if on_usage is not None:
+        await on_usage(
+            CallUsage.from_response(final, requested_model=cfg.model, duration_ms=int((time.monotonic() - started) * 1000))
+        )
+    return text, final.stop_reason
 
 
 async def generate_replica_copy(

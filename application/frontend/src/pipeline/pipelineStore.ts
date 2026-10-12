@@ -34,6 +34,7 @@ import {
   updateChatSession,
 } from "./pipelineApi";
 import { ApiFaultError, StreamTruncatedError, checkAsset } from "./pipelineApi";
+import type { ReplicaReport, ReplicaStreamEvent, ReplicaTemplateInfo, RevisionEditReport } from "./pipelineApi";
 import type {
   ApiFault,
   AssetCheckReport,
@@ -371,7 +372,7 @@ export interface PipelineMessage {
   /** Populated on `kind: "stage-stopped"` — which stage was abandoned, and whether a generation
    * was actually in flight when it happened (so the card can say a request was cancelled rather
    * than implying one was). */
-  stopped?: { assetId: string; label: string; wasGenerating: boolean };
+  stopped?: { assetId: string; label: string; wasGenerating: boolean; deleted?: boolean };
   /** Set on the question for a stage's page-source field, where "there is no such page yet" is a
    * real answer — see `NEW_PAGE_OPTIONS`. Carries the subject so the offer can name the service the
    * page would be for rather than asking in the abstract. */
@@ -392,6 +393,16 @@ export interface PipelineMessage {
   advisory?: StageAdvisoryState;
   /** On a generation card: the check of this draft against the client's business. */
   check?: AssetCheckState;
+  /** On a CRO card that rebuilt the client's real page: where the assembly got to. Absent for every
+   * stage that does not assemble (the pillar page, copy-only CRO). See `ReplicaPanel`. */
+  replica?: ReplicaState;
+  /** Image generation that failed for this stage, as the server reported it. The stage ran without
+   * those images; the card says so rather than leaving the operator to find a missing picture. */
+  imageNotes?: string[];
+  /** On a Refine of a built page: how many of the requested edits landed, and why any did not. The
+   * page is edited in place rather than retyped, so an edit that could not be placed is said here
+   * instead of the whole page being rewritten around it. */
+  revisionReport?: RevisionEditReport;
   /** Set when a resumed chat's draft was cut off mid-stream by the tab closing. The partial text
    * is kept (it may be most of the asset) but the card warns and offers a regeneration. */
   interrupted?: boolean;
@@ -677,6 +688,11 @@ interface PipelineState {
    * genuinely aborted, not just hidden). Nothing already approved is touched, which is what makes
    * it safe enough to be one click with an inline confirm rather than a modal. */
   stopStage: () => void;
+  /** Remove a generation card from the transcript. A draft only: the stage's last approved version
+   * is refused (see `selectDeleteGeneration`), because approval is read off the transcript and the
+   * Context Store version would outlive its card. Deleting a refined draft also removes the note that
+   * asked for it and reopens review on the draft it came from. */
+  deleteGeneration: (messageId: string) => void;
 }
 
 /** `IntakeFlow` with its asset collapsed to an id, which is how it is both persisted and parked —
@@ -1386,6 +1402,39 @@ export function selectCanStop(s: PipelineState): boolean {
 /** The stage `stopStage` would act on, or undefined. Read from what is actually happening rather
  * than from `currentIndex` alone: a retry or a refine streams into a card for an *earlier* stage,
  * and the button has to name and stop that one rather than whatever the cursor sits on. */
+/** Whether a generation card can be deleted, and if not, why — the menu shows the reason.
+ *
+ * Every draft can go. An approved card can go only when another approved card for the same stage
+ * remains in this leg: `approvedAssetIds` reads approval off the transcript, so deleting the last one
+ * would show the stage as never built while its version stays in the Context Store, and every later
+ * stage kept reading it. A card still streaming is stopped with "Stop this asset" instead. */
+export function selectDeleteGeneration(s: PipelineState, messageId: string): { ok: boolean; reason?: string } {
+  const message = s.messages.find((m) => m.id === messageId);
+  if (!message || message.kind !== "generation") return { ok: false, reason: "Not a generated asset." };
+  if (message.streaming || generationRequests.has(messageId)) {
+    return { ok: false, reason: "Still generating — use Stop this asset." };
+  }
+  if (message.savePhase === "saving") return { ok: false, reason: "Saving — wait for it to finish." };
+  if (message.savePhase === "saved") {
+    const otherApproved = s.messages.some(
+      (m) =>
+        m.id !== message.id &&
+        m.kind === "generation" &&
+        m.savePhase === "saved" &&
+        m.assetId === message.assetId &&
+        (m.phase ?? s.phase) === (message.phase ?? s.phase) &&
+        (m.trackId ?? null) === (message.trackId ?? null),
+    );
+    if (!otherApproved) {
+      return {
+        ok: false,
+        reason: "This is the approved version later stages use. Re-run the stage to replace it.",
+      };
+    }
+  }
+  return { ok: true };
+}
+
 export function selectStoppableStage(s: PipelineState): { assetId: string; label: string } | undefined {
   const own = messagesInCurrentTrack(s);
   const streaming = own.find((m) => m.streaming && m.assetId);
@@ -1591,7 +1640,21 @@ async function streamIntoMessage(
       truncated = completion.truncated;
     },
     onRetry: (attempt, of) => patchMessage(get, set, messageId, { reconnecting: { attempt, of } }),
+    onReplica: (event) => {
+      const current = get().messages.find((m) => m.id === messageId);
+      patchMessage(get, set, messageId, { replica: nextReplicaState(current?.replica, event, get().runId) });
+    },
+    onImageNotes: (notes) => {
+      const current = get().messages.find((m) => m.id === messageId);
+      const merged = [...(current?.imageNotes ?? [])];
+      for (const n of notes) if (!merged.includes(n)) merged.push(n);
+      patchMessage(get, set, messageId, { imageNotes: merged });
+    },
+    onRevisionEdits: (report) => patchMessage(get, set, messageId, { revisionReport: report }),
   };
+  // A fresh generation or retry starts from no assembly and no image notes; a continuation keeps
+  // what the first part of the stream reported.
+  if (!opts.append) patchMessage(get, set, messageId, { replica: undefined, imageNotes: undefined, revisionReport: undefined });
 
   try {
     await run(
@@ -1716,6 +1779,38 @@ export function composeFixNote(findings: CheckFinding[]): string {
   );
 }
 
+/** A replica stage's assembly, as its stream events reported it.
+ *
+ * `done` is the only state with something to download — the HTML is stored on the run and read from
+ * `GET /runs/{runId}/replica/output`, never carried on the stream. `error` is the extra artifact
+ * failing; the stage's own document is complete and is not marked failed. */
+export interface ReplicaState {
+  status: "template" | "assembling" | "done" | "error";
+  /** The run the assembly is stored under, captured when the event arrived. */
+  runId: string | null;
+  template?: ReplicaTemplateInfo;
+  report?: ReplicaReport;
+  error?: string;
+}
+
+/** Fold one replica event into the card's state. Exported for the smoke checks. */
+export function nextReplicaState(prev: ReplicaState | undefined, event: ReplicaStreamEvent, runId: string | null): ReplicaState {
+  switch (event.type) {
+    case "replica_template": {
+      const { type: _t, ...template } = event;
+      return { status: "template", runId, template };
+    }
+    case "replica_start":
+      return { ...prev, status: "assembling", runId: prev?.runId ?? runId };
+    case "replica": {
+      const { type: _t, asset_id: _a, ...report } = event;
+      return { ...prev, status: "done", runId: prev?.runId ?? runId, report, error: undefined };
+    }
+    case "replica_error":
+      return { ...prev, status: "error", runId: prev?.runId ?? runId, error: event.message };
+  }
+}
+
 /** The two stream callbacks `streamIntoMessage` supplies to whichever API call it is driving.
  *
  * Spread into the call's own options at each site — `{ ...hooks, signal }` — rather than threaded
@@ -1724,6 +1819,9 @@ export function composeFixNote(findings: CheckFinding[]): string {
 interface StreamHooks {
   onDone: (completion: StreamCompletion) => void;
   onRetry: (attempt: number, of: number) => void;
+  onReplica: (event: ReplicaStreamEvent) => void;
+  onImageNotes: (notes: string[]) => void;
+  onRevisionEdits: (report: RevisionEditReport) => void;
 }
 
 /** Who to bill the next API call to. Read at call time rather than closed over, because a chat's
@@ -3976,6 +4074,10 @@ export const usePipelineStore = create<PipelineState>((set, get) => ({
 
     const assetId = message.assetId;
     const previousDraft = message.text;
+    // The copy a built page was made from. A page is refined by edits written against it, so a
+    // wording fix comes from the CRO rewrite rather than being written fresh. Absent, the server
+    // reads the run's stored CRO rewrite instead.
+    const sourceCopy = message.answers?.improved_page_content || undefined;
     await streamIntoMessage(get, set, newMessage.id, (onChunk, signal, hooks) =>
       streamRefineStage(
         assetId,
@@ -3986,7 +4088,7 @@ export const usePipelineStore = create<PipelineState>((set, get) => ({
         get().phase,
         attribution(get),
         opts?.businessFix ? { clientProfile: get().clientProfile } : undefined,
-        hooks,
+        { ...hooks, sourceCopy },
       ),
     );
   },
@@ -5342,6 +5444,61 @@ chooseHeadlines: async (messageId, ids) => {
       assetId: target.assetId,
       stopped: { assetId: target.assetId, label: target.label, wasGenerating },
     });
+  },
+
+  deleteGeneration: (messageId) => {
+    const state = get();
+    if (!selectDeleteGeneration(state, messageId).ok) return;
+    const at = state.messages.findIndex((m) => m.id === messageId);
+    const message = state.messages[at];
+    if (!message) return;
+    const sameStage = (m: PipelineMessage) =>
+      m.kind === "generation" &&
+      m.assetId === message.assetId &&
+      (m.phase ?? state.phase) === (message.phase ?? state.phase) &&
+      (m.trackId ?? null) === (message.trackId ?? null);
+
+    // The draft this one was refined from, if it was a refinement: the nearest earlier card for the
+    // stage that sent a refine. Its review reopens, so the operator is back where they were before
+    // asking for the change, with Approve and Refine on offer again.
+    let parent: PipelineMessage | undefined;
+    for (let i = at - 1; i >= 0; i--) {
+      const m = state.messages[i];
+      if (!sameStage(m)) continue;
+      if (m.refineSubmitted && !m.superseded) parent = m;
+      break;
+    }
+    // The refine note is the user bubble the refine pushed straight before this card. It asked for
+    // the deleted draft, so it goes with it.
+    const before = state.messages[at - 1];
+    const note = parent && before && before.role === "user" && before.kind === "text" ? before.id : null;
+
+    const drop = new Set([messageId, ...(note ? [note] : [])]);
+    // An in-flight business check on this card has nothing left to write to.
+    abortGenerations([messageId]);
+    const messages = state.messages
+      .filter((m) => !drop.has(m.id))
+      .map((m) => (parent && m.id === parent.id ? { ...m, refineSubmitted: false } : m));
+
+    // Was this the stage's last open draft? Then the stage is no longer awaiting review, and it says
+    // so with the same card a stop leaves — the one with "Start … again" on it — rather than leaving
+    // the run at "Awaiting Review" of nothing.
+    const stillOpen = messages.some((m) => sameStage(m) && !m.superseded && m.savePhase !== "saved");
+    const target = selectStoppableStage(state);
+    const wasCurrent = message.savePhase !== "saved" && !message.superseded && target?.assetId === message.assetId;
+
+    set({ messages });
+    if (wasCurrent && !stillOpen && !parent && target) {
+      set({ activeStatus: null, progress: 0, navStatus: "Ready", rerunReturnIndex: null, rerunReturnIntake: null });
+      push(get, set, {
+        role: "assistant",
+        kind: "stage-stopped",
+        assetId: target.assetId,
+        stopped: { assetId: target.assetId, label: target.label, wasGenerating: false, deleted: true },
+      });
+    }
+    // The reader closes on its own when its message vanishes (`AssetReader`).
+    schedulePersist();
   },
 
   runProducerFirst: (messageId, assetId) => {

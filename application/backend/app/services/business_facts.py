@@ -20,6 +20,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 
 from app.services.link_manifest import LinkManifest
+from app.services.media_storage import current_media_url
 
 #: Reads one context key for the run and returns its stored value, or None. Supplied by the router.
 Lookup = Callable[[str], Awaitable[object | None]]
@@ -62,6 +63,10 @@ class BusinessFacts:
     #: and read by `page_check` — never by the judge.
     links: LinkManifest | None = None
     design_md: str = ""
+    #: The run's own generated images (`generated_images` + `section_images`), on the current public
+    #: base. The page check accepts an `<img>` pointing at one of these or at an image the reference
+    #: page serves (`links.images`), and flags any other source as possibly invented.
+    generated_image_urls: list[str] = field(default_factory=list)
     missing: list[str] = field(default_factory=list)
 
     @property
@@ -224,14 +229,25 @@ def _content(value: object) -> str:
     return str(value.get("content") or "") if isinstance(value, dict) else ""
 
 
-async def load_business_facts(lookup: Lookup, client_profile: dict[str, str], *, asset_id: str) -> BusinessFacts:
+def _service_for_phase(client_profile: dict[str, str], phase: str) -> str:
+    """The service this phase's drafts market. The profile is chat-level, so a chat with a Phase 2
+    leg carries `sub_service` into its Phase 1 checks too — and preferring it there told the judge a
+    Commercial Loans page was off-brief for not being a Property Development Finance page, and
+    "Fix with Refine" rewrote it into one."""
+    key = "sub_service" if phase == "phase2" else "target_service"
+    return (client_profile.get(key) or "").strip()
+
+
+async def load_business_facts(
+    lookup: Lookup, client_profile: dict[str, str], *, asset_id: str, phase: str = "phase1"
+) -> BusinessFacts:
     """Assemble the facts for checking a draft of `asset_id`.
 
     The offers stage is not checked against a stored ladder: its draft *is* the ladder being written,
     and the stored one is the version it is about to replace.
     """
     facts = BusinessFacts(
-        service=(client_profile.get("sub_service") or client_profile.get("target_service") or "").strip(),
+        service=_service_for_phase(client_profile, phase),
         industry=(client_profile.get("industry_label") or "").strip(),
     )
 
@@ -271,6 +287,12 @@ async def load_business_facts(lookup: Lookup, client_profile: dict[str, str], *,
         if isinstance(design, dict):
             facts.design_md = str(design.get("design_md") or design.get("content") or "")
             facts.links = LinkManifest.from_dict(design.get("links") if isinstance(design.get("links"), dict) else None)
+            facts.generated_image_urls = [
+                current_media_url(str(item["url"]))
+                for key in ("generated_images", "section_images")
+                for item in (design.get(key) or [])
+                if isinstance(item, dict) and item.get("url")
+            ]
         if facts.links is None or not facts.links.available:
             facts.missing.append("the reference page's links (re-run the stage to capture them)")
 

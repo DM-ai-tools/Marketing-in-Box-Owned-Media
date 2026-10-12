@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { fetchSlideDeck, listSlideDecks, type SlideDecksResponse } from "../pipeline/pipelineApi";
+import { MENU_ROW, PILL } from "./PlanMapDownload";
 
 /** "Download slide deck (.pptx)" — the webinar stage's Step 5 brief as a file somebody can open.
  *
@@ -15,18 +16,68 @@ import { fetchSlideDeck, listSlideDecks, type SlideDecksResponse } from "../pipe
  * cheap and happens once per menu-open, because `OverflowMenu` only renders its children while
  * open.
  */
+/** The probe's answer per document, so reopening a menu (or opening the reader after the card) does
+ * not ask again for a document that has not changed. `null` is "no brief", which is also worth
+ * remembering. Bounded, oldest out first. */
+const probeCache = new Map<string, SlideDecksResponse | null>();
+const PROBE_CACHE_MAX = 24;
+const probeKey = (text: string, runId: string | null) => `${runId ?? ""}\u0000${text}`;
+
+/** Ask the server which decks `text` holds, remembering the answer. Exported so the smoke checks
+ * can prime it — server rendering never runs the effect that would otherwise call this. */
+export async function probeSlideDecks(text: string, runId: string | null): Promise<SlideDecksResponse | null> {
+  const key = probeKey(text, runId);
+  if (probeCache.has(key)) return probeCache.get(key) ?? null;
+  const found = await listSlideDecks(text, runId);
+  const usable = found && found.decks.length ? found : null;
+  probeCache.set(key, usable);
+  if (probeCache.size > PROBE_CACHE_MAX) probeCache.delete(probeCache.keys().next().value as string);
+  return usable;
+}
+
+export interface DeckRow {
+  key: string;
+  /** The deck to request; omitted for "all", so the server sends its bundle. */
+  index?: number;
+  label: string;
+  slides: number;
+}
+
+/** The rows a probe result is offered as. One deck is one `.pptx` row. Several get a row each —
+ * one webinar at a time is the usual need — plus a single "all" row that omits the index and so
+ * arrives as the server's `.zip`. */
+export function deckRows(decks: SlideDecksResponse): DeckRow[] {
+  const total = decks.decks.reduce((sum, deck) => sum + deck.slide_count, 0);
+  if (decks.decks.length <= 1) return [{ key: "one", label: "Download slide deck (.pptx)", slides: total }];
+  return [
+    ...decks.decks.map((deck) => ({
+      key: `deck-${deck.index}`,
+      index: deck.index,
+      label: `Download “${deck.title}” (.pptx)`,
+      slides: deck.slide_count,
+    })),
+    { key: "all", label: "Download all slide decks (.zip)", slides: total },
+  ];
+}
+
 export function SlideDeckMenuItem({
   text,
   runId,
   onDone,
+  variant = "menu",
 }: {
   text: string;
   runId: string | null;
   onDone?: () => void;
+  /** A row in the card's `OverflowMenu`, or a pill in the reader's export row. */
+  variant?: "menu" | "pill";
 }) {
-  const [decks, setDecks] = useState<SlideDecksResponse | null>(null);
-  const [status, setStatus] = useState<"probing" | "ready" | "none">("probing");
-  const [busy, setBusy] = useState(false);
+  const cached = probeCache.get(probeKey(text, runId));
+  const [decks, setDecks] = useState<SlideDecksResponse | null>(cached ?? null);
+  const [status, setStatus] = useState<"probing" | "ready" | "none">(
+    cached === undefined ? "probing" : cached ? "ready" : "none",
+  );
+  const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const live = useRef(true);
 
@@ -39,11 +90,11 @@ export function SlideDeckMenuItem({
 
   useEffect(() => {
     let cancelled = false;
-    void listSlideDecks(text, runId)
+    void probeSlideDecks(text, runId)
       .then((found) => {
         if (cancelled) return;
         // `null` is the server's ordinary "no brief in this document" answer, not a failure.
-        if (!found || found.decks.length === 0) {
+        if (!found) {
           setStatus("none");
           return;
         }
@@ -63,12 +114,13 @@ export function SlideDeckMenuItem({
   if (status !== "ready" || !decks) return null;
 
   const several = decks.decks.length > 1;
-  const total = decks.decks.reduce((sum, deck) => sum + deck.slide_count, 0);
 
-  const run = () => {
-    setBusy(true);
+  /** `index` names one deck; omitted, the server sends every deck (a `.zip` when there are
+   * several). The filename comes back off `Content-Disposition` either way. */
+  const run = (key: string, index?: number) => {
+    setBusy(key);
     setError(null);
-    void fetchSlideDeck(text, runId)
+    void fetchSlideDeck(text, runId, index)
       .then(({ blob, filename }) => {
         const url = URL.createObjectURL(blob);
         const link = document.createElement("a");
@@ -78,37 +130,37 @@ export function SlideDeckMenuItem({
         // Revoking in the same tick can cancel the download before the browser has read the blob —
         // the same window `exportAsset.downloadExport` leaves.
         window.setTimeout(() => URL.revokeObjectURL(url), 10_000);
-        if (live.current) setBusy(false);
+        if (live.current) setBusy(null);
         onDone?.();
       })
       .catch((err: unknown) => {
         if (!live.current) return;
-        setBusy(false);
+        setBusy(null);
         setError(err instanceof Error ? err.message : "Couldn't build the deck");
       });
   };
 
+  const rows = deckRows(decks);
+
   return (
     <>
-      <button
-        type="button"
-        role="menuitem"
-        disabled={busy}
-        onClick={run}
-        className="flex w-full cursor-pointer items-center gap-2 rounded-lg px-2.5 py-2 text-left text-[0.8rem] font-medium hover:bg-[var(--hover)] disabled:cursor-default disabled:opacity-60"
-      >
-        <SlidesIcon />
-        <span className="min-w-0">
-          {busy
-            ? "Building…"
-            : several
-              ? `Download ${decks.decks.length} slide decks (.zip)`
-              : "Download slide deck (.pptx)"}
-          <span className="ml-1 text-[var(--fg-faint)]">
-            {several ? `· ${total} slides` : `· ${total} slides`}
+      {rows.map((row) => (
+        <button
+          key={row.key}
+          type="button"
+          role={variant === "menu" ? "menuitem" : undefined}
+          disabled={busy !== null}
+          onClick={() => run(row.key, row.index)}
+          title={several && row.index !== undefined ? decks.decks.find((d) => d.index === row.index)?.filename : undefined}
+          className={variant === "menu" ? MENU_ROW : PILL}
+        >
+          <SlidesIcon />
+          <span className="min-w-0">
+            {busy === row.key ? "Building…" : row.label}
+            <span className="ml-1 text-[var(--fg-faint)]">· {row.slides} slides</span>
           </span>
-        </span>
-      </button>
+        </button>
+      ))}
       {error && (
         <p className="px-2.5 pb-1.5 text-[0.72rem]" style={{ color: "var(--color-signal-orange)" }}>
           {error}

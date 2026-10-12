@@ -103,8 +103,10 @@ from app.services import (
     openai_image_client,
     runway_image_client,
     page_replica as page_replica_service,
+    page_revision as page_revision_service,
     slide_deck as slide_deck_service,
     social_audit as social_audit_service,
+    social_intel as social_intel_service,
     sociavault_client,
     stream_locks,
     usage as usage_service,
@@ -124,6 +126,7 @@ from app.services.generation import (
     PAGE_REPLICA_STAGES,
     PageDesignInput,
     generate_continuation_stream,
+    generate_page_edits,
     generate_replica_copy,
     generate_revision_stream,
     generate_stage_stream,
@@ -2216,14 +2219,21 @@ def _generated_images_from_stored(raw: list | None) -> tuple[GeneratedImage, ...
                     role=str(item.get("role") or ""),
                     size=str(item.get("size") or ""),
                     prompt=str(item.get("prompt") or ""),
-                    url=str(item["url"]),
+                    # A URL stored while the backend had no public base points at its own
+                    # loopback; this is the one read path to both the prompt and the UI, so it is
+                    # corrected here, on the way out, rather than left in a delivered page.
+                    url=media_storage.current_media_url(str(item["url"])),
                 )
             )
     return tuple(images)
 
 
 async def _ensure_generated_images(
-    session_factory, run_uuid: uuid.UUID, value: dict, asset_id: str | None
+    session_factory,
+    run_uuid: uuid.UUID,
+    value: dict,
+    asset_id: str | None,
+    image_notes: list[str] | None = None,
 ) -> dict:
     """Generate this run's brief images on the first stage that actually needs them, and persist
     the result so the second `PAGE_REPLICA_STAGES` member reuses it for free.
@@ -2232,6 +2242,10 @@ async def _ensure_generated_images(
     run already has generated images stored, there are no briefs to fulfil, or OpenAI has no key
     configured. Each of those is the same "skip cleanly" behaviour `image_briefs.generate_all`
     already has; this just adds the persistence layer around it.
+
+    `image_notes`, when given, collects what failed — one line per brief that did not produce an
+    image, plus a line when none did — so the stream can show the operator. A stage is never failed
+    over an image, and a total failure is still not cached, so the next qualifying stage retries.
     """
     if asset_id not in PAGE_REPLICA_STAGES or value.get("generated_images"):
         return value
@@ -2249,12 +2263,19 @@ async def _ensure_generated_images(
             return value
 
         generated, notes = await image_briefs_service.generate_all(briefs, session)
+        if image_notes is not None:
+            image_notes.extend(notes)
         if not generated:
             # Nothing to persist — leave the run to try again on its next stage rather than
             # writing an empty marker that would be indistinguishable from "already tried and got
             # nothing".
             if notes:
                 logger.info("Image generation produced nothing for run_id=%s: %s", run_uuid, "; ".join(notes))
+                if image_notes is not None:
+                    image_notes.append(
+                        "No page images were generated, so this page was built without them. "
+                        "They will be tried again on the next stage that builds a page."
+                    )
             return value
 
         updated = {
@@ -2292,6 +2313,7 @@ async def _ensure_section_images(
     asset_id: str | None,
     answers: dict[str, str],
     profile: dict[str, str],
+    image_notes: list[str] | None = None,
 ) -> dict:
     """Generate images for a design-language page's own body sections, once per set of sections.
 
@@ -2337,9 +2359,16 @@ async def _ensure_section_images(
         if await session.get(Run, run_uuid) is None:
             return value
         generated, notes = await image_briefs_service.generate_all(briefs, session)
+        if image_notes is not None:
+            image_notes.extend(notes)
         if not generated:
             if notes:
                 logger.info("Section images produced nothing for run_id=%s: %s", run_uuid, "; ".join(notes))
+                if image_notes is not None:
+                    image_notes.append(
+                        "No section images were generated, so those sections were built without one. "
+                        "They will be tried again when this stage is re-run."
+                    )
             return value
         updated = {
             **value,
@@ -2404,6 +2433,7 @@ async def resolve_page_design(
     profile: dict[str, str],
     *,
     asset_id: str | None = None,
+    image_notes: list[str] | None = None,
 ) -> PageDesignInput | None:
     """This run's DESIGN.md and reference screenshots, capturing them first if it has none.
 
@@ -2419,7 +2449,8 @@ async def resolve_page_design(
     `asset_id` is the stage actually asking. Passed only by the per-stage generation flow — a
     preview or readiness check has no reason to trigger an OpenAI spend — and used only to decide
     whether this is a `PAGE_REPLICA_STAGES` member that still needs its brief images generated;
-    see `_ensure_generated_images`.
+    see `_ensure_generated_images`. `image_notes`, when given, collects any image that failed to
+    generate, for the stream to show.
     """
     url = _design_source_url(answers, profile)
     session_factory = get_sessionmaker()
@@ -2438,9 +2469,9 @@ async def resolve_page_design(
             value, _on_run = stored
             reuse, why = _reuse_stored_design(value, url)
             if reuse:
-                value = await _ensure_generated_images(session_factory, run_uuid, value, asset_id)
+                value = await _ensure_generated_images(session_factory, run_uuid, value, asset_id, image_notes)
                 value = await _ensure_section_images(
-                    session_factory, run_uuid, value, asset_id, answers, profile
+                    session_factory, run_uuid, value, asset_id, answers, profile, image_notes
                 )
                 return _page_design_input(value)
             logger.info("Re-capturing page design for run_id=%s: %s", run_id, why)
@@ -2531,9 +2562,11 @@ async def resolve_page_design(
 
     generated_images: tuple[GeneratedImage, ...] = ()
     if run_uuid is not None and stored_value is not None:
-        stored_value = await _ensure_generated_images(session_factory, run_uuid, stored_value, asset_id)
+        stored_value = await _ensure_generated_images(
+            session_factory, run_uuid, stored_value, asset_id, image_notes
+        )
         stored_value = await _ensure_section_images(
-            session_factory, run_uuid, stored_value, asset_id, answers, profile
+            session_factory, run_uuid, stored_value, asset_id, answers, profile, image_notes
         )
         generated_images = _all_generated_images(stored_value)
 
@@ -2949,7 +2982,7 @@ class AssetCheckResponse(BaseModel):
     duration_ms: int = 0
 
 
-async def _business_facts(run_id: str | None, client_profile: dict[str, str], asset_id: str):
+async def _business_facts(run_id: str | None, client_profile: dict[str, str], asset_id: str, phase: str = DEFAULT_PHASE):
     """The run's facts, read through the same inheritance every other document uses. A run that
     cannot be read yields empty facts — reported as missing, never as a failed check."""
     run_uuid: uuid.UUID | None = None
@@ -2962,7 +2995,7 @@ async def _business_facts(run_id: str | None, client_profile: dict[str, str], as
         async def nothing(_key: str) -> None:
             return None
 
-        return await business_facts_service.load_business_facts(nothing, client_profile, asset_id=asset_id)
+        return await business_facts_service.load_business_facts(nothing, client_profile, asset_id=asset_id, phase=phase)
 
     session_factory = get_sessionmaker()
     async with session_factory() as session:
@@ -2971,7 +3004,7 @@ async def _business_facts(run_id: str | None, client_profile: dict[str, str], as
             found = await _latest_context_entry(session, run_uuid, key)
             return found[0].value if found is not None else None
 
-        return await business_facts_service.load_business_facts(lookup, client_profile, asset_id=asset_id)
+        return await business_facts_service.load_business_facts(lookup, client_profile, asset_id=asset_id, phase=phase)
 
 
 @router.post("/check/{asset_id}", response_model=AssetCheckResponse)
@@ -2985,7 +3018,7 @@ async def check_asset_route(asset_id: str, payload: AssetCheckRequest) -> AssetC
         raise HTTPException(status_code=422, detail=f"{asset_id!r} is not business-checked in {payload.phase!r}.")
 
     try:
-        facts = await _business_facts(payload.run_id, payload.client_profile, asset_id)
+        facts = await _business_facts(payload.run_id, payload.client_profile, asset_id, payload.phase)
     except Exception as exc:  # noqa: BLE001 — facts that cannot be read are missing facts
         logger.warning("Asset check could not read facts for run %s: %s", payload.run_id, exc)
         facts = business_facts_service.BusinessFacts(missing=["everything on the run (it could not be read)"])
@@ -3965,6 +3998,10 @@ class RefineStageRequest(BaseModel):
     #: then handed the facts those findings were checked against — see `build_revision_prompt`.
     business_fix: bool = False
     client_profile: dict[str, str] = Field(default_factory=dict)
+    #: The copy the page was built from (the pillar page's `improved_page_content` answer), sent by
+    #: the card that holds it. A page Refine takes its wording from this; without it the run's stored
+    #: CRO rewrite is used. Ignored for every stage that is not refined by edits.
+    source_copy: str | None = None
 
 
 class ContinueStageRequest(BaseModel):
@@ -4116,7 +4153,7 @@ _SOCIAL_LIVE_RESEARCH_PATTERN = re.compile(r"research\s+live", re.IGNORECASE)
 
 async def _fetch_competitor_social_blocks(
     competitor_list_raw: str, requested_count: str
-) -> tuple[str, tuple[str, ...], bool, list[dict]]:
+) -> tuple[str, tuple[str, ...], bool, list[dict], list[social_intel_service.AccountSample]]:
     """Resolve up to `_MAX_AUTO_COMPETITORS` competitors from `competitor_list` to real social
     handles (free page read, then Firecrawl, then Context.dev — see `social_audit.resolve_competitor_handles`)
     and fetch their live posts. Returns `(markdown, notes, any_data)`; never raises — a competitor
@@ -4128,13 +4165,15 @@ async def _fetch_competitor_social_blocks(
     markdown itself is never empty (a "not fetched, here's why" sentence is still text).
 
     The fourth element is `social_audit.engagement_stats` for every account fetched — the same posts,
-    counted rather than rendered, for the asset check's virality benchmark.
+    counted rather than rendered, for the asset check's virality benchmark. The fifth is the posts
+    themselves, per competitor, for `social_intel.build_intel_md`.
     """
     if not competitor_list_raw or competitor_list_raw.startswith("[[context:"):
         return (
             "Not fetched — no competitor list is available on this run yet.",
             ("Competitor list is empty or unresolved; competitor rows are N/D.",),
             False,
+            [],
             [],
         )
 
@@ -4151,6 +4190,7 @@ async def _fetch_competitor_social_blocks(
             (f"Competitor list parse failed: {exc}",),
             False,
             [],
+            [],
         )
 
     try:
@@ -4161,7 +4201,7 @@ async def _fetch_competitor_social_blocks(
     competitors = analysis.competitors[:take]
 
     if not competitors:
-        return "Not fetched — the competitor list has no entries.", (), False, []
+        return "Not fetched — the competitor list has no entries.", (), False, [], []
 
     notes: list[str] = []
     if requested > take:
@@ -4170,8 +4210,9 @@ async def _fetch_competitor_social_blocks(
             f"API spend (cap: {_MAX_AUTO_COMPETITORS}). Use POST /pipeline/social/posts for the rest."
         )
 
-    async def _one(competitor) -> tuple[str, bool, list[dict]]:
-        accounts = await social_audit_service.resolve_competitor_handles(competitor.domain)
+    async def _one(competitor) -> tuple[str, bool, list[dict], tuple]:
+        readers: list[str] = []
+        accounts = await social_audit_service.resolve_competitor_handles(competitor.domain, readers=readers)
         if not accounts:
             return (
                 f"## {competitor.name} — live social data\n\nNo Facebook/Instagram/LinkedIn "
@@ -4180,20 +4221,26 @@ async def _fetch_competitor_social_blocks(
                 "post-level metrics N/D.\n",
                 False,
                 [],
+                (),
             )
         results, account_notes = await social_audit_service.fetch_account_snapshot(
             accounts, limit_per_platform=_COMPETITOR_LIMIT_PER_PLATFORM
         )
+        # Stated whenever a fallback found any profile, so a credit spent on this competitor shows.
+        if any(r != "the free page read" for r in readers):
+            account_notes = (*account_notes, f"Social profiles found via {', '.join(readers)}.")
         return (
             social_audit_service.render_social_data_md(competitor.name, results, account_notes),
             True,
             social_audit_service.engagement_stats(f"{competitor.name} (competitor)", results),
+            results,
         )
 
     outcomes = await asyncio.gather(*(_one(c) for c in competitors), return_exceptions=True)
 
     rendered: list[str] = []
     stats: list[dict] = []
+    samples: list[social_intel_service.AccountSample] = []
     any_data = False
     for competitor, outcome in zip(competitors, outcomes):
         if isinstance(outcome, Exception):
@@ -4204,12 +4251,14 @@ async def _fetch_competitor_social_blocks(
                 "Mark this competitor's post-level metrics N/D.\n"
             )
             continue
-        block, resolved_any, account_stats = outcome
+        block, resolved_any, account_stats, results = outcome
         rendered.append(block)
         stats.extend(account_stats)
+        if results:
+            samples.append(social_intel_service.AccountSample(competitor.name, False, results))
         any_data = any_data or resolved_any
 
-    return "\n".join(rendered), tuple(notes), any_data, stats
+    return "\n".join(rendered), tuple(notes), any_data, stats, samples
 
 
 async def _run_social_data_prepass(
@@ -4266,7 +4315,13 @@ async def _run_social_data_prepass(
     label = (answers.get(_SOCIAL_CLIENT_NAME_FIELD_ID) or "Client").strip() or "Client"
     client_block = social_audit_service.render_social_data_md(f"{label} (client)", client_results, ())
 
-    competitor_block, competitor_notes, competitor_any_data, competitor_stats = await _fetch_competitor_social_blocks(
+    (
+        competitor_block,
+        competitor_notes,
+        competitor_any_data,
+        competitor_stats,
+        competitor_samples,
+    ) = await _fetch_competitor_social_blocks(
         (answers.get(_SOCIAL_COMPETITOR_LIST_FIELD_ID) or "").strip(),
         answers.get(_SOCIAL_COMPETITOR_COUNT_FIELD_ID) or "",
     )
@@ -4284,6 +4339,13 @@ async def _run_social_data_prepass(
     document = client_block + "\n## Competitor accounts\n\n" + competitor_block + "\n"
     if all_notes:
         document += "\n### Collection notes\n\n" + "\n".join(f"- {note}" for note in all_notes) + "\n"
+    # The comparison Step 7 of the prompt reads: the same posts, counted. Absent when no competitor
+    # post was fetched, and the prompt says what to do then. See `app/services/social_intel.py`.
+    intel = social_intel_service.build_intel_md(
+        [social_intel_service.AccountSample(f"{label} (client)", True, client_results), *competitor_samples]
+    )
+    if intel:
+        document += "\n" + intel
     resolved[_SOCIAL_POST_DATA_FIELD_ID] = document
 
     return resolved, {
@@ -4409,9 +4471,18 @@ async def _generation_sse_stream(
         # or the theme brief — and whether it gets the screenshots is decided in `generation.py`.
         # A copy-only CRO run (Phase 2, or NEW PAGE mode) gets neither: see `_cro_writes_copy_only`.
         copy_only = _cro_writes_copy_only(asset_id, phase, answers)
+        image_notes: list[str] = []
         page_design = (
-            None if copy_only else await resolve_page_design(run_id, answers, client_profile, asset_id=asset_id)
+            None
+            if copy_only
+            else await resolve_page_design(
+                run_id, answers, client_profile, asset_id=asset_id, image_notes=image_notes
+            )
         )
+        # An image that failed to generate used to be a log line only. The stage still runs — the
+        # prompt is simply handed no URL for it — but the operator is told, on the card.
+        if image_notes:
+            yield _sse({"type": "image_notes", "notes": image_notes})
 
         # The client's confirmed industry, if one is on the run (or its source run). None keeps the
         # default voice, which is the prompt exactly as it was before voice packs existed.
@@ -4433,6 +4504,9 @@ async def _generation_sse_stream(
                         "available": page_template.available,
                         "reason": page_template.reason,
                         "source_url": page_template.source_url,
+                        # Which reader answered: `direct` (free) or `context.dev` (the rendered
+                        # fallback, 1 credit). Shown on the card when it was the fallback.
+                        "source": page_template.source,
                         "open_slots": len(page_template.open_slots),
                         "locked_slots": len(page_template.locked_slots),
                         "notes": page_template.notes,
@@ -4561,6 +4635,7 @@ async def _revision_sse_stream(
     run_id: str | None = None,
     business_fix: bool = False,
     client_profile: dict[str, str] | None = None,
+    source_copy: str | None = None,
 ):
     stop_reason: list[str | None] = [None]
     try:
@@ -4568,10 +4643,36 @@ async def _revision_sse_stream(
         business_facts: str | None = None
         if business_fix:
             try:
-                facts = await _business_facts(run_id, client_profile or {}, asset_id)
+                facts = await _business_facts(run_id, client_profile or {}, asset_id, phase)
                 business_facts = asset_check_service.fix_context(facts)
             except Exception as exc:  # noqa: BLE001 — a fix without facts is still the fix asked for
                 logger.warning("Refine could not read business facts for run %s: %s", run_id, exc)
+
+        # Every business fix, and every Refine of a draft holding a page, is made of exact edits —
+        # never a retyped document — and a business fix may not change the layout. See
+        # `page_revision.py`: retyping, and then layout-changing edits, are what reshuffled pages.
+        if page_revision_service.uses_edit_revision(asset_id, previous_draft, business_fix=business_fix):
+            revised, report = await _revise_page_by_edits(
+                asset_id,
+                previous_draft,
+                note,
+                phase,
+                chat_session_id=chat_session_id,
+                run_id=run_id,
+                voice=voice,
+                business_facts=business_facts,
+                source_copy=source_copy,
+                lock_layout=business_fix,
+            )
+            yield _sse(report.as_event())
+            # The whole document, in pieces: the client builds the new card from deltas exactly as it
+            # does for every other revision, so nothing downstream needs a second path.
+            for start in range(0, len(revised), _EDIT_REVISION_CHUNK):
+                yield _sse({"type": "delta", "text": revised[start : start + _EDIT_REVISION_CHUNK]})
+            # Complete by construction: the draft was never cut, only edited.
+            yield _sse(_done_event("end_turn"))
+            return
+
         async for delta in generate_revision_stream(
             asset_id,
             previous_draft,
@@ -4602,6 +4703,100 @@ async def _revision_sse_stream(
 
 
 _SSE_HEADERS = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
+
+_EDIT_REVISION_CHUNK = 8_000
+
+
+async def _page_source_copy(run_id: str | None) -> str | None:
+    """The run's approved CRO rewrite, for a page Refine whose card did not send its own copy.
+
+    Looked for under both keys — `cro_rewritten_copy` (a seeded document) and `cro` (an approved
+    stage, which is filed only under its asset id). See `resolve` in the readiness route.
+    """
+    if not run_id:
+        return None
+    try:
+        run_uuid = uuid.UUID(run_id)
+    except ValueError:
+        return None
+    async with get_sessionmaker()() as session:
+        for key in ("cro_rewritten_copy", "cro"):
+            found = await _latest_context_entry(session, run_uuid, key)
+            if found is not None and isinstance(found[0].value, dict):
+                content = found[0].value.get("content")
+                if isinstance(content, str) and content.strip():
+                    return content
+    return None
+
+
+async def _revise_page_by_edits(
+    asset_id: str,
+    previous_draft: str,
+    note: str,
+    phase: str,
+    *,
+    chat_session_id: str | None,
+    run_id: str | None,
+    voice,
+    business_facts: str | None,
+    source_copy: str | None,
+    lock_layout: bool = False,
+) -> tuple[str, page_revision_service.EditReport]:
+    """Ask for edits, apply them to the previous draft, and return the result with its report.
+
+    The CRO copy is a reference only for a page built from it (the design-language stages); DESIGN.md
+    only for a draft that holds a page."""
+    builds_from_copy = asset_id in DESIGN_LANGUAGE_STAGES
+    if not builds_from_copy:
+        source_copy = None
+    elif not (source_copy and source_copy.strip()):
+        source_copy = await _page_source_copy(run_id)
+    design_md: str | None = None
+    if run_id and page_revision_service.has_html_page(previous_draft):
+        try:
+            async with get_sessionmaker()() as session:
+                stored = await _stored_design_tokens(session, uuid.UUID(run_id))
+            if stored is not None:
+                design_md = str(stored[0].get("design_md") or stored[0].get("content") or "") or None
+        except Exception as exc:  # noqa: BLE001 — a reference, not a requirement (bad id, no DB)
+            logger.info("Page revision could not read DESIGN.md for run %s: %s", run_id, exc)
+
+    prompt = page_revision_service.build_edit_prompt(
+        previous_draft,
+        note,
+        voice=voice,
+        business_facts=business_facts,
+        source_copy=source_copy,
+        design_md=design_md,
+        lock_layout=lock_layout,
+    )
+    reply, stop = await generate_page_edits(
+        asset_id,
+        prompt,
+        phase,
+        on_usage=usage_service.recorder(
+            kind="revision", chat_session_id=chat_session_id, run_id=run_id, asset_id=asset_id, phase=phase
+        ),
+    )
+    edits = page_revision_service.parse_edits(reply)
+    if edits is None:
+        reason = "the edit list was cut off by the output limit" if stop == "max_tokens" else "the reply held no readable edit list"
+        logger.warning("Page revision stage=%s applied nothing: %s", asset_id, reason)
+        report = page_revision_service.EditReport(unreadable=True, layout_locked=lock_layout)
+        report.rejected.append(("", f"No change was made: {reason}. The draft is as it was; try a narrower request."))
+        return previous_draft, report
+    revised, report = page_revision_service.apply_edits(previous_draft, edits, lock_layout=lock_layout)
+    report.skipped = page_revision_service.parse_skipped(reply)
+    logger.info(
+        "Revision by edits stage=%s locked=%s edits=%d applied=%d rejected=%d skipped=%d",
+        asset_id,
+        lock_layout,
+        len(edits),
+        report.applied,
+        len(report.rejected),
+        len(report.skipped),
+    )
+    return revised, report
 
 
 def _claim_stream(kind: str, asset_id: str, payload: GenerateStageRequest | RefineStageRequest | ContinueStageRequest) -> str | None:
@@ -4749,6 +4944,7 @@ async def refine_stage_stream_route(asset_id: str, payload: RefineStageRequest) 
                 payload.run_id,
                 payload.business_fix,
                 payload.client_profile,
+                payload.source_copy,
             ),
         ),
         media_type="text/event-stream",

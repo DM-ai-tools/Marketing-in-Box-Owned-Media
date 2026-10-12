@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import { AssetExportButtons } from "../components/AssetExportButtons";
+import { AssetFileDownloads } from "../components/AssetFileDownloads";
 import { SectionBody } from "../components/AssetDocumentView";
 import { assetGlance } from "../lib/assetGlance";
 import { GlanceView } from "./visual/GlanceView";
@@ -88,6 +89,9 @@ export function AssetReader() {
           >
             <ReaderContents
               text={upgradePlainOutline(stripPromptEchoes(message.text ?? ""))}
+              // The stage's words as saved. Every file built from the document — the Markdown, the
+              // plan map, the slide deck — starts here, never from the display text above.
+              rawText={message.text ?? ""}
               assetId={message.assetId}
               phase={phase}
               // The topics this asset was built on and the ones passed over — shown in the reader
@@ -107,6 +111,7 @@ export function AssetReader() {
 
 function ReaderContents({
   text,
+  rawText,
   assetId,
   phase,
   preamble,
@@ -114,6 +119,7 @@ function ReaderContents({
   onClose,
 }: {
   text: string;
+  rawText: string;
   assetId?: string;
   phase: ReturnType<typeof usePipelineStore.getState>["phase"];
   preamble: string;
@@ -137,6 +143,8 @@ function ReaderContents({
   // template the HTML report is built with.
   const template = templateFor(assetId);
   const client = usePipelineStore((s) => s.clientProfile.client_name);
+  // Only used to look up the run's palette for a slide deck — the same run the card passes.
+  const runId = usePipelineStore((s) => s.runId);
   // The same function either way, so a section's heading, id and place in the outline never depend
   // on the view: only how its body is drawn does.
   const Body = view === "visual" ? VisualSectionBody : SectionBody;
@@ -347,8 +355,11 @@ function ReaderContents({
               view === "visual" ? <VisualSectionBody body={shown} label={label} /> : <Markdown text={shown} />
             )}
             </VisualOptionsContext.Provider>
-            <div className="mt-8 border-t border-[var(--border)] pt-4">
-              <AssetExportButtons text={text} label={label} stageNumber={stage?.stageNumber} preamble={preamble} assetId={assetId} appendix={appendix} />
+            <div className="mt-8 flex flex-wrap items-center gap-2 border-t border-[var(--border)] pt-4">
+              <AssetExportButtons text={rawText} label={label} stageNumber={stage?.stageNumber} preamble={preamble} assetId={assetId} appendix={appendix} />
+              {/* The same two files the generation card's menu offers, under the same rule: each
+                  renders nothing unless its file can actually be built from this document. */}
+              <AssetFileDownloads assetId={assetId} text={rawText} label={label} runId={runId} variant="pill" />
             </div>
           </div>
         </div>

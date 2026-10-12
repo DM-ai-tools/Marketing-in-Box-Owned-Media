@@ -150,6 +150,11 @@ class LinkManifest:
     reason: str | None = None
     links: tuple[Link, ...] = ()
     notes: list[str] = field(default_factory=list)
+    #: Every image the reference page itself serves, absolute (`<img>` / `<source>` src, data-src and
+    #: srcset candidates). The page check accepts these on a generated page — the client's own
+    #: photos and logo — alongside the run's generated `/media/{id}` images. None when the manifest
+    #: was stored before this was read, which is "not on record", not "the page had none".
+    images: tuple[str, ...] | None = None
 
     def group(self, name: str) -> tuple[Link, ...]:
         return tuple(link for link in self.links if link.group == name)
@@ -184,6 +189,7 @@ class LinkManifest:
                 }
                 for link in self.links
             ],
+            "images": list(self.images) if self.images is not None else None,
         }
 
     @classmethod
@@ -206,6 +212,7 @@ class LinkManifest:
                 for row in (value.get("links") or [])
                 if row.get("href")
             ),
+            images=tuple(value["images"]) if isinstance(value.get("images"), list) else None,
         )
 
 
@@ -399,6 +406,33 @@ def _container_for(anchor: Node, region: str, band_roles: list[tuple[Node, str]]
 # ----------------------------------------------------------------------------------------------
 
 
+_MAX_IMAGES = 300
+
+
+def reference_images(document, base_url: str = "") -> tuple[str, ...]:
+    """Every image URL the page serves, absolute and in page order. Inline `data:` images are
+    skipped: they are not URLs anything can be compared against, and nobody copies one by hand."""
+    found: list[str] = []
+    seen: set[str] = set()
+    for node in document.root.walk():
+        if node.tag not in ("img", "source"):
+            continue
+        candidates = [node.attr("src"), node.attr("data-src"), node.attr("data-lazy-src")]
+        for srcset in (node.attr("srcset"), node.attr("data-srcset")):
+            candidates += [part.strip().split(" ")[0] for part in (srcset or "").split(",")]
+        for raw in candidates:
+            raw = (raw or "").strip()
+            if not raw or raw.startswith("data:"):
+                continue
+            url = "https:" + raw if raw.startswith("//") else _absolute(raw, base_url)
+            if url not in seen:
+                seen.add(url)
+                found.append(url)
+            if len(found) >= _MAX_IMAGES:
+                return tuple(found)
+    return tuple(found)
+
+
 def extract_link_manifest(html: str, base_url: str = "") -> LinkManifest:
     """Every usable link on the page, grouped. Pure and offline; never raises."""
     if not html or not html.strip():
@@ -408,6 +442,7 @@ def extract_link_manifest(html: str, base_url: str = "") -> LinkManifest:
     except Exception as exc:  # noqa: BLE001 — an unparseable page must not fail the capture
         return LinkManifest(source_url=base_url, available=False, reason=f"the HTML could not be parsed: {exc}")
 
+    images = reference_images(document, base_url)
     nodes = _band_nodes(document.body)
     band_roles = [(node, _band_role(node, index, len(nodes))) for index, node in enumerate(nodes)]
 
@@ -471,6 +506,7 @@ def extract_link_manifest(html: str, base_url: str = "") -> LinkManifest:
             available=False,
             reason="the page has no usable links in its served HTML — it may be built by JavaScript.",
             notes=notes,
+            images=images,
         )
 
     counters: dict[str, int] = {}
@@ -491,7 +527,7 @@ def extract_link_manifest(html: str, base_url: str = "") -> LinkManifest:
                 )
             )
 
-    manifest = LinkManifest(source_url=base_url, available=True, links=tuple(links), notes=notes)
+    manifest = LinkManifest(source_url=base_url, available=True, links=tuple(links), notes=notes, images=images)
     logger.info(
         "Link manifest %s: %s",
         _host(base_url) or "(fragment)",

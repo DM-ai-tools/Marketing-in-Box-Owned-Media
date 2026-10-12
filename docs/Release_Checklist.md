@@ -42,17 +42,19 @@ Context.dev, Firecrawl, Brandfetch, SociaVault, OpenAI images, Runway fallback, 
 
 ## 2. Export formats (operator-facing)
 
-Universal Download/Share from [exportAsset.ts](../application/frontend/src/lib/exportAsset.ts): **`.md`**, or **`.html` only** when the whole document is one previewable fenced HTML block. Filename `{NN}-{slug}.md` on pipeline cards; Share uses the OS sheet or clipboard.
+Universal Download/Share from [exportAsset.ts](../application/frontend/src/lib/exportAsset.ts): **`.md`**, or **`.html` only** when the whole document is one previewable fenced HTML block. Filename `{NN}-{slug}.md` on pipeline cards; Share uses the OS sheet or clipboard. The `.md` is always the stage's saved text, verbatim, from the card and from the reader alike.
 
 | Extra | Where | Format |
 |-------|--------|--------|
+| Report | Generation-card menu and Asset Reader pills ([assetReportHtml.ts](../application/frontend/src/lib/assetReportHtml.ts)); not offered for a document that is only an HTML page | Designed, self-contained `{NN}-{slug}-report.html` (the Visual view, offline) |
 | Per-block HTML | `HtmlPreview` on mixed page outputs (`cro`, `pillar_page`, some hub/lead-magnet) | Copy + `{label}.html` (no stage prefix) |
-| Plan map | `plan_of_action` generation overflow menu only | Standalone `{title}-plan-map.html` |
-| Webinar slides | `webinar` overflow menu after `POST /pipeline/slides` probe | One deck: `{slug}-slides.pptx`; several: `webinar-slide-decks.zip` |
+| Plan map | `plan_of_action`: generation-card menu **and** Asset Reader pills ([AssetFileDownloads.tsx](../application/frontend/src/components/AssetFileDownloads.tsx)). Shown only when a map can be built from the plan | Standalone `{title}-plan-map.html` |
+| Webinar slides | `webinar`: generation-card menu **and** Asset Reader pills, after the `POST /pipeline/slides` probe. No parsable Step 5 brief, no row | One deck: one `.pptx` row. Several: one row per deck (`POST /pipeline/slides/pptx?index=N`, that deck's filename) plus **Download all** (no index → `webinar-slide-decks.zip`) |
+| Assembled page | CRO card, once an assembly exists (`replica` stream event) — `ReplicaPanel` | `{slug}-assembled.html`, read from `GET /pipeline/runs/{id}/replica/output` (never on the SSE frame). Not offered for the pillar page (design-language stage, no template) or a copy-only CRO (Phase 2 / NEW PAGE) |
 
 **Intake, not export:** CSV/XLSX (and related) on social `raw_post_data_source`.
 
-**Not shipped as UI downloads:** PDF, DOCX, generated XLSX, assembled replica HTML (`GET /pipeline/runs/{id}/replica/output` exists; **no frontend button**). Plan map and PPTX are **not** on the Asset Reader pills—only on the generation-card menu.
+**Not shipped as UI downloads:** PDF, DOCX, generated XLSX (deferred — §5).
 
 Topic-suggestion preamble is injected into **`.md` only** ([topicSuggestions.ts](../application/frontend/src/lib/topicSuggestions.ts)).
 
@@ -98,33 +100,33 @@ flowchart LR
 **Automated**
 
 - Backend: `pytest` from `application/backend` (never live Context.dev / SociaVault / OpenAI).
-- Frontend: `npm run smoke` from `application/frontend` (`smoke`, `card`, `shell`, `plan`, `gate`, `stop`, `clear`, `phase2cro`, `competitors`, `topics` — the entries in [smoke/run.mjs](../application/frontend/smoke/run.mjs)).
+- Frontend: `npm run smoke` from `application/frontend` — every entry in [smoke/run.mjs](../application/frontend/smoke/run.mjs). `exports` covers the plan map and decks on the card and in the reader, per-deck rows, and the replica download.
 
 **Operator E2E (one sample client)**
 
 1. Sign in; `/health` is `ok`.
 2. Phase 1: complete intake → generate → review → save for **ICP, CRO, Pillar Page**; later stages can skip-ahead if dependencies are present or seeded.
-3. CRO/Pillar: DESIGN.md path (or NEW PAGE); Download `.md`; HTML block download if present.
-4. Webinar: Download `.md`; if Step 5 brief parses, Download `.pptx` (or zip).
-5. Plan of Action: Download `.md` + plan-map HTML from the card menu.
+3. CRO/Pillar: DESIGN.md path (or NEW PAGE); Download `.md` and Report `.html`; HTML block download if present. CRO with a real page to rebuild: the card shows the assembly report and **Download assembled page** once `replica` arrives; a `replica_error` shows a note and the stage stays complete.
+4. Webinar: Download `.md`; if Step 5 brief parses, Download one deck by its own row (or **Download all** as a zip) — from the card menu and from the reader.
+5. Plan of Action: Download `.md` + plan-map HTML from the card menu and from the reader.
 6. Stage 10: with `SOCIO_VAULT` unset, prepass skips cleanly; with key, posts land without clobbering a pasted CSV.
 7. Stop mid-stream: billing stops; approved cards stay; resume does not offer the stopped stage as “continue”.
 8. Clear Phase 2: Phase 1 cards/run untouched; button names the phase.
 9. Phase 2: parent run + sub-service; CRO asks the short field set; pillar is about the **sub-service**.
-10. Production-only: generated images in HTML use `BACKEND_PUBLIC_URL`, not `127.0.0.1`.
+10. Production-only: generated images in HTML use `BACKEND_PUBLIC_URL`, not `127.0.0.1`. A URL stored on the loopback default is rewritten onto the current base when read; with `APP_ENV=production` and no `BACKEND_PUBLIC_URL`, startup logs an error. A localhost `<img>` is a must-fix in the page check.
+11. An image brief that fails to generate shows a note on the card ("Some images were not generated"); the stage still completes, and the next qualifying stage retries.
 
 **Fail the release if**
 
 - Generation works without Postgres or Anthropic (it must not).
 - A vendor key appears in the Vite bundle or logs.
 - Download of a mixed CRO/pillar document is a single `.html` that drops the audit prose.
-- Replica assembled HTML is advertised in the UI but unwired (API-only is acceptable if undocumented as an operator feature).
+- The assembled-page download appears on a stage that did not assemble (pillar page, copy-only CRO), or a `replica_error` marks the stage failed.
 
 ---
 
 ## 5. Deferred vs original PRD (not release blockers)
 
-- Automated Word/PDF renderer and SharePoint/Drive upload (session context post-MVP Phase 2).
+- Automated Word/PDF renderer, generated XLSX, and SharePoint/Drive upload (session context post-MVP Phase 2).
 - Redis draft cache / Celery workers.
-- UI download of assembled replica HTML; per-deck PPTX `?index=` (API exists; UI always zips multiples).
 - Refresh [application/backend/README.md](../application/backend/README.md) (“skeleton only”, Redis required) and add `.env.example`.

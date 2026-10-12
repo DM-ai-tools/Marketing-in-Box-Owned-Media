@@ -188,3 +188,61 @@ async def test_nothing_is_persisted_when_every_generation_fails(monkeypatch):
 
 async def _async(value):
     return value
+
+
+# ----------------------------------------------------------------------------------------------
+# Failures reach the operator: `image_notes`
+# ----------------------------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_total_failure_is_reported_and_still_not_cached(monkeypatch):
+    async def fake_generate_all(_briefs, _session):
+        return (), ("The hero image could not be generated: out of credits",)
+
+    monkeypatch.setattr(openai_image_client, "is_configured", lambda: True)
+    monkeypatch.setattr(image_briefs, "generate_all", fake_generate_all)
+    session = _FakeSession()
+    stored_value = {"design_md": "x", "image_briefs": [{"role": "hero", "size": "1536x1024", "prompt": "p"}]}
+    notes: list[str] = []
+
+    result = await pipeline_router._ensure_generated_images(
+        _session_factory(session), RUN_UUID, stored_value, "pillar_page", notes
+    )
+
+    # Not cached, so the next qualifying stage retries...
+    assert result == stored_value
+    assert session.added == [] and not session.committed
+    # ...and the operator is told, both what failed and that it will be tried again.
+    assert notes[0] == "The hero image could not be generated: out of credits"
+    assert any("tried again" in n for n in notes[1:])
+
+
+@pytest.mark.asyncio
+async def test_one_failed_brief_is_reported_and_the_others_are_kept(monkeypatch):
+    async def fake_generate_all(_briefs, _session):
+        return (
+            (GeneratedImage(role="hero", size="1536x1024", prompt="p", url="https://api.example.com/media/a"),),
+            ("The proof image could not be generated: content policy",),
+        )
+
+    monkeypatch.setattr(openai_image_client, "is_configured", lambda: True)
+    monkeypatch.setattr(image_briefs, "generate_all", fake_generate_all)
+    monkeypatch.setattr(pipeline_router, "_next_version", lambda *_a, **_kw: _async(2))
+    session = _FakeSession()
+    stored_value = {
+        "design_md": "x",
+        "image_briefs": [
+            {"role": "hero", "size": "1536x1024", "prompt": "p"},
+            {"role": "proof", "size": "1024x1024", "prompt": "q"},
+        ],
+    }
+    notes: list[str] = []
+
+    result = await pipeline_router._ensure_generated_images(
+        _session_factory(session), RUN_UUID, stored_value, "pillar_page", notes
+    )
+
+    assert [g["role"] for g in result["generated_images"]] == ["hero"]
+    assert session.committed
+    assert notes == ["The proof image could not be generated: content policy"]

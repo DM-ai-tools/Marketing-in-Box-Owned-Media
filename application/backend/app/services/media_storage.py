@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import uuid
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -58,6 +59,58 @@ def _public_base_url() -> str:
     return os.environ.get(PUBLIC_BASE_URL_ENV, "").strip() or _DEFAULT_PUBLIC_BASE_URL
 
 
+def media_url(asset_id: uuid.UUID | str) -> str:
+    """The absolute URL `GET /media/{id}` serves this asset at, on the *current* public base."""
+    return f"{_public_base_url().rstrip('/')}{MEDIA_URL_PREFIX}/{asset_id}"
+
+
+#: A media URL written while `BACKEND_PUBLIC_URL` was unset: the loopback default, or the same
+#: thing typed as `localhost`. Only these two hosts on the dev port — a real public host is left as
+#: stored, because it was correct when written and rewriting it would move a working link.
+_LOOPBACK_MEDIA_URL = re.compile(
+    r"^https?://(?:127\.0\.0\.1|localhost):8001" + re.escape(MEDIA_URL_PREFIX) + r"/([0-9a-fA-F-]{32,36})/?$"
+)
+
+
+def current_media_url(url: str) -> str:
+    """`url` with a loopback media base swapped for the current public base, else unchanged.
+
+    Image URLs are stored absolute on the run and copied into generated HTML. One stored while the
+    backend had no `BACKEND_PUBLIC_URL` points at `127.0.0.1:8001` — the container's own loopback,
+    unreachable from anywhere else — and nothing would ever correct it. So every read that puts a
+    stored URL in a prompt or returns it to the UI goes through here. The bytes never moved: they are
+    in `media_assets` under the same id, served at `GET /media/{id}` on whatever host this is now.
+    """
+    match = _LOOPBACK_MEDIA_URL.match(url.strip()) if url else None
+    return media_url(match.group(1)) if match else url
+
+
+def public_base_url_problem() -> str | None:
+    """Why generated image links would be unreachable on this deployment, or None.
+
+    Only a production deployment with no `BACKEND_PUBLIC_URL` is a problem: there the loopback
+    default is the container's own address. Locally the default is right. No host is guessed — the
+    fix is a setting, and inventing one would hand out links to somebody else's domain.
+    """
+    env = (os.environ.get("APP_ENV") or "local").strip().lower()
+    if env == "production" and not os.environ.get(PUBLIC_BASE_URL_ENV, "").strip():
+        return (
+            f"APP_ENV=production but {PUBLIC_BASE_URL_ENV} is not set: every generated image link will "
+            f"point at {_DEFAULT_PUBLIC_BASE_URL}, which is unreachable outside this container. Set "
+            f"{PUBLIC_BASE_URL_ENV} to this backend's public URL (on Railway: "
+            "https://${{RAILWAY_PUBLIC_DOMAIN}})."
+        )
+    return None
+
+
+def warn_if_public_base_url_missing() -> bool:
+    """Log `public_base_url_problem` at error level. Returns whether it did. Called on startup."""
+    problem = public_base_url_problem()
+    if problem:
+        logger.error(problem)
+    return problem is not None
+
+
 def save_generated_image(session: AsyncSession, data: bytes, *, output_format: str) -> str:
     """Stage a `MediaAsset` row on `session` and return the absolute URL it will be served at.
 
@@ -69,6 +122,6 @@ def save_generated_image(session: AsyncSession, data: bytes, *, output_format: s
     """
     asset_id = uuid.uuid4()
     session.add(MediaAsset(id=asset_id, data=data, content_type=f"image/{output_format.lstrip('.')}"))
-    url = f"{_public_base_url().rstrip('/')}{MEDIA_URL_PREFIX}/{asset_id}"
+    url = media_url(asset_id)
     logger.info("Staged generated image bytes=%s url=%s", len(data), url)
     return url

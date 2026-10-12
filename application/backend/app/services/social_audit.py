@@ -188,7 +188,7 @@ def _fill_gaps(links: dict[str, str], found: dict[str, str]) -> None:
             links[platform] = url
 
 
-async def resolve_competitor_handles(domain: str) -> tuple[SocialAccount, ...]:
+async def resolve_competitor_handles(domain: str, *, readers: list[str] | None = None) -> tuple[SocialAccount, ...]:
     """Resolve a competitor's bare domain (from `competitor_list`'s own `domain` field) to the
     social accounts `sociavault_client` can fetch real posts from.
 
@@ -212,19 +212,31 @@ async def resolve_competitor_handles(domain: str) -> tuple[SocialAccount, ...]:
 
     Returns `()` when nothing found any social links — a competitor whose site links to no social
     profile is a real, statable finding, not an error.
+
+    `readers`, when given, collects the name of each tier that found at least one profile, so the
+    transcript can say when a paid fallback answered rather than the free read.
     """
     url = _domain_url(domain)
     links: dict[str, str] = {}
 
+    def note(reader: str, before: int) -> None:
+        if readers is not None and len(links) > before:
+            readers.append(reader)
+
+    before = len(links)
     _fill_gaps(links, social_profile_links(await _read_site_links(url)))
+    note("the free page read", before)
 
     if len(links) < len(sociavault_client.PLATFORMS) and firecrawl_client.is_configured():
+        before = len(links)
         try:
             _fill_gaps(links, social_profile_links(await firecrawl_client.scrape_links(url)))
         except firecrawl_client.FirecrawlError as exc:
             logger.info("Competitor handle resolution: firecrawl failed for %r: %s", domain, exc)
+        note("Firecrawl", before)
 
     if len(links) < len(sociavault_client.PLATFORMS) and context_dev.is_configured():
+        before = len(links)
         try:
             brand = await context_dev.retrieve_brand(domain)
             found: dict[str, str] = {}
@@ -233,6 +245,7 @@ async def resolve_competitor_handles(domain: str) -> tuple[SocialAccount, ...]:
             _fill_gaps(links, found)
         except context_dev.ContextDevError as exc:
             logger.info("Competitor handle resolution: context.dev failed for %r: %s", domain, exc)
+        note("Context.dev", before)
 
     # Read off the competitor's own site, so these are profile URLs. Instagram's endpoint wants a
     # bare username and 400s on a URL; Facebook and LinkedIn take the URL as it is.

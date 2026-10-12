@@ -39,9 +39,8 @@ from collections import Counter
 from dataclasses import dataclass, field, replace
 from urllib.parse import urljoin
 
-import httpx
 
-from app.services.scraper import ScrapeError, _fetch_html, _request_headers, normalize_url
+from app.services.scraper import ScrapeError, _fetch_html, fetch_asset, normalize_url
 
 logger = logging.getLogger(__name__)
 
@@ -50,7 +49,6 @@ logger = logging.getLogger(__name__)
 # spent on the first few — which is where the theme's own sheet sits.
 _MAX_STYLESHEETS = 8
 _MAX_CSS_BYTES = 1_500_000
-_CSS_TIMEOUT = 15.0
 
 _STYLE_BLOCK = re.compile(r"<style[^>]*>(.*?)</style>", re.I | re.S)
 _STYLE_ATTR = re.compile(r"""\bstyle\s*=\s*["']([^"']+)["']""", re.I)
@@ -299,25 +297,17 @@ async def _fetch_stylesheets(urls: list[str], base_url: str) -> tuple[list[str],
     if len(urls) > _MAX_STYLESHEETS:
         notes.append(f"Read the first {_MAX_STYLESHEETS} of {len(urls)} stylesheets.")
 
-    headers = _request_headers(
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/126.0.0.0 Safari/537.36"
-    )
-    headers["Accept"] = "text/css,*/*;q=0.1"
-    headers["Referer"] = base_url
+    # Same request policy as the page itself (`scraper.fetch_asset`): agents, bot-wall retry,
+    # challenge headers, timeout, redirect cap and a public-host check on every hop.
+    async def one(url: str) -> str:
+        try:
+            sheet = await fetch_asset(url, accept="text/css,*/*;q=0.1", referer=base_url, max_bytes=_MAX_CSS_BYTES)
+        except Exception as exc:  # noqa: BLE001 — one missing sheet must not lose the others
+            logger.info("Could not read stylesheet %s (%s)", url, exc)
+            return ""
+        return sheet.content.decode(sheet.encoding or "utf-8", errors="replace")
 
-    async with httpx.AsyncClient(follow_redirects=True, timeout=_CSS_TIMEOUT, headers=headers) as client:
-
-        async def one(url: str) -> str:
-            try:
-                response = await client.get(url)
-                response.raise_for_status()
-            except Exception as exc:  # noqa: BLE001 — one missing sheet must not lose the others
-                logger.info("Could not read stylesheet %s (%s)", url, exc)
-                return ""
-            return response.content[:_MAX_CSS_BYTES].decode(response.encoding or "utf-8", errors="replace")
-
-        texts = await asyncio.gather(*(one(url) for url in wanted))
+    texts = await asyncio.gather(*(one(url) for url in wanted))
 
     read = [t for t in texts if t]
     if len(read) < len(wanted):
@@ -811,23 +801,19 @@ async def _measure_logo(logo: Logo, base_url: str) -> Logo:
     if logo.svg_markup or (logo.data_uri and logo.url.startswith("data:")):
         return logo
 
-    headers = _request_headers(
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/126.0.0.0 Safari/537.36"
-    )
-    headers["Accept"] = "image/avif,image/webp,image/svg+xml,image/*,*/*;q=0.8"
-    headers["Referer"] = base_url
-
     try:
-        async with httpx.AsyncClient(follow_redirects=True, timeout=_CSS_TIMEOUT, headers=headers) as client:
-            response = await client.get(logo.url)
-            response.raise_for_status()
-            payload = response.content[:_MAX_LOGO_FETCH_BYTES]
+        fetched = await fetch_asset(
+            logo.url,
+            accept="image/avif,image/webp,image/svg+xml,image/*,*/*;q=0.8",
+            referer=base_url,
+            max_bytes=_MAX_LOGO_FETCH_BYTES,
+        )
+        payload = fetched.content
     except Exception as exc:  # noqa: BLE001 — an unreachable logo is simply not a logo
         logger.info("Could not fetch logo %s (%s)", logo.url, exc)
         return replace(logo, byte_size=None, mime_type=None, url="")
 
-    mime = (response.headers.get("content-type") or "").split(";")[0].strip().lower()
+    mime = fetched.content_type
     if not mime.startswith("image/"):
         suffix = "." + logo.url.rsplit(".", 1)[-1].lower().split("?")[0] if "." in logo.url else ""
         mime = _IMAGE_MIME_BY_EXT.get(suffix, "")

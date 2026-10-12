@@ -176,6 +176,59 @@ Regulated Field/Compliance Body's claims standard — no fabricated statistics o
 claims; use placeholder brackets (e.g. `[insert real client stat once available]`) wherever a real
 proof point would strengthen a post but wasn't supplied.
 
+# STEP 7 — COMPETITOR CONTENT INTELLIGENCE & OPTIMISATION
+
+Steps 1-6 describe what every account posts. This step asks what actually earned competitors
+interaction, and changes the client's content to match, with a reason for every change. It is added
+after Step 6 and changes nothing above it.
+
+Its evidence is the "Competitor content intelligence (measured)" section inside the Raw Post Data
+Source input: tables A-G, computed from the same sampled posts. Use its numbers as given. Do not
+recount them, and do not invent any number it does not contain. If that section is absent, compute
+what you can from a supplied dataset that carries engagement counts; where neither exists, write
+`N/D (insufficient sample)` in each table below and keep 7.5 to the changes Steps 2-4 already
+evidence.
+
+**Leads are not visible in public post data.** Interaction (likes, comments, shares, views) is what
+was measured. Comments and posts carrying a direct-response CTA are the closest proxies for lead
+intent. Call them that, and never report interaction as leads or as conversions.
+
+  7.1 What Earned Interaction — the content types and caption signals that out-performed, read
+      from tables B and C. State each one with its number (e.g. "Instagram reels: competitor mean
+      engagement 18.8 against 6.2 for single images"). Signals are keyword-tagged, so confirm each one
+      against the captions quoted in tables D and E before relying on it, and drop any that the
+      captions do not bear out.
+
+  7.2 Competitor Offers & Calls to Action — table: competitor, the offers, lead magnets and CTAs seen
+      (quoted from table E), the CTA type (lead magnet / consultation / direct contact / link in bio
+      / none), and the interaction those posts earned. Also name any offer a competitor promotes that
+      the client has no equivalent of in its Service/Offering List.
+
+  7.3 Competitor Marketing Strategy in Practice — one row per competitor: the strategy its posts
+      actually show (cadence and dormancy from table A, format bias from table B, cross-posting from
+      table F, the people/proof/timely/offer mix from table C) and the one thing it does that most
+      plausibly explains its best posts in table D. Every row cites a number or a quoted post.
+
+  7.4 Lead-Intent Signals — which competitors pair content with a direct-response CTA, how often,
+      and how those posts' comments compare with their other posts. State plainly that this is
+      intent, not leads.
+
+  7.5 Optimisation Plan for the Client — table: change (what to post differently), how to do it
+      on which platform, justification (the measured number from tables A-F and the competitor post
+      or posts it comes from), expected effect (stated as a hypothesis to test, never a promised
+      outcome), and the KPI that would confirm it (e.g. comments per post, reel median views).
+      Rank by how directly the change connects to lead intent, as Step 4 does. Every change must
+      use only the client's real service lines and brand voice. A competitor's offer may be adapted
+      only as a recommendation for the client to confirm, never written as if the client already
+      offers it.
+
+  7.6 Optimised Rewrites of the Client's Own Posts — take the client's lowest-interaction posts
+      from table G (3-5 of them). For each give: the original caption verbatim, an optimised
+      rewrite for the same platform, what changed, and a justification naming the 7.5 change and
+      the measured evidence behind it. Apply the Regulated Field/Compliance Body's claims standard
+      exactly as Step 6 does, with placeholder brackets wherever a real proof point is needed but
+      was not supplied.
+
 # OUTPUT FORMAT
 
 Deliver as **one Excel workbook per account** — the client's own page plus each of the N
@@ -220,6 +273,7 @@ workbook) covering:
   4. Consolidated Gap Analysis: The Client's Own Page (Step 4)
   5. Recommended Content Strategy (Step 5)
   6. Sample Social Media Posts (Step 6)
+  7. Competitor Content Intelligence & Optimisation (Step 7) — sections 7.1-7.6, after Step 6
 
 This keeps the per-account raw data in filterable, sortable spreadsheets (what was actually asked
 for) while the comparative synthesis and generated posts — which aren't naturally tabular — stay in
@@ -243,6 +297,8 @@ prose.
   - Apply the Regulated Field/Compliance Body's evidencing standard to every generated sample post.
   - If the Competitor List is missing entirely, ask up to 3 questions FIRST. Otherwise proceed
     immediately.
+  - Every change in Step 7.5 and every rewrite in Step 7.6 must carry a justification backed by a
+    measured number or a quoted competitor post. Interaction is never reported as leads.
 
-Now proceed: resolve all context per Step 0, then execute Steps 1 through 6 in order for the Client
+Now proceed: resolve all context per Step 0, then execute Steps 1 through 7 in order for the Client
 and the top N competitors named/selected in the inputs above.

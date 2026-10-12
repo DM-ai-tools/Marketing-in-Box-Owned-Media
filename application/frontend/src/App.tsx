@@ -2,6 +2,7 @@ import { useEffect } from "react";
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import { AssetReader } from "./pipeline/AssetReader";
 import { ChatDeleteDialog } from "./pipeline/ChatDeleteDialog";
+import { GenerationDeleteDialog } from "./pipeline/GenerationDeleteDialog";
 import { ChatHistorySidebar } from "./pipeline/ChatHistorySidebar";
 import { FaultDialog } from "./pipeline/FaultDialog";
 import { GenerationStream } from "./pipeline/GenerationStream";
@@ -115,6 +116,8 @@ function App() {
       {/* Root-mounted for a different reason: the sidebar that raises it is a drawer below `xl`,
           and a transformed ancestor would become the containing block for the fixed overlay. */}
       <ChatDeleteDialog />
+      {/* Raised from a generation card's ⋯ menu; root-mounted because the card animates on transform. */}
+      <GenerationDeleteDialog />
       {/* Raised from the pipeline store when a sub-service lands after the plan was approved. */}
       <PlanRerunDialog />
 

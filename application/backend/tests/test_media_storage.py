@@ -62,3 +62,67 @@ def test_two_saves_never_collide_on_id():
 
     assert first != second
     assert session.added[0].id != session.added[1].id
+
+
+# ---------- loopback URLs written before BACKEND_PUBLIC_URL was set ----------
+
+_ID = "3f2b8c1e-9a4d-4e7b-8c1a-2d5e6f708192"
+
+
+def test_a_stored_loopback_url_is_rewritten_onto_the_current_public_base(monkeypatch):
+    monkeypatch.setenv(media_storage.PUBLIC_BASE_URL_ENV, "https://api.example.com/")
+    for stored in (f"http://127.0.0.1:8001/media/{_ID}", f"http://localhost:8001/media/{_ID}"):
+        assert media_storage.current_media_url(stored) == f"https://api.example.com/media/{_ID}"
+
+
+def test_a_real_public_host_is_left_as_stored(monkeypatch):
+    monkeypatch.setenv(media_storage.PUBLIC_BASE_URL_ENV, "https://api.example.com")
+    stored = f"https://old-deploy.up.railway.app/media/{_ID}"
+    assert media_storage.current_media_url(stored) == stored
+    # Not a media URL at all, or a loopback on some other port: not this backend's link, untouched.
+    assert media_storage.current_media_url("http://127.0.0.1:5173/logo.png") == "http://127.0.0.1:5173/logo.png"
+    assert media_storage.current_media_url("") == ""
+
+
+def test_with_no_public_base_a_loopback_url_stays_loopback(monkeypatch):
+    monkeypatch.delenv(media_storage.PUBLIC_BASE_URL_ENV, raising=False)
+    assert media_storage.current_media_url(f"http://localhost:8001/media/{_ID}") == f"http://127.0.0.1:8001/media/{_ID}"
+
+
+def test_a_new_url_is_written_on_the_current_public_base(monkeypatch):
+    monkeypatch.setenv(media_storage.PUBLIC_BASE_URL_ENV, "https://api.example.com")
+    url = media_storage.save_generated_image(_FakeSession(), b"x", output_format="png")
+    assert url.startswith("https://api.example.com/media/")
+
+
+def test_stored_images_reach_the_prompt_on_the_public_base(monkeypatch):
+    from app.routers.pipeline import _generated_images_from_stored
+
+    monkeypatch.setenv(media_storage.PUBLIC_BASE_URL_ENV, "https://api.example.com")
+    (image,) = _generated_images_from_stored(
+        [{"role": "hero", "size": "1536x1024", "prompt": "p", "url": f"http://127.0.0.1:8001/media/{_ID}"}]
+    )
+    assert image.url == f"https://api.example.com/media/{_ID}"
+
+
+# ---------- the startup warning ----------
+
+
+def test_production_without_a_public_base_logs_an_error(monkeypatch, caplog):
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.delenv(media_storage.PUBLIC_BASE_URL_ENV, raising=False)
+    with caplog.at_level("ERROR", logger=media_storage.logger.name):
+        assert media_storage.warn_if_public_base_url_missing() is True
+    assert any("BACKEND_PUBLIC_URL" in r.getMessage() and "unreachable" in r.getMessage() for r in caplog.records)
+
+
+def test_no_warning_locally_or_when_the_base_is_set(monkeypatch, caplog):
+    monkeypatch.delenv(media_storage.PUBLIC_BASE_URL_ENV, raising=False)
+    monkeypatch.setenv("APP_ENV", "local")
+    with caplog.at_level("ERROR", logger=media_storage.logger.name):
+        assert media_storage.warn_if_public_base_url_missing() is False
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv(media_storage.PUBLIC_BASE_URL_ENV, "https://api.example.com")
+    with caplog.at_level("ERROR", logger=media_storage.logger.name):
+        assert media_storage.warn_if_public_base_url_missing() is False
+    assert not caplog.records

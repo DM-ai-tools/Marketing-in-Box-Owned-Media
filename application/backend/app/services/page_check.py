@@ -17,8 +17,9 @@ import the checker (which imports it).
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 from app.services.html_dom import Node, parse_html, render
 from app.services.link_manifest import LinkManifest, social_platform
@@ -40,10 +41,20 @@ _PLACEHOLDER_SRC = re.compile(
     re.IGNORECASE,
 )
 _STOCK_SRC = re.compile(r"unsplash\.com|pexels\.com|pixabay\.com|shutterstock\.com|istockphoto\.com|gettyimages\.", re.I)
+#: An image served from this machine. Fine while developing; in a delivered page it is a picture
+#: nobody else can load — the failure `media_storage.current_media_url` exists to prevent.
+_LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "0.0.0.0", "::1"}
+_MEDIA_ID = re.compile(r"/media/([0-9a-fA-F-]{32,36})/?$")
 _HEX = re.compile(r"#(?:[0-9a-fA-F]{6}|[0-9a-fA-F]{3})\b")
 _RULE_BODY = re.compile(r"([^{}]+)\{([^{}]*)\}")
 _FIXED_WIDTH = re.compile(r"(?<![\w-])width\s*:\s*(\d{3,4})px", re.IGNORECASE)
 _NEUTRAL_EXTREMES = {"#ffffff", "#000000"}
+
+#: A marker the page prompts leave where a fact was missing: `[CLIENT TO CONFIRM: …]`, and the
+#: `[TESTIMONIAL PLACEHOLDER]`-style ones the build standards name beside it.
+_UNCONFIRMED = re.compile(r"\[\s*(?:CLIENT TO CONFIRM|[A-Z][A-Z /&-]{0,40}PLACEHOLDER)\b[^\]]{0,600}\]")
+#: Every marker is listed, not the usual six: each is a separate question with its own answer.
+_MAX_UNCONFIRMED = 25
 
 #: Penalty per finding when scoring. A deterministic score, so it moves only when the page does.
 _PENALTY = {"error": 15, "warn": 5, "info": 1}
@@ -97,9 +108,18 @@ def _expand(hex_value: str) -> str:
     return value
 
 
-def check_page(raw: str, manifest: LinkManifest | None, design_md: str = "") -> tuple[list[PageIssue], list[str]]:
+def check_page(
+    raw: str,
+    manifest: LinkManifest | None,
+    design_md: str = "",
+    *,
+    generated_images: Iterable[str] = (),
+) -> tuple[list[PageIssue], list[str]]:
     """The page's issues, and which facts they were checked against. `([], [])` when the draft holds
-    no HTML page — a pillar page draft always should, and the caller reports that."""
+    no HTML page — a pillar page draft always should, and the caller reports that.
+
+    `generated_images` are the run's own `/media/{id}` URLs. With them and the manifest's
+    `images`, an `<img>` whose source is neither is flagged as possibly invented."""
     html = extract_page_html(raw)
     if not html.strip():
         return [], []
@@ -112,8 +132,8 @@ def check_page(raw: str, manifest: LinkManifest | None, design_md: str = "") -> 
     used: list[str] = []
     counts: dict[str, int] = {}
 
-    def add(key: str, severity: str, quote: str, why: str, fix: str) -> None:
-        if counts.get(key, 0) >= _MAX_PER_RULE:
+    def add(key: str, severity: str, quote: str, why: str, fix: str, *, limit: int = _MAX_PER_RULE) -> None:
+        if counts.get(key, 0) >= limit:
             return
         counts[key] = counts.get(key, 0) + 1
         issues.append(PageIssue(severity, quote, why, fix))
@@ -198,6 +218,9 @@ def check_page(raw: str, manifest: LinkManifest | None, design_md: str = "") -> 
                 )
 
     # -- Images --------------------------------------------------------------------------------
+    known_sources = _KnownImages(manifest, generated_images)
+    if known_sources.generated_ids:
+        used.append("the run's generated images")
     for img in (n for n in nodes if n.tag == "img"):
         src = (img.attr("src") or img.attr("data-src")).strip()
         if not src or _PLACEHOLDER_SRC.search(src):
@@ -219,6 +242,24 @@ def check_page(raw: str, manifest: LinkManifest | None, design_md: str = "") -> 
                 "Uses a stock-photo URL rather than the client's own or a generated image.",
                 "Replace it with a supplied image URL.",
             )
+        elif _is_loopback(src):
+            add(
+                "img-localhost",
+                "error",
+                _quote(img),
+                f'The image is served from this machine (src="{src}"), so nobody else can load it.',
+                "Use the run's generated image URL on the public host (BACKEND_PUBLIC_URL), or the "
+                "reference page's own image.",
+            )
+        elif known_sources.unknown(src):
+            add(
+                "img-unknown",
+                "warn",
+                _quote(img),
+                "This image is neither one of the run's generated images nor an image on the "
+                "reference page, so its URL may be invented and broken.",
+                "Use a generated image URL from the prompt, or an image the reference page serves.",
+            )
         if "alt" not in img.attrs:
             add("img-alt", "warn", _quote(img), "An image with no alt attribute.", 'Add descriptive alt text (or alt="" if decorative).')
         if not (img.attr("width") and img.attr("height")) and "aspect-ratio" not in img.attr("style"):
@@ -229,6 +270,29 @@ def check_page(raw: str, manifest: LinkManifest | None, design_md: str = "") -> 
                 "An image with no width/height, so the page shifts as it loads.",
                 "Add width and height attributes.",
             )
+
+    # -- Unanswered questions to the client ---------------------------------------------------
+    # The page prompts write `[CLIENT TO CONFIRM: …]` instead of inventing a fact, and the build
+    # standards keep the marker visible so it is caught. This is where it is caught: a marker still
+    # on the page is a question a visitor would read. Each one is listed — the operator works
+    # through them — up to a cap well past any real page. Comments are dropped by the parser and
+    # script/style bodies are not page text, so only a marker a visitor would see counts.
+    seen_markers: set[str] = set()
+    for match in _UNCONFIRMED.finditer(document.root.text_content()):
+        marker = match.group(0)
+        if marker in seen_markers:
+            continue
+        seen_markers.add(marker)
+        add(
+            "unconfirmed",
+            "error",
+            marker[:_QUOTE_CHARS],
+            "An unanswered question to the client is still on the page, where visitors would read it.",
+            "Confirm it with the client, then Refine with the answer so the marker becomes real copy. "
+            "Sent to Refine without an answer, the unconfirmed claim is taken out of the page — never "
+            "asserted — and the marker removed.",
+            limit=_MAX_UNCONFIRMED,
+        )
 
     # -- Document ------------------------------------------------------------------------------
     def first(tag: str) -> Node | None:
@@ -370,6 +434,57 @@ def _sub_menu_always_open(css: str, sub_menus: list[Node]) -> list[tuple[str, st
                 "at least as specific.",
             ))
     return found
+
+
+def _is_loopback(src: str) -> bool:
+    try:
+        host = (urlparse(src).hostname or "").lower()
+    except ValueError:
+        return False
+    return host in _LOOPBACK_HOSTS
+
+
+class _KnownImages:
+    """The image sources a generated page may use: the run's own generated images (matched on their
+    `/media/{id}`, whatever host they were written with) and the images the reference page serves.
+
+    With no fact at all on record, nothing is "unknown" — the rule does not run rather than flag
+    every image. With generated images but a manifest stored before it listed images, an image on
+    the reference page's own host is accepted, since the page cannot be asked which images it had.
+    """
+
+    def __init__(self, manifest: LinkManifest | None, generated: Iterable[str]) -> None:
+        self.base = manifest.source_url if manifest is not None else ""
+        self.generated_ids = {
+            m.group(1).lower() for url in generated if (m := _MEDIA_ID.search(urlparse(url).path))
+        }
+        self.reference = {_bare(u) for u in (manifest.images or ())} if manifest is not None else set()
+        self.reference_known = manifest is not None and manifest.images is not None
+        self.reference_host = (urlparse(self.base).hostname or "").lower().removeprefix("www.")
+
+    def unknown(self, src: str) -> bool:
+        if src.startswith("data:"):
+            return False
+        if not self.generated_ids and not self.reference_known:
+            return False
+        if src.startswith("//"):
+            url = "https:" + src
+        else:
+            url = urljoin(self.base, src) if self.base else src
+        media = _MEDIA_ID.search(urlparse(url).path)
+        if media and media.group(1).lower() in self.generated_ids:
+            return False
+        if _bare(url) in self.reference:
+            return False
+        if not self.reference_known and self.reference_host:
+            return (urlparse(url).hostname or "").lower().removeprefix("www.") != self.reference_host
+        return True
+
+
+def _bare(url: str) -> str:
+    """A URL compared without its scheme, query or trailing slash — CDNs vary all three."""
+    parsed = urlparse(url)
+    return f"{(parsed.hostname or '').lower().removeprefix('www.')}{parsed.path.rstrip('/')}"
 
 
 def _raw_text(node: Node) -> str:

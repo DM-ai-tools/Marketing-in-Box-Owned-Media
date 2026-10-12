@@ -32,6 +32,13 @@ superseded, interrupted, failed, refining — without a browser or a new depende
   offers, the SMS sequence, the lead-magnet winner, the funnel flow, kanban and heat table, and the
   webinar run of show), and gives each table rule a positive and a negative case. Finally, the reader
   opens in Visual, Text is the old markup, and grid cards carry the glance.
+- `deleteCard.tsx` — "Delete this card" on a generation card: a draft goes (the last open draft
+  leaves a "draft deleted" card with Start again), a refined draft takes its note with it and
+  reopens the draft it came from, the stage's only approved card is refused, and the modal.
+- `exports.tsx` — the plan map and the slide decks on the generation card and in the reader (one
+  shared component, shown only when the file can be built), one row per deck plus "all", the
+  `?index=` download, the replica events reaching the card with a download only once an assembly
+  exists, a `replica_error` that leaves the stage complete, and image-failure notes.
 - `plainOutline.tsx` — `lib/plainOutline.ts` on the real plain-text Phase 2 ICP in `manual_execution/`:
   it splits into its sixteen sections with every word kept, and every Markdown output in the
   corpus comes back byte-identical.

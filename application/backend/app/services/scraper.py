@@ -439,6 +439,75 @@ async def _fetch_html(url: str) -> tuple[str, str]:
     raise ScrapeError(f"{url} redirected more than {_MAX_REDIRECTS} times.")
 
 
+@dataclass(frozen=True)
+class FetchedAsset:
+    """One non-page resource a reader needs alongside the HTML: a stylesheet, a logo file."""
+
+    url: str
+    content: bytes
+    content_type: str
+    encoding: str | None
+
+
+async def fetch_asset(
+    url: str,
+    *,
+    accept: str,
+    referer: str | None = None,
+    max_bytes: int = _MAX_BYTES,
+) -> FetchedAsset:
+    """Fetch a stylesheet or image under the same request policy as `_fetch_html`.
+
+    The design reader used to open its own client for these, with a hard-coded browser agent,
+    httpx's default of 20 redirects and no host check on any hop. This is the one policy instead:
+    the honest agent first and the browser agent only on a bot-wall status, the same challenge
+    headers, the same timeout and redirect cap, and every hop re-validated as a public host.
+
+    Not a page reader: no content-type gate (a logo is not text/html) and no thin-content rule.
+    Raises `ScrapeError`, which a caller reading several assets treats as "this one is missing".
+    """
+    current = url
+    async with httpx.AsyncClient(follow_redirects=False, timeout=_TIMEOUT_SECONDS) as client:
+        for _ in range(_MAX_REDIRECTS + 1):
+            _assert_public_host(current)
+
+            def headers(agent: str) -> dict[str, str]:
+                out = {**_request_headers(agent), "Accept": accept}
+                if referer:
+                    out["Referer"] = referer
+                return out
+
+            try:
+                response = await client.get(current, headers=headers(_USER_AGENT))
+                if response.status_code in _BOT_WALL_STATUSES:
+                    response = await client.get(current, headers=headers(_BROWSER_USER_AGENT))
+            except httpx.TimeoutException as exc:
+                raise ScrapeError(f"{current} did not respond within {int(_TIMEOUT_SECONDS)} seconds.") from exc
+            except httpx.HTTPError as exc:
+                raise ScrapeError(_describe_transport_error(current, exc)) from exc
+
+            if response.is_redirect:
+                location = response.headers.get("location")
+                if not location:
+                    raise ScrapeError(f"{current} returned a redirect with no destination.")
+                current = str(response.url.join(location))
+                continue
+            if response.status_code in _BOT_WALL_STATUSES:
+                raise ScrapeError(f"{current} blocked an automated read (HTTP {response.status_code}).")
+            if response.status_code >= 400:
+                raise ScrapeError(f"{current} returned HTTP {response.status_code}.")
+            if any(h in {k.lower() for k in response.headers} for h in _CHALLENGE_HEADERS):
+                raise ScrapeError(f"{current} challenged the request instead of serving the file.")
+            return FetchedAsset(
+                url=str(response.url),
+                content=response.content[:max_bytes],
+                content_type=(response.headers.get("content-type") or "").split(";")[0].strip().lower(),
+                encoding=response.encoding,
+            )
+
+    raise ScrapeError(f"{url} redirected more than {_MAX_REDIRECTS} times.")
+
+
 def _split_fetcher_front_matter(text: str) -> tuple[str, str | None, str | None]:
     """Peel Claude's fetcher front-matter off the page text.
 

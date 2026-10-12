@@ -73,6 +73,11 @@ SEED_TIMEOUT_SECONDS = 20
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     _verify_event_loop()
+    # A production deployment with no BACKEND_PUBLIC_URL hands out generated image links nobody can
+    # open. Logged, not fatal: everything else still works, and no host is invented to cover it.
+    from app.services.media_storage import warn_if_public_base_url_missing
+
+    warn_if_public_base_url_missing()
     await _seed_reference_data()
     yield
 
