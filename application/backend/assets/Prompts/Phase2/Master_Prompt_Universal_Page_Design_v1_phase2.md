@@ -71,12 +71,12 @@ The copy for each section comes from, in this order:
    figure, rate, price, guarantee, credential or testimonial it does not contain.
 3. **A service with no source content** (one the operator typed, or whose page could not be read)
    gets a short section limited to what the Improved Page Content and the other sources already
-   establish, with `[CLIENT TO CONFIRM: details for this service]` where specifics belong. Never
-   invent them.
+   establish. Specifics the sources do not state are left out of the page, not marked in it, and
+   listed under **Confirm before publishing**. Never invent them.
 
 This is the one exception to "all vocabulary comes from the content file": the source content is
 the client's own published copy, so writing from it is still not inventing. In the delivery notes,
-list which sections were written from source content and which carry a `[CLIENT TO CONFIRM]` gap,
+list which sections were written from source content and which were kept short for lack of facts,
 so they can be reviewed before publishing. When this input is blank or NONE, the page covers what
 the Improved Page Content covers, exactly as before.
 
@@ -104,7 +104,8 @@ State in a short table:
    with what's actually present in the Improved Page Content
 7. **Services to cover** — the sub-services listed in Services / Sub-Services to Cover (or "none
    listed"), which of them the Improved Page Content covers, which will be written from their
-   SOURCE CONTENT, and which carry a `[CLIENT TO CONFIRM]` gap. Also state whether this is a
+   SOURCE CONTENT, and which have no source (kept short; their missing specifics go under
+   **Confirm before publishing**). Also state whether this is a
    NO REFERENCE PAGE run, and if so that only the landing page's design system is being used.
 
 Do not proceed until this table is stated.
@@ -305,8 +306,8 @@ and content exactly. Do not alter framing or invent numbers not present in the c
 differentiator specific, none generic or placeholder.
 
 **Social proof / testimonials** — reference's testimonial card, carousel, or quote-block pattern.
-If no real testimonials are in the content, mark clearly: `[TESTIMONIAL PLACEHOLDER — insert
-client review here]`. Never fabricate a quote or a reviewer name.
+If no real testimonials are in the content, leave the testimonial section out of the page and
+list it under **Confirm before publishing**. Never fabricate a quote or a reviewer name.
 
 **FAQ** — reference's accordion, stacked, or two-column pattern (with proper ARIA semantics per
 Rule 7). Include every question from the content — do not reduce or summarise.
@@ -361,7 +362,20 @@ design token reference for the developer or design team.
 
 **PART 2 — FULL DESIGNED PAGE**
 The complete output in the specified format. Every section labelled with its actual client-facing
-heading. Complete content, no placeholders except images and testimonials (clearly marked for
-client input) and any `[CLIENT TO CONFIRM]` items carried over from the content file.
+heading. Complete, production-ready content.
+
+**No confirmation markers in the page.** The built page is production copy. It never contains
+`[CLIENT TO CONFIRM: …]`, `[… PLACEHOLDER]` or any other bracketed note to the client, as text,
+a styled note, or a heading (the `[IMAGE: …]` HTML comment above is not shown, and stays). The content file may carry such markers; they stop at this stage:
+- A claim, figure, award, rating, review count, credential, offer or detail that a marker holds
+  back (waiting on the client, on compliance, or on wording) is left out of the page. Write the
+  sentence, card or list without it, or drop the element when nothing is left.
+- Never replace it with an invented or softened version of the same claim.
+- List every one under **Confirm before publishing**: the section, what was left out, and the
+  question the client must answer. The operator adds it back through Refine once confirmed.
+
+**PART 3 — CONFIRM BEFORE PUBLISHING**
+Every claim or element left out of the page pending the client or compliance, and every image
+still to supply, grouped by section, each with the question to answer. "None" if there are none.
 
 Now proceed using all inputs provided above.

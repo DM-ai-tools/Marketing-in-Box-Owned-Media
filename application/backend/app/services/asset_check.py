@@ -428,6 +428,102 @@ def fix_context(facts: BusinessFacts) -> str:
     return context
 
 
+#: The `_RUBRIC` questions, worded for the writer rather than the judge. Keep the two in step: the
+#: draft is written to these and scored against those.
+_WRITE_TO = {
+    "offer_relevance": (
+        "Sell or point only to what this client actually sells: every offer, service and price you "
+        "name is on the offer ladder or in the pricing facts, for the service being marketed, pitched "
+        "at the ICP's buyer."
+    ),
+    "funnel_relevance": (
+        "Move the ICP's buyer, at their awareness level, to a next step that exists: the rung the offer "
+        "ladder says this ascends to. No CTA to a step that does not exist, and no dead ends."
+    ),
+    "business_logic": (
+        "Keep every claim, figure, guarantee, testimonial, credential and promise consistent with the "
+        "facts above and permitted for this client. State each price one way, and never contradict "
+        "yourself."
+    ),
+    "virality": (
+        "Earn engagement on the platforms this is written for: a strong first-line hook, a curiosity "
+        "gap, specifics (numbers, names, outcomes), emotional charge, something worth sending to a "
+        "colleague, and a length and format that fit the platform."
+    ),
+    page_check.CHECK: (
+        "Ship a page that deploys as built: real hrefs from the Links section, no `#` links, no "
+        "placeholders, no stock or invented image URLs, colours from the palette."
+    ),
+}
+
+BRIEF_BLOCK = "BUSINESS_CHECK"
+
+
+def generation_brief(asset_id: str, phase: str, facts: BusinessFacts) -> str:
+    """The business check, told to the stage before it writes rather than after.
+
+    The check used to meet a draft only once it was finished, so every finding cost a Refine: a
+    second full-length generation to fix what the first could have got right. This states the same
+    facts, the rules `run_rules` enforces (derived from the same facts, so a rule that would not run
+    is not stated) and the questions the judge scores, ahead of INPUTS. The check still runs after
+    and still scores the draft; it should now find little to fix. "" for a stage that is not checked.
+    """
+    if not check_applies(asset_id, phase) or asset_id not in CHECKS_BY_ASSET:
+        return ""
+
+    rules: list[str] = []
+    if facts.prices_forbidden:
+        rules.append(
+            f"State no price, fee or dollar figure anywhere: the pricing disclosure mode is "
+            f"\"{facts.settings.get('pricing_disclosure_mode')}\". Describe what drives the cost instead."
+        )
+    elif asset_id != "offers" and facts.allowed_amounts:
+        rules.append("Use only prices and values that appear on the offer ladder or in the pricing facts above.")
+    if asset_id in {"funnel", "lead_magnet", "sms_sequence", "webinar"} and facts.offers:
+        rules.append("Name the offer this asset ascends to, using its exact title from the offer ladder.")
+    if facts.words_to_avoid:
+        rules.append("Never use these words: " + ", ".join(f'"{w}"' for w in facts.words_to_avoid) + ".")
+    if facts.testimonials in {"NO", "UNSURE"} and asset_id in CUSTOMER_FACING:
+        rules.append(
+            "No testimonials, star ratings, review scores or attributed quotes: "
+            + ("this client is not permitted to use them." if facts.testimonials == "NO"
+               else "permission to use them is unconfirmed.")
+            + " Use process, credentials or a permitted proof asset instead."
+        )
+    tier = facts.claim_tier
+    if tier is not None:
+        rules.append(
+            "No absolute claims (guaranteed, risk-free, #1, best in the market, proven to, 100% results) "
+            f"— the claim substantiation tier is \"{facts.settings.get('claim_substantiation_tier')}\". "
+            "Qualify them, or back them with a proof asset on record."
+            if tier >= 2
+            else "Do not promise a guarantee or a risk-free result unless a proof asset on record backs it."
+        )
+    if asset_id in CUSTOMER_FACING:
+        rules.append(
+            "Every statistic in copy a prospect reads names its source on the same line, or is left out."
+        )
+
+    scored = "\n".join(
+        f"- {c.replace('_', ' ').capitalize()}: {_WRITE_TO[c]}" for c in CHECKS_BY_ASSET[asset_id]
+    )
+    rule_text = "\n".join(f"- {r}" for r in rules) or "- None beyond the facts above."
+    return (
+        f"===== BEGIN {BRIEF_BLOCK} =====\n"
+        "HOW THIS BLOCK BINDS YOUR RESPONSE:\n"
+        "When you finish, this draft is checked against the client's business and scored on the "
+        "questions below. Write it so it passes the first time. The rules apply to the client's own "
+        "copy, not to competitor material quoted as research. Where the INPUTS state something more "
+        "specific, the INPUTS win. A fact not on record is left out, never invented. Do not quote, "
+        "name or acknowledge this block in the output.\n\n"
+        "THE CLIENT'S BUSINESS (the only source of truth):\n"
+        f"{facts.summary()}\n\n"
+        f"RULES THE DRAFT IS CHECKED AGAINST:\n{rule_text}\n\n"
+        f"WHAT IT IS SCORED ON:\n{scored}\n"
+        f"===== END {BRIEF_BLOCK} =====\n\n"
+    )
+
+
 def _previous_block(previous: list[CheckResult] | None, checks: tuple[str, ...]) -> str:
     """The report on the draft this one was revised from, so a re-check judges the revision against
     what was asked of it rather than starting from zero and finding a different set of problems."""

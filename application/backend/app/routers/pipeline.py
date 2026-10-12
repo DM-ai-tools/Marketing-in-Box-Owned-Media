@@ -4527,6 +4527,16 @@ async def _generation_sse_stream(
             asset_id=asset_id,
             phase=phase,
         )
+        # The business check's facts and rules, stated before the draft is written so the first
+        # draft passes rather than needing a Fix with Refine. Free: database reads, no model call.
+        # A continuation gets the same brief, so it finishes the draft under the same INPUTS.
+        business_brief = ""
+        try:
+            facts = await _business_facts(run_id, client_profile or {}, asset_id, phase)
+            business_brief = asset_check_service.generation_brief(asset_id, phase, facts)
+        except Exception:  # noqa: BLE001 — the brief improves a draft; it must never block one
+            logger.exception("Business brief for %s could not be built; generating without it", asset_id)
+
         if continue_from:
             model_stream = generate_continuation_stream(
                 asset_id,
@@ -4536,6 +4546,7 @@ async def _generation_sse_stream(
                 on_usage=on_usage,
                 page_design=page_design,
                 voice=voice,
+                business_brief=business_brief,
                 on_complete=lambda r: stop_reason.__setitem__(0, r),
             )
         else:
@@ -4546,6 +4557,7 @@ async def _generation_sse_stream(
                 on_usage=on_usage,
                 page_design=page_design,
                 voice=voice,
+                business_brief=business_brief,
                 on_complete=lambda r: stop_reason.__setitem__(0, r),
             )
 

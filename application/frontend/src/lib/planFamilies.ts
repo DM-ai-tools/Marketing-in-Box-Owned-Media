@@ -20,6 +20,12 @@ export const KIND_TAG: Record<PlanNodeKind, string> = {
   industry: "INDUSTRY",
   location: "LOCATION",
   keyword: "KEYWORD",
+  icp: "ICP",
+  offer: "OFFER",
+  webinar: "WEBINAR",
+  book: "BOOK",
+  podcast: "PODCAST",
+  strategy: "STRATEGY",
   detail: "",
 };
 
@@ -53,6 +59,12 @@ const KIND_FAMILY: Record<PlanNodeKind, PlanFamily> = {
   funnel: "convert",
   email: "nurture",
   sms: "nurture",
+  icp: "target",
+  offer: "convert",
+  webinar: "convert",
+  book: "content",
+  podcast: "content",
+  strategy: "strategy",
 };
 
 export const FAMILY_LABEL: Record<PlanFamily, string> = {

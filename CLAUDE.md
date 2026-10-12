@@ -611,8 +611,14 @@ pillar page covers them all. Same asset and field in both phases: `SERVICE_SCAN_
   "credits are money". A page that fails is reported, and that service falls back to the CRO copy.
 - **Copy order is fixed by the prompt.** The Improved Page Content wins wherever it covers a
   service. A picked service it does not cover is written from that service's SOURCE CONTENT, using
-  only facts the content states. A typed service with no page gets a short section with
-  `[CLIENT TO CONFIRM]`. Sections written from source content are listed in the delivery notes.
+  only facts the content states. A typed service with no page gets a short section limited to what
+  the sources establish. Sections written from source content are listed in the delivery notes.
+- **The built page carries no `[CLIENT TO CONFIRM]` or `[… PLACEHOLDER]`.** Both pillar prompts
+  and `PAGE_BUILD_STANDARDS.md` leave a held-back claim (awards, review counts, an unconfirmed
+  offer, a missing testimonial) out of the page. They list it under **Confirm before publishing**
+  (Phase 1 PART 4, Phase 2 PART 3), and it comes back through Refine once confirmed. The CRO copy
+  may still carry markers; they stop at the pillar page. `page_check` flagging one as must-fix is
+  the backstop. `tests/test_no_confirm_markers.py` pins the prompts.
 - **No-reference mode takes the brand, never the markup.** `resolve_page_template` returns None for
   a `NO REFERENCE PAGE` answer, so the landing page is never cloned as a pillar page template.
   `_design_source_url` still reads the URL out of the sentence, so DESIGN.md is captured from it.
@@ -1116,8 +1122,47 @@ stops at 14 stages (`DEFERRED_TO_PHASE2`) and says so when it finishes.
   has an approved one. When a later sub-service finishes (or one of its stages is re-run), the store
   raises `uiStore.pendingPlanRerun` and `PlanRerunDialog` offers the re-run — once, at the end, not on
   every approval. Staleness is read off the transcript, so it needs no state to clear.
+- **The plan speaks the pipeline's vocabulary.** Its phases are titled like the toggle
+  (`PHASE_META.scope`: "Phase 1: Core Service", "Phase 2: Sub-Service"). Step 2 lists Phase 1's
+  14 stages by their catalog labels, and Step 3's per-sub-service schema is Phase 2's 9 stages, in
+  pipeline order. `plan_context.LABELS` are the same catalog labels. The mind map tags each name
+  (`icp`, `offer`, `webinar`, `book`, `podcast`, `strategy` kinds in `lib/planTree.ts`).
+  `tests/test_plan_names_match_pipeline.py` reads the frontend catalog and fails on any drift.
 - `Phase2/Plan-of-Action-Architect-Prompt_phase2.md` is Phase 1's file plus declared edits;
   `tests/test_plan_context.py` reverses them and requires the original byte for byte.
+
+## Output style — bullets, not paragraphs
+
+`generation._OUTPUT_STYLE` goes in every stage's prompt tail, both phases: after the industry voice
+block, before the brand tokens and INPUTS, outside the cached library. It asks for bullets instead
+of paragraphs in analysis, strategy, findings and notes, and for less preamble and repetition.
+
+- **Customer-facing copy is exempt.** Page copy, HTML, article and book text, emails, SMS, captions
+  and scripts keep the form the master prompt asks for. A blog post in bullets is a broken
+  deliverable.
+- **Formats the master prompt specifies are held.** `parse_offer_ladder`, `slide_deck` and the
+  reader's recognisers parse them. Shorter wording never means fewer facts.
+- **Not in Refine.** A change note must not reformat a whole draft. New drafts are already bulleted,
+  and Refine keeps a draft's format.
+- One block, not an edit per prompt file, for the voice block's reason. `OUTPUT_STYLE` is in
+  `lib/promptEcho.ts`'s marker list. `tests/test_output_style.py` pins all of this.
+
+## Funnel Hub & Media — a selected set, not all eighteen
+
+The eighteen funnel types in both `Funnel-Hub-Media-Architect-Prompt*.md` files are a **menu**.
+Step 0 keeps a type only when it fits how the business sells this service (Phase 2: sub-service),
+the ICP's buyer can enter it, and the reference material can ground a topic or offer for it. The
+output opens with **Kept** and **Not used** (one sentence per dropped type, naming the input that
+rules it out), and Phases 1-3 — the mindmap, the hub and the commitment ladder — use only the kept
+set. Fewer than two survivors is reported, never refilled.
+
+- **The stage's marker is `## STEP 0 — FUNNEL SELECTION`**, not `## PHASE 1 —`. `marker_override`
+  strips everything above it, so a selection step above the marker reaches no model. The governing
+  rule and the menu sit under Step 0 for the same reason (with the old marker the governing rule
+  was never sent).
+- **No subset per industry.** The INPUTS and the industry voice block decide; the prompt says so.
+- `tests/test_funnel_selection.py` fails if either file requires all 18 again, loses Step 0 or the
+  Not used list, or the two files differ by anything but service → sub-service.
 
 ## Industry personality — one voice block per client, and advice about which stages to run
 
@@ -1356,6 +1401,21 @@ record doesn't run; the panel says "not on record, so not checked".
 3. **Every judge finding must quote the draft verbatim.** `_verified` drops any quote that isn't in
    the text, and the report counts what it dropped. A checker that invents problems is as bad as a
    stage that invents facts.
+
+### Told before, scored after
+
+The check used to meet a draft only once it was finished, so every finding cost a Fix with Refine,
+a second full-length generation. Now `asset_check.generation_brief` puts the same facts
+(`BusinessFacts.summary()`), the rules `run_rules` would enforce and the questions the judge scores
+into the prompt tail, after `OUTPUT_STYLE` and before INPUTS. `_generation_sse_stream` builds it
+from `_business_facts`: database reads and no model call. A continuation gets the same brief.
+
+- **A rule is stated only when it would run.** It is derived from the same facts, so a run with no
+  words-to-avoid list is not told about one. Phase 2's ICP (`NO_CHECK`) gets no brief.
+- **`_WRITE_TO` is `_RUBRIC` worded for the writer.** Keep the two in step.
+- **A failed facts read never blocks a draft.** The brief is "" and the stage generates as before.
+- **The check still runs after and still scores.** It should now find little to fix.
+  `tests/test_generation_brief.py` pins this. `BUSINESS_CHECK` is in `lib/promptEcho.ts`.
 
 ### The noise floor is the product
 

@@ -139,7 +139,9 @@ STAGE_CONFIGS: dict[str, StageConfig] = {
         "funnel_hub_media.json",
         SONNET,
         50000,
-        marker_override="## PHASE 1 —",
+        # Starts at the selection step, not Phase 1: everything above the marker is stripped, and
+        # the funnel menu and governing rule have to reach the model for Step 0 to work.
+        marker_override="## STEP 0 — FUNNEL SELECTION",
     ),
     "offers": StageConfig("offers", "Master_Prompt_Universal_Value_Ladder_v2.md", "offers_v2.json", SONNET, 64000),
     # 128k, the highest this model allows, because this stage's deliverable is now plural. The
@@ -709,6 +711,35 @@ _DEPLOY_READY_DIRECTIVE = (
 #: removed so it cannot compete with the client's DESIGN.md.
 PAGE_BUILD_STANDARDS = "PAGE_BUILD_STANDARDS.md"
 
+# How every deliverable is written: bullets, not paragraphs. One block composed here rather than an
+# edit to each prompt file, for the reason the industry voice block gives — copies drift. It binds
+# the analysis and strategy prose only; copy the client's customer reads (an article, page copy, a
+# message, a script) stays in the form the master prompt asks for, because a blog post in bullets
+# is a broken deliverable. Item formats are held explicitly: `business_facts.parse_offer_ladder`,
+# `slide_deck` and the reader's recognisers all parse what the master prompts specify.
+OUTPUT_STYLE_BLOCK = "OUTPUT_STYLE"
+_OUTPUT_STYLE = (
+    f"===== BEGIN {OUTPUT_STYLE_BLOCK} =====\n"
+    "HOW THIS BLOCK BINDS YOUR RESPONSE:\n"
+    "It sets how the document reads, never what it contains. Do not quote, name or acknowledge this "
+    "block in the output.\n\n"
+    "Write for an operator who scans. Wherever the master prompt leaves the form open:\n"
+    "- Use bullet points instead of paragraphs for analysis, strategy, rationale, findings, "
+    "recommendations, notes and summaries.\n"
+    "- One idea per bullet, ideally under 25 words. Lead with the point, then the reason or "
+    "evidence.\n"
+    "- At most two sentences of prose under a heading before the bullets start.\n"
+    "- Group related bullets under a short bold label or a sub-heading; nest at most one level.\n"
+    "- Cut preamble, restatement of the inputs, and closing summaries that repeat what is above.\n\n"
+    "Keep unchanged:\n"
+    "- Every section, table, score, field and item format the master prompt specifies, exactly as "
+    "specified. Shorter wording never means fewer facts, offers, steps or findings.\n"
+    "- Copy written for the client's customer: page copy, HTML, article and book body text, "
+    "emails, SMS messages, social captions, scripts and headlines. Write those in the form the "
+    "master prompt asks for.\n"
+    f"===== END {OUTPUT_STYLE_BLOCK} =====\n\n"
+)
+
 
 def _page_build_standards_block(asset_id: str) -> str:
     """The standards document for a design-language stage, fenced and bound, else "".
@@ -946,6 +977,7 @@ def _prompt_parts(
     phase: str = DEFAULT_PHASE,
     page_design: PageDesignInput | None = None,
     voice: IndustryProfile | None = None,
+    business_brief: str = "",
 ) -> tuple[str, str]:
     """This stage's prompt, split at its cache boundary: (reference library, everything else).
 
@@ -980,6 +1012,8 @@ def _prompt_parts(
     return (
         _load_reference_library(asset_id),
         voice_block(voice)
+        + _OUTPUT_STYLE
+        + business_brief
         + brand
         + _page_build_standards_block(asset_id)
         + "— INPUTS (fill in before submitting) —\n\n"
@@ -995,6 +1029,7 @@ def build_prompt(
     phase: str = DEFAULT_PHASE,
     page_design: PageDesignInput | None = None,
     voice: IndustryProfile | None = None,
+    business_brief: str = "",
 ) -> str:
     """The whole prompt as one string: any reference library this stage cites, then its own "fill in
     before submitting" INPUTS block reproduced from the caller's intake, then the file's real master
@@ -1010,7 +1045,7 @@ def build_prompt(
     concatenation, so the first half can carry a cache breakpoint — see `build_stage_request`. The
     text the model sees is identical either way, which is what this function pins.
     """
-    library, tail = _prompt_parts(asset_id, answers, phase, page_design, voice)
+    library, tail = _prompt_parts(asset_id, answers, phase, page_design, voice, business_brief)
     return library + tail
 
 
@@ -1020,6 +1055,7 @@ def build_stage_request(
     phase: str = DEFAULT_PHASE,
     page_design: PageDesignInput | None = None,
     voice: IndustryProfile | None = None,
+    business_brief: str = "",
 ) -> tuple[list[dict[str, object]] | None, str | list[dict[str, object]]]:
     """The same prompt as `build_prompt`, as `(system_blocks, user_content)` ready for the API.
 
@@ -1046,7 +1082,7 @@ def build_stage_request(
     prompt's instruction to proceed, and an image appended after that sits between the instruction
     and the response.
     """
-    library, tail = _prompt_parts(asset_id, answers, phase, page_design, voice)
+    library, tail = _prompt_parts(asset_id, answers, phase, page_design, voice, business_brief)
 
     if page_design is not None:
         images = page_design.generated_images_for(asset_id)
@@ -1162,12 +1198,13 @@ async def generate_stage_stream(
     on_usage: OnUsage | None = None,
     page_design: PageDesignInput | None = None,
     voice: IndustryProfile | None = None,
+    business_brief: str = "",
     on_complete: OnComplete | None = None,
 ) -> AsyncIterator[str]:
     """Stream this stage's real generation as Markdown text deltas."""
     cfg = _config(asset_id, phase)
     client = get_client()
-    system_blocks, user_content = build_stage_request(asset_id, answers, phase, page_design, voice)
+    system_blocks, user_content = build_stage_request(asset_id, answers, phase, page_design, voice, business_brief)
 
     logger.info(
         "Streaming stage=%s phase=%s model=%s effort=%s cached_prefix=%s prompt=%s industry=%s",
@@ -1460,6 +1497,7 @@ async def generate_continuation_stream(
     on_usage: OnUsage | None = None,
     page_design: PageDesignInput | None = None,
     voice: IndustryProfile | None = None,
+    business_brief: str = "",
     on_complete: OnComplete | None = None,
 ) -> AsyncIterator[str]:
     """Stream the rest of a draft that `max_tokens` cut off, as text to append to `partial_draft`.
@@ -1473,7 +1511,7 @@ async def generate_continuation_stream(
     """
     cfg = _config(asset_id, phase)
     client = get_client()
-    system_blocks, user_content = build_stage_request(asset_id, answers, phase, page_design, voice)
+    system_blocks, user_content = build_stage_request(asset_id, answers, phase, page_design, voice, business_brief)
     extra = build_continuation_messages(partial_draft, asset_id)
 
     logger.info(

@@ -30,8 +30,8 @@ here seems to conflict with DESIGN.md, DESIGN.md wins.
   never reworded.
 - Long lists stay complete. If a section has twelve items, it shows twelve (wrap the grid, or use a
   two-column list) — never "and more".
-- Placeholders the content carries (`[CLIENT TO CONFIRM]`, `[TESTIMONIAL PLACEHOLDER]`) stay visible
-  and styled as notes, so they are caught before publishing.
+- Placeholders the content carries (`[CLIENT TO CONFIRM]`, `[TESTIMONIAL PLACEHOLDER]`) never reach
+  the page. What they hold back is left out and listed under Confirm before publishing.
 
 ## 3. Responsive behaviour
 

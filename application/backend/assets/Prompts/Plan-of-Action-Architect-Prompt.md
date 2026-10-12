@@ -9,7 +9,7 @@ Plan Date (optional): [YOUR ANSWER — defaults to today's date if left blank]
 
 Primary Service Being Expanded: [YOUR ANSWER — the single root service this whole plan is built around, e.g. "Google Ads Management," "Social Media Marketing," "Bookkeeping Services"]
 Primary Pillar Page (existing or target URL): [YOUR ANSWER — e.g. trafficradius.com.au/google-ads-management/. If it doesn't exist yet, state "not yet built — target slug: ___"]
-Existing Phase 1 Assets (optional): [YOUR ANSWER or leave blank — if a CRO audit, rebuilt pillar page, lead magnet, funnel, blog, SMS sequence, or SEO pass already exists for the primary service, reference or attach it here so Phase 1 is marked complete rather than re-planned from scratch. If nothing exists yet, say "greenfield — Phase 1 not started."]
+Existing Phase 1 Assets (optional): [YOUR ANSWER or leave blank — if any Phase 1: Core Service asset (the Step 2 list) already exists for the primary service, reference or attach it here so Phase 1 is marked complete rather than re-planned from scratch. If nothing exists yet, say "greenfield — Phase 1 not started."]
 
 Sub-Services to Expand Into (Phase 2): [YOUR ANSWER — list the logical sub-categories of the primary service that deserve their own dedicated pillar page, e.g. for "Google Ads Management": Search, Shopping, Display, Remarketing, YouTube, Performance Max, Local Service Ads, Audit. If you want these inferred rather than supplied, say "infer 6-10 sub-services from the primary service and industry norms."]
 
@@ -26,7 +26,7 @@ Competitor List: [YOUR ANSWER — attach or reference a file/spreadsheet of 3-6 
 Keyword / Search Volume Data Source (optional): [YOUR ANSWER — attach or reference a keyword research export if one exists. If left blank, state estimated monthly search volumes using judgement and clearly label every volume figure as an estimate, not verified data.]
 
 Plan Length: [YOUR ANSWER — number of months to plan across, default 12]
-Number of Phases: [YOUR ANSWER — default 3 (Quick Win / Sub-Service Expansion / Full Sitemap Expansion). State a different number and their names if this business needs a different shape, e.g. a 2-phase plan for a smaller operator.]
+Number of Phases: [YOUR ANSWER — default 3 (Core Service / Sub-Service / Full Sitemap Expansion). State a different number and their names if this business needs a different shape, e.g. a 2-phase plan for a smaller operator.]
 Delivery Capacity: [YOUR ANSWER — solo operator, small team, or full agency; affects how many assets per month are realistic to commit to in the timeline]
 
 Regulated Field Flag: [YOUR ANSWER — Yes/No. If yes, name the regulation so no-guarantee, compliance-safe language is applied throughout every asset description.]
@@ -106,27 +106,36 @@ Produce:
     this client is ahead or behind. Do not fabricate specific competitor statistics — describe
     structural gaps (e.g. "has no dedicated Shopping page") rather than invented numbers.
 
-# STEP 2 — PHASE 1: QUICK WIN (SINGLE PILLAR ECOSYSTEM)
+# STEP 2 — PHASE 1: CORE SERVICE
 
-Scope: the Primary Pillar Page only. If Existing Phase 1 Assets were supplied in Step 0(B), summarise
-them here as complete and skip to Step 3. Otherwise, specify the full asset set needed to turn the
-single pillar page into a complete conversion ecosystem:
+Scope: the Primary Service and its pillar page. The core service's full asset set is:
 
-  1. CRO Audit & Enhanced Pillar Page Content (framework, ICP alignment, locked terminology)
-  2. Pillar Page HTML Landing Page (section architecture, if a build is in scope)
-  3. Lead Magnet (one, matched to the primary service's single highest-intent use case)
-  4. Lead Magnet Funnel Content (email sequence + thank-you page + CTA flow)
-  5. Blog Post (one, targeting the single highest-volume/highest-intent keyword for this service)
-  6. Blog Post HTML Design (if a build is in scope)
-  7. SMS/Text Sequence (compliant with the region's relevant spam/telecom regulation)
-  8. SEO Keyword Optimisation Pass (target keyword list + coverage plan for the pillar page)
+  1. ICP — Ideal Customer Profile
+  2. CRO — Page Rewrite
+  3. Pillar Page Design
+  4. Funnel
+  5. Funnel Hub Media
+  6. Offers / Value Ladder
+  7. Lead Magnet
+  8. Blog Post
+  9. Content Marketing Strategy
+  10. Social Content Strategy Audit
+  11. Webinar
+  12. Book (from Webinar)
+  13. Podcast Episode
+  14. SMS Sequence
 
-For each, state in 1-3 sentences what it must contain, specific to this client's service and ICP —
+These are the stages this client's pipeline builds for the core service, so use these names exactly
+and in this order — the plan and the pipeline must read the same.
+
+If Existing Phase 1 Assets were supplied in Step 0(B), mark each asset above that they include as
+complete, one line each, and brief only the ones still to build. For each asset still to build,
+state in 1-3 sentences what it must contain, specific to this client's service and ICP —
 not generic boilerplate. Close with the Phase 1 Funnel Flow (traffic source → entry point → email
 gate → nurture sequence → conversion event) and a conversion-potential star rating (1-5 stars) with a
 one-line justification.
 
-# STEP 3 — PHASE 2: SUB-SERVICE EXPANSION
+# STEP 3 — PHASE 2: SUB-SERVICE
 
 For every sub-service resolved in Step 0(D), produce a complete brief using this exact schema:
 
@@ -134,14 +143,21 @@ For every sub-service resolved in Step 0(D), produce a complete brief using this
   Proposed URL: [slug]
   Estimated Combined Search Volume: ~[X]/mo [flagged as estimate unless real data was supplied]
   TARGET KEYWORD CLUSTER: 4-6 keywords with individual estimated volumes
-  PILLAR PAGE CONTENT BRIEF: what this page must comprehensively cover, in 2-4 sentences, specific to
-    this sub-service (not a copy-paste of another sub-service's brief)
-  BLOG POST 1: title + target keyword + estimated volume
-  BLOG POST 2: title + target keyword + estimated volume
-  LEAD MAGNET: title + format + 1-2 sentence mechanic description
-  EMAIL SEQUENCE: number of emails / days → final CTA
-  FUNNEL: named funnel with its full flow (traffic → pillar → lead magnet → email sequence →
+  ICP — IDEAL CUSTOMER PROFILE: this sub-service's buyer in 1-2 sentences, and how they differ from
+    the core service's buyer
+  CRO — PAGE REWRITE: the page's core promise and the one conversion action it drives
+  PILLAR PAGE DESIGN: what this page must comprehensively cover, in 2-4 sentences, specific to this
+    sub-service (not a copy-paste of another sub-service's brief)
+  FUNNEL: named funnel with its full flow (traffic → pillar page → lead magnet → email nurture →
     conversion event)
+  LEAD MAGNET: title + format + 1-2 sentence mechanic description
+  BLOG POST: title + target keyword + estimated volume
+  SMS SEQUENCE: number of messages / days → final CTA
+  CONTENT MARKETING STRATEGY: the pillar/cluster angle and channel mix in 1-2 sentences
+  FUNNEL HUB MEDIA: the funnel types kept for this sub-service and its convert-stage offer
+
+These are the stages this client's pipeline builds for each sub-service, so use these names exactly
+and in this order.
 
 Every sub-service must feel distinct — different keyword logic, different lead magnet mechanic,
 different funnel name — not the same template with nouns swapped.
@@ -174,9 +190,12 @@ standard 12-month/agency-backed build):
 
 # STEP 5 — TOTAL ASSET SUMMARY
 
-Produce a single roll-up table: rows = asset category (Pillar Pages, Blog Posts, Lead Magnets, Email
-Sequences, SMS Sequences, Case Studies, Video Scripts, Location Pages, Industry Pages), columns =
-Phase 1 / Phase 2 / Phase 3 / Total. Every number here must reconcile exactly with what was specified
+Produce a single roll-up table: rows = every asset named in Steps 2-4, using the same names — the
+Step 2 and Step 3 stage names (ICP — Ideal Customer Profile, CRO — Page Rewrite, Pillar Page Design,
+Funnel, Funnel Hub Media, Offers / Value Ladder, Lead Magnet, Blog Post, Content Marketing Strategy,
+Social Content Strategy Audit, Webinar, Book (from Webinar), Podcast Episode, SMS Sequence), then
+Phase 3's categories (Industry Pages, Location Pages, Case Studies, Video Scripts, Email Sequences);
+columns = Phase 1: Core Service / Phase 2: Sub-Service / Phase 3 / Total. Every number here must reconcile exactly with what was specified
 in Steps 2-4 — do not present a total that isn't traceable back to a named asset above.
 
 # STEP 6 — FUNNEL OVERVIEW AND RANKING
@@ -211,13 +230,13 @@ were supplied; otherwise it is Month 1 of the timeline.
 
 # OUTPUT FORMAT
 
-Deliver as a single structured document, numbered exactly as follows:
+Deliver as a single structured document, numbered and titled exactly as follows:
 
   1. Executive Summary — 2-3 sentences on the plan's overall shape, total asset count, and headline
      search-volume opportunity across all phases
   2. Current State Analysis (Step 1)
-  3. Phase 1: Quick Win (Step 2)
-  4. Phase 2: Sub-Service Expansion (Step 3 — full brief for every sub-service)
+  3. Phase 1: Core Service (Step 2)
+  4. Phase 2: Sub-Service (Step 3 — full brief for every sub-service)
   5. Phase 3: Full Sitemap Expansion (Step 4 — categories A-H plus Phase 3 funnels)
   6. Total Asset Summary (Step 5 — table)
   7. Funnel Overview (Step 6 — table + top 3)

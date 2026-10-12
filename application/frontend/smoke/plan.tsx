@@ -382,6 +382,49 @@ ok("totals: assets counted", tree.totals.assets > 5, String(tree.totals.assets))
   ok("fullscreen: the tree is re-fitted to the new box", /\[fullscreen, fit\]/.test(src));
 }
 
+// The plan lists the pipeline's own stage names under phases titled like the toggle
+// (`test_plan_names_match_pipeline.py` pins the prompt side). Each name gets its tag, not a blank.
+{
+  const stagePlan = [
+    "## 3. Phase 1: Core Service",
+    "  1. ICP — Ideal Customer Profile",
+    "  2. CRO — Page Rewrite",
+    "  3. Pillar Page Design",
+    "  4. Funnel",
+    "  5. Funnel Hub Media",
+    "  6. Offers / Value Ladder",
+    "  7. Lead Magnet",
+    "  8. Blog Post",
+    "  9. Content Marketing Strategy",
+    "  10. Social Content Strategy Audit",
+    "  11. Webinar",
+    "  12. Book (from Webinar)",
+    "  13. Podcast Episode",
+    "  14. SMS Sequence",
+    "## 4. Phase 2: Sub-Service",
+    "### 1. Meta Ads",
+  ].join("\n");
+  const nodes = flattenPlan(buildPlanTree(stagePlan, "Plan").root);
+  const kindOfTitle = (t: string) => nodes.find((n) => n.title.includes(t))?.kind;
+  const want: [string, string][] = [
+    ["Phase 1: Core Service", "phase"],
+    ["Phase 2: Sub-Service", "phase"],
+    ["ICP — Ideal Customer Profile", "icp"],
+    ["Pillar Page Design", "page"],
+    ["Funnel Hub Media", "funnel"],
+    ["Offers / Value Ladder", "offer"],
+    ["Lead Magnet", "lead-magnet"],
+    ["Blog Post", "blog"],
+    ["Content Marketing Strategy", "strategy"],
+    ["Social Content Strategy Audit", "strategy"],
+    ["Webinar", "webinar"],
+    ["Book (from Webinar)", "book"],
+    ["Podcast Episode", "podcast"],
+    ["SMS Sequence", "sms"],
+  ];
+  for (const [title, kind] of want) ok(`stage names: "${title}" is tagged ${kind}`, kindOfTitle(title) === kind);
+}
+
 console.log(`\n${pass} passed, ${fails.length} failed`);
 if (fails.length) {
   console.log("\nFAILURES:");

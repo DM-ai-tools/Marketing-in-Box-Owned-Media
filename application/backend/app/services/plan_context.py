@@ -43,21 +43,24 @@ PHASE2_ASSETS_KEY = "plan_phase2_assets"
 #: agree, because a key declared on one side only is a plan field that silently goes back to asking.
 COMPOSED_KEYS: frozenset[str] = frozenset({ROOT_ICP_KEY, PHASE1_ASSETS_KEY, PHASE2_ASSETS_KEY})
 
+#: The stage names the operator sees (`label` in the frontend's `data/assetCatalog.ts`). The plan
+#: prompt's Step 2 and Step 3 lists use the same names, so the plan, its inputs and the pipeline all
+#: say "CRO — Page Rewrite" rather than three wordings for one asset.
 LABELS: dict[str, str] = {
-    "icp": "ICP",
-    "cro": "CRO page copy",
-    "pillar_page": "Pillar page",
+    "icp": "ICP — Ideal Customer Profile",
+    "cro": "CRO — Page Rewrite",
+    "pillar_page": "Pillar Page Design",
     "funnel": "Funnel",
-    "funnel_hub_media": "Funnel hub media",
-    "offers": "Value ladder / offers",
-    "lead_magnet": "Lead magnet",
-    "blog": "Blog",
-    "content_marketing_strategy": "Content marketing strategy",
-    "social_content_strategy_audit": "Social content audit",
+    "funnel_hub_media": "Funnel Hub Media",
+    "offers": "Offers / Value Ladder",
+    "lead_magnet": "Lead Magnet",
+    "blog": "Blog Post",
+    "content_marketing_strategy": "Content Marketing Strategy",
+    "social_content_strategy_audit": "Social Content Strategy Audit",
     "webinar": "Webinar",
-    "book": "Book",
-    "podcast": "Podcast",
-    "sms_sequence": "SMS sequence",
+    "book": "Book (from Webinar)",
+    "podcast": "Podcast Episode",
+    "sms_sequence": "SMS Sequence",
 }
 
 #: The headline service's deliverables, in the order the pipeline builds them. The ICP is its own key

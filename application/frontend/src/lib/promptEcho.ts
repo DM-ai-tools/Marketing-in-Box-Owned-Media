@@ -13,7 +13,7 @@
  * document is not even copied.
  */
 
-const NAMES = "INDUSTRY_VOICE|BRAND_DESIGN_TOKENS|GENERATED IMAGES|GENERATED DELIVERABLE";
+const NAMES = "INDUSTRY_VOICE|OUTPUT_STYLE|BUSINESS_CHECK|BRAND_DESIGN_TOKENS|GENERATED IMAGES|GENERATED DELIVERABLE";
 const MARK = String.raw`={3,}\s*(?:BEGIN|END)\s+(?:${NAMES})\s*={3,}`;
 const ANY_MARK = new RegExp(MARK, "i");
 /** BEGIN … END on one line, with a short acknowledgement between. */

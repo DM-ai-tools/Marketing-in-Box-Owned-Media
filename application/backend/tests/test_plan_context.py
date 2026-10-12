@@ -37,7 +37,7 @@ def test_phase1_assets_lists_what_exists_and_names_it_done() -> None:
     page = "<!doctype html><html><head><style>h1{color:red}</style></head><body><h1>Rewritten</h1> copy</body></html>"
     text = pc.render_phase1_assets({"pillar_page": page, "blog": "A blog.", "podcast": "  "})
     assert "treat as done" in text
-    assert "## Pillar page" in text and "## Blog" in text
+    assert "## Pillar Page Design" in text and "## Blog Post" in text
     assert "Podcast" not in text, "a blank document is not a built asset"
     assert "Rewritten" in text
     assert "<h1>" not in text and "color:red" not in text, "an HTML deliverable is reduced to its words"
@@ -59,8 +59,8 @@ def test_every_sub_service_is_named_and_what_is_missing_is_listed() -> None:
 
     assert "(2): Meta Ads, Google Ads" in text
     assert "## Meta Ads" in text and "## Google Ads" in text
-    assert "Built and approved: ICP, CRO page copy, Pillar page." in text
-    assert "Not yet built: Funnel, Lead magnet" in text
+    assert "Built and approved: ICP — Ideal Customer Profile, CRO — Page Rewrite, Pillar Page Design." in text
+    assert "Not yet built: Funnel, Lead Magnet" in text
 
 
 def test_a_sub_service_with_nothing_approved_is_not_reported_as_built() -> None:

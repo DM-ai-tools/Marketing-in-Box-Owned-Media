@@ -52,6 +52,12 @@ export type PlanNodeKind =
   | "industry"
   | "location"
   | "keyword"
+  | "icp"
+  | "offer"
+  | "webinar"
+  | "book"
+  | "podcast"
+  | "strategy"
   | "detail";
 
 export interface PlanNode {
@@ -96,6 +102,14 @@ const KIND_RULES: [PlanNodeKind, RegExp][] = [
   ["phase", /^\s*(?:\d+\.\s*)?phase\s*\d\b(?![^\n]*\bfunnels?\b)/i],
   ["timeline", /\b(?:execution\s+timeline|month-by-month|monthly\s+execution|timeline)\b/i],
   ["summary", /\b(?:executive\s+summary|current\s+state|total\s+asset\s+summary|overview)\b/i],
+  // The pipeline's own stage names, which the plan lists by name in Phase 1 and Phase 2
+  // (`Plan-of-Action-Architect-Prompt.md` Steps 2-3). Book before webinar: "Book (from Webinar)".
+  ["icp", /\bICP\b|\bideal\s+customer\s+profile\b/i],
+  ["offer", /\bvalue\s+ladder\b/i],
+  ["book", /^\s*(?:\d+\.\s*)?book\b/i],
+  ["webinar", /\bwebinars?\b/i],
+  ["podcast", /\bpodcasts?\b/i],
+  ["strategy", /\bcontent\s+marketing\s+strategy\b|\bsocial\s+content\s+strategy\s+audit\b/i],
   ["lead-magnet", /\blead\s*magnets?\b/i],
   // Not `top-of-funnel` / `bottom-of-funnel` / `funnel stage`, which describe where an asset sits
   // rather than naming a funnel — "D. Educational / Top-of-Funnel Blogs" is a blog category.
