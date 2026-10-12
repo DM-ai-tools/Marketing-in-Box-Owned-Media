@@ -1411,7 +1411,7 @@ into the prompt tail, after `OUTPUT_STYLE` and before INPUTS. `_generation_sse_s
 from `_business_facts`: database reads and no model call. A continuation gets the same brief.
 
 - **A rule is stated only when it would run.** It is derived from the same facts, so a run with no
-  words-to-avoid list is not told about one. Phase 2's ICP (`NO_CHECK`) gets no brief.
+  words-to-avoid list is not told about one. The ICP (`NO_CHECK`, both phases) gets no brief.
 - **`_WRITE_TO` is `_RUBRIC` worded for the writer.** Keep the two in step.
 - **A failed facts read never blocks a draft.** The brief is "" and the stage generates as before.
 - **The check still runs after and still scores.** It should now find little to fix.
@@ -1504,8 +1504,9 @@ download and the HTML report are the same document.
 - **It is not the asset's score.** `assetGlance` skips the section, otherwise an asset with no score of
   its own (a funnel, a lead magnet) would open on the check's scores as if they were its own.
 - **Only a finished check.** A running or failed check, or none, adds nothing.
-- **Phase 2's ICP is not checked at all.** It is built for one sub-service's buyer, with no
-  business-side document yet to hold it against. `checkAppliesTo` (`lib/businessCheck.ts`) is the
+- **The ICP is not checked at all, in either phase.** It is the first stage: the offer ladder and
+  CRO client settings it would be held against are written after it (and Phase 2's is built for one
+  sub-service's buyer). `checkAppliesTo` (`lib/businessCheck.ts`) is the
   one rule: the store does not run the check (no request, no cost), the card shows no panel, and a
   report stored on an older card never reaches the file. The route refuses with a 422 as well
   (`asset_check.NO_CHECK`), so a stale client cannot spend a judge call. Keep the two lists in step.

@@ -51,7 +51,8 @@ def test_every_checked_stage_gets_a_brief(phase: str, asset_id: str) -> None:
         assert check.replace("_", " ").capitalize() in brief, (asset_id, check)
 
 
-def test_phase2_icp_is_not_briefed() -> None:
+def test_icp_is_not_briefed_in_either_phase() -> None:
+    assert A.generation_brief("icp", "phase1", _facts()) == ""
     assert A.generation_brief("icp", "phase2", _facts()) == ""
 
 

@@ -94,16 +94,20 @@ const generation = (id: string, over: Partial<PipelineMessage> = {}): PipelineMe
 // --- stages that are not checked in a phase
 {
   ok("phase 2 ICP is not checked", !checkAppliesTo("phase2", "icp"));
-  ok("phase 1 ICP is checked", checkAppliesTo("phase1", "icp"));
-  ok("an unstamped card is a phase 1 card", checkAppliesTo(undefined, "icp"));
+  ok("phase 1 ICP is not checked", !checkAppliesTo("phase1", "icp"));
+  ok("an unstamped ICP card is not checked either", !checkAppliesTo(undefined, "icp"));
+  ok("an unstamped card is a phase 1 card", checkAppliesTo(undefined, "cro"));
   ok("other phase 2 stages are checked", checkAppliesTo("phase2", "cro") && checkAppliesTo("phase2", "blog"));
   ok("no asset, no check", !checkAppliesTo("phase1", undefined));
 
-  // A report already stored on a phase 2 ICP card (from before this rule) must not reach the file.
+  // A report already stored on an ICP card (from before this rule) must not reach the file, in
+  // either phase.
   const stale = generation("g0", { assetId: "icp", phase: "phase2", check: { status: "done", report: AFTER } });
   ok("a stored phase 2 ICP report adds nothing to the deliverable", businessCheckAppendixFor([stale], stale) === "" && assetAppendixFor([stale], stale) === "");
   const phase1 = generation("g00", { assetId: "icp", phase: "phase1", check: { status: "done", report: AFTER } });
-  ok("the same report on a phase 1 ICP still does", businessCheckAppendixFor([phase1], phase1).includes("# Business check"));
+  ok("a stored phase 1 ICP report adds nothing either", businessCheckAppendixFor([phase1], phase1) === "" && assetAppendixFor([phase1], phase1) === "");
+  const cro = generation("g01", { assetId: "cro", phase: "phase1", check: { status: "done", report: AFTER } });
+  ok("the same report on another stage still does", businessCheckAppendixFor([cro], cro).includes("# Business check"));
 }
 
 // --- nothing to show

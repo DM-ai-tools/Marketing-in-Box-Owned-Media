@@ -296,7 +296,7 @@ def test_route_404s_for_a_stage_the_phase_does_not_run() -> None:
     assert res.status_code == 404
 
 
-def test_phase2_icp_is_not_checked_but_phase1_icp_is(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_icp_is_not_checked_in_either_phase(monkeypatch: pytest.MonkeyPatch) -> None:
     called: list[str] = []
 
     async def facts(_run_id: str | None, _profile: dict[str, str], _asset: str, _phase: str = "phase1") -> BusinessFacts:
@@ -311,12 +311,13 @@ def test_phase2_icp_is_not_checked_but_phase1_icp_is(monkeypatch: pytest.MonkeyP
     monkeypatch.setattr(A, "_call_judge", judge)
     client = TestClient(app)
 
-    refused = client.post("/pipeline/check/icp", json={"text": "An ICP.", "phase": "phase2"})
-    assert refused.status_code == 422, refused.text
+    for phase in ("phase1", "phase2"):
+        refused = client.post("/pipeline/check/icp", json={"text": "An ICP.", "phase": phase})
+        assert refused.status_code == 422, refused.text
+        assert not A.check_applies("icp", phase)
     assert called == []  # no facts read, no model call, so nothing billed
 
-    assert client.post("/pipeline/check/icp", json={"text": "An ICP.", "phase": "phase1"}).status_code == 200
-    assert A.check_applies("icp", "phase1") and not A.check_applies("icp", "phase2")
+    assert client.post("/pipeline/check/cro", json={"text": "Copy.", "phase": "phase1"}).status_code == 200
     assert A.check_applies("cro", "phase2")
 
 

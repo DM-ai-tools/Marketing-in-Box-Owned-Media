@@ -22,10 +22,10 @@ export function isBusinessCheckHeading(line: string): boolean {
   return line.trim() === BUSINESS_CHECK_HEADING;
 }
 
-/** Stages that get no business check in a phase. Phase 2's ICP is built for one sub-service's buyer
- * (`Phase2/ICP_phase2.md`) and there is no business-side document yet to hold it against, so the
- * check had nothing real to compare it with. Keep in step with `asset_check.NO_CHECK`. */
-const NO_CHECK: ReadonlySet<string> = new Set(["phase2:icp"]);
+/** Stages that get no business check in a phase. The ICP is not checked in either phase: it is the
+ * first stage, and the business-side documents it would be held against are written after it.
+ * Keep in step with `asset_check.NO_CHECK`. */
+const NO_CHECK: ReadonlySet<string> = new Set(["phase1:icp", "phase2:icp"]);
 
 /** Whether a draft of `assetId` is checked at all. An unstamped card predates per-phase stamping
  * and belongs to a Phase 1 chat. One rule for the three places that need it: running the check,

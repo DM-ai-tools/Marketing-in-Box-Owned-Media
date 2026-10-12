@@ -67,11 +67,12 @@ CHECKS_BY_ASSET: dict[str, tuple[str, ...]] = {
     "plan_of_action": ("business_logic",),
 }
 
-#: Stages that get no business check in a phase, as `(phase, asset_id)`. Phase 2's ICP is built for
-#: one sub-service's buyer and there is no business-side document yet to hold it against. The UI
-#: never asks (`checkAppliesTo` in `lib/businessCheck.ts` — keep the two in step); the route refuses
-#: so a stale client cannot spend a judge call on it.
-NO_CHECK: frozenset[tuple[str, str]] = frozenset({("phase2", "icp")})
+#: Stages that get no business check in a phase, as `(phase, asset_id)`. The ICP is not checked in
+#: either phase: it is the first stage, and the business-side documents it would be held against (the
+#: offer ladder, the CRO client settings) are written after it. Phase 2's is also built for one
+#: sub-service's buyer. The UI never asks (`checkAppliesTo` in `lib/businessCheck.ts` — keep the two
+#: in step); the route refuses so a stale client cannot spend a judge call on it.
+NO_CHECK: frozenset[tuple[str, str]] = frozenset({("phase1", "icp"), ("phase2", "icp")})
 
 
 def check_applies(asset_id: str, phase: str) -> bool:
