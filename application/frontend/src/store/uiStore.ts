@@ -29,6 +29,13 @@ export type ReaderView = "visual" | "text";
  * cards. */
 export type WorkTab = "transcript" | "deliverables";
 
+/** What `AhrefsActivity` draws. `count`/`unit` are the measured result it counts up to. */
+export type AhrefsActivity =
+  | { id: number; phase: "working"; label: string }
+  | { id: number; phase: "done"; label: string; count: number; unit: string; extra?: string };
+
+let ahrefsActivitySeq = 0;
+
 interface UiState {
   /** The chat-history drawer. Only ever open below `lg`; from `lg` up the sidebar is permanent. */
   sidebarOpen: boolean;
@@ -82,6 +89,20 @@ interface UiState {
   /** The generation card the delete confirmation is asking about. Root-mounted for the reason
    * `pendingChatDelete` is: the card animates on `transform`. See `GenerationDeleteDialog`. */
   pendingGenerationDelete: { messageId: string; label: string; approved: boolean } | null;
+  /** A keyword-data failure to tell the operator about (Ahrefs unconfigured, rejected, out of units,
+   * unreachable). Shown by `ProviderNoticeToast` at the root until dismissed: the stage carries on
+   * without volumes, so it is a notice, not a blocking dialog. Not persisted. */
+  providerNotice: { title: string; detail: string } | null;
+  notifyProvider: (notice: { title: string; detail: string }) => void;
+  dismissProviderNotice: () => void;
+  /** Ahrefs at work, for `AhrefsActivity` at the root: `working` while a keyword call is in flight,
+   * `done` with what it measured once it lands. `id` lets a finish ignore a newer start, so two
+   * overlapping calls cannot end each other's animation. Failures clear it; the reason goes to
+   * `providerNotice`. Not persisted. */
+  ahrefsActivity: AhrefsActivity | null;
+  startAhrefsActivity: (label: string) => number;
+  finishAhrefsActivity: (id: number, done: { label: string; count: number; unit: string; extra?: string }) => void;
+  clearAhrefsActivity: (id?: number) => void;
   askDeleteGeneration: (target: { messageId: string; label: string; approved: boolean }) => void;
   cancelDeleteGeneration: () => void;
   /** The reader's view: visuals by default, the exported text one click away. */
@@ -125,6 +146,7 @@ export const useUiStore = create<UiState>((set) => ({
   demoMode: false,
   pendingChatDelete: null,
   pendingGenerationDelete: null,
+  providerNotice: null,
   openSidebar: () => set({ sidebarOpen: true }),
   closeSidebar: () => set({ sidebarOpen: false }),
   toggleSidebar: () => set((s) => ({ sidebarOpen: !s.sidebarOpen })),
@@ -172,6 +194,17 @@ export const useUiStore = create<UiState>((set) => ({
   toggleDemoMode: () => set((s) => ({ demoMode: !s.demoMode, readerMessageId: null })),
   askDeleteChat: (pendingChatDelete) => set({ pendingChatDelete }),
   cancelDeleteChat: () => set({ pendingChatDelete: null }),
+  ahrefsActivity: null,
+  startAhrefsActivity: (label) => {
+    const id = ++ahrefsActivitySeq;
+    set({ ahrefsActivity: { id, phase: "working", label } });
+    return id;
+  },
+  finishAhrefsActivity: (id, done) =>
+    set((s) => (s.ahrefsActivity?.id === id ? { ahrefsActivity: { id, phase: "done", ...done } } : {})),
+  clearAhrefsActivity: (id) => set((s) => (id === undefined || s.ahrefsActivity?.id === id ? { ahrefsActivity: null } : {})),
+  notifyProvider: (providerNotice) => set({ providerNotice }),
+  dismissProviderNotice: () => set({ providerNotice: null }),
   askDeleteGeneration: (pendingGenerationDelete) => set({ pendingGenerationDelete }),
   cancelDeleteGeneration: () => set({ pendingGenerationDelete: null }),
 }));

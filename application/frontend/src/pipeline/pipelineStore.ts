@@ -45,6 +45,7 @@ import type {
   CompetitorAnalysisResult,
   HeadlineCandidate,
   IndustryProfileResult,
+  KeywordReportResult,
   PlanSubServiceCandidate,
   PrepassEvent,
   ScannedService,
@@ -88,6 +89,7 @@ import {
 } from "./pipelineData";
 import type { PickedService, PipelinePhase } from "./pipelineData";
 import { SUB_SERVICE_FACT, phase2StartingContext } from "../data/phase2Catalog";
+import { useUiStore } from "../store/uiStore";
 import { PLAN_COMPOSED_KEYS, SERVER_COMPOSED_CONTEXT_KEYS } from "../data/assetCatalog";
 import { INDUSTRY_PROFILES, isIndustryBucket, notRecommendedReason } from "../data/industryProfiles";
 import { specifyPrefix } from "../lib/specifyChoice";
@@ -152,9 +154,11 @@ export interface PlanDiscoveryState {
   primaryService: string;
   region: string;
   candidates: PlanSubServiceCandidate[];
-  /** "dataforseo" when the volumes are measured. */
+  /** "ahrefs" when the volumes are measured. */
   volumeSource: string;
   location: string;
+  /** Why the volumes are missing (Ahrefs unconfigured or failing), shown as a warning on the card. */
+  volumeError?: string;
   /** Names confirmed, for the history view. */
   chosenNames?: string[];
 }
@@ -416,6 +420,9 @@ export interface PipelineMessage {
   advisory?: StageAdvisoryState;
   /** On a generation card: the check of this draft against the client's business. */
   check?: AssetCheckState;
+  /** On the keyword prepass's announcement: what it mapped, so every later asset's "Ahrefs keyword
+   * data" section can say what search demand it was written against (`lib/ahrefsUsage.ts`). */
+  keywordReport?: KeywordReportResult;
   /** On a CRO card that rebuilt the client's real page: where the assembly got to. Absent for every
    * stage that does not assemble (the pillar page, copy-only CRO). See `ReplicaPanel`. */
   replica?: ReplicaState;
@@ -2147,13 +2154,26 @@ async function runKeywordPrepass(
   const phase = get().phase;
   if (!runId) return;
 
+  // The Ahrefs chip runs while the request is out. It finishes with the count only when Ahrefs
+  // actually answered; a skipped run or the stub provider clears it without claiming anything.
+  const ui = useUiStore.getState();
+  const activity = ui.startAhrefsActivity("Mapping search demand…");
   try {
     const result = await buildRunKeywords(runId, get().clientProfile, phase, {
       chatSessionId: get().sessionId,
     });
+    if (result.status === "skipped" || result.provider !== "ahrefs") ui.clearAhrefsActivity(activity);
     if (result.status === "skipped") return; // no service anchored yet — nothing to say
 
     const clusters = result.clusters.length;
+    if (result.provider === "ahrefs") {
+      ui.finishAhrefsActivity(activity, {
+        label: result.status === "reused" ? `Search demand for ${result.service} (already measured)` : `Search demand for ${result.service}`,
+        count: result.total_keywords,
+        unit: result.total_keywords === 1 ? "keyword" : "keywords",
+        extra: `${clusters} ${clusters === 1 ? "cluster" : "clusters"}`,
+      });
+    }
     push(get, set, {
       role: "assistant",
       kind: "text",
@@ -2161,14 +2181,21 @@ async function runKeywordPrepass(
         `Mapped search demand for ${result.service}: ${result.total_keywords} keywords in ` +
         `${clusters} topic ${clusters === 1 ? "cluster" : "clusters"}. Topic suggestions from here ` +
         `on are built from this.`,
+      keywordReport: result,
     });
   } catch (err) {
+    ui.clearAhrefsActivity(activity);
+    const reason = err instanceof Error ? err.message : String(err);
     push(get, set, {
       role: "assistant",
       kind: "text",
       text:
         "Couldn't map search demand for this run — topic suggestions will still work, but they " +
-        `won't carry search volumes. (${err instanceof Error ? err.message : String(err)})`,
+        `won't carry search volumes. (${reason})`,
+    });
+    useUiStore.getState().notifyProvider({
+      title: "Ahrefs keyword data unavailable",
+      detail: `${reason} Topic suggestions carry on without search volumes.`,
     });
   }
 }
@@ -2626,8 +2653,22 @@ async function loadPlanDiscovery(get: () => PipelineState, set: (partial: Partia
     });
     return;
   }
+  const ui = useUiStore.getState();
+  const activity = ui.startAhrefsActivity(`Sizing ${plan.primaryService} sub-services…`);
   try {
     const result = await discoverSubServices(plan.primaryService, { url: scan.url, region: plan.region, ...attribution(get) });
+    // Finished with a count only when Ahrefs measured something; otherwise the chip just leaves.
+    const measured = result.candidates.flatMap((c) => c.keywords).filter((k) => k.volume !== null).length;
+    if (result.volume_source === "ahrefs") {
+      ui.finishAhrefsActivity(activity, {
+        label: `${plan.primaryService} sub-services${result.location ? `, ${result.location}` : ""}`,
+        count: measured,
+        unit: measured === 1 ? "keyword measured" : "keywords measured",
+        extra: `${result.candidates.length} sub-services`,
+      });
+    } else {
+      ui.clearAhrefsActivity(activity);
+    }
     const current = get().messages.find((m) => m.id === messageId)?.serviceScan;
     if (!current?.plan || current.status !== "loading") return;
     patchMessage(get, set, messageId, {
@@ -2639,10 +2680,21 @@ async function loadPlanDiscovery(get: () => PipelineState, set: (partial: Partia
         // Every suggestion starts ticked: the operator's job on this card is to take out what does
         // not belong, and an unticked list would read as "nothing recommended".
         preselected: result.candidates.map((c) => c.name),
-        plan: { ...current.plan, candidates: result.candidates, volumeSource: result.volume_source, location: result.location },
+        plan: {
+          ...current.plan,
+          candidates: result.candidates,
+          volumeSource: result.volume_source,
+          location: result.location,
+          volumeError: result.volume_error || undefined,
+        },
       },
     });
+    // The list stands without volumes, but the operator has to know why the numbers are missing.
+    if (result.volume_error) {
+      useUiStore.getState().notifyProvider({ title: "Ahrefs search volumes unavailable", detail: result.volume_error });
+    }
   } catch (err) {
+    ui.clearAhrefsActivity(activity);
     const current = get().messages.find((m) => m.id === messageId)?.serviceScan;
     if (!current) return;
     patchMessage(get, set, messageId, {

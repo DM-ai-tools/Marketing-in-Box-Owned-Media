@@ -1,8 +1,9 @@
 """Keyword expansion and topical clustering, as a service the pipeline can call.
 
 This is `experiments/keyword_clustering/run_keyword_clustering.py` promoted into the app. The
-experiment proved the pipeline end to end against real DataForTopicClusttering data; what changes here is
-everything around the edges, not the logic:
+experiment proved the pipeline end to end against real provider data; what changes here is
+everything around the edges, not the logic. The provider is Ahrefs Keywords Explorer, through
+`ahrefs_client.py` (it replaced DataForSEO):
 
   * No terminal. `KeywordRunConfig` is built from the run-level client profile the ICP stage has
     already captured — industry, region, website, and the service (Phase 1) or sub-service
@@ -13,7 +14,7 @@ everything around the edges, not the logic:
   * Usage is reported through the same `on_usage` callback every other calling service uses, so
     keyword spend lands in the usage panel next to generation spend instead of being invisible.
   * `KEYWORDS_PROVIDER=stub` replaces the experiment's `--dry-run` flag, so the whole feature can
-    be exercised — frontend included — without spending anything at DataForTopicClusttering.
+    be exercised — frontend included — without spending anything at Ahrefs.
 
 The Step 2 cleaning pipeline and the Step 3 validator are ported essentially verbatim. They are
 pure functions over strings, they are the part the experiment's saved output was verified against,
@@ -28,7 +29,6 @@ pipeline`, `validate_clusters()`, `keyword_relevance.evaluate_keyword`. Those de
 from __future__ import annotations
 
 import asyncio
-import base64
 import json
 import logging
 import os
@@ -43,6 +43,7 @@ from typing import Any
 
 import httpx
 
+from app.services import ahrefs_client
 from app.services.claude_client import get_client
 from app.services.usage import CallUsage
 
@@ -52,13 +53,9 @@ _BACKEND_ROOT = Path(__file__).resolve().parents[2]  # .../application/backend
 _PROMPT_PATH = _BACKEND_ROOT / "assets" / "word_fetching_prompt" / "key_word_clusttering.txt"
 
 # The prompt's Step 4 preserves each seed's exact / phrase / related / broad keywords. Those are
-# Google-Ads match classes, and DataForTopicClusttering Labs has one endpoint per class — this is the mapping.
-MATCH_CLASS_ENDPOINTS = {
-    "phrase": "dataforseo_labs/google/keyword_suggestions/live",
-    "related": "dataforseo_labs/google/related_keywords/live",
-    "broad": "dataforseo_labs/google/keyword_ideas/live",
-}
-DataForTopicClusttering_BASE = "https://api.dataforseo.com/v3/"
+# Google-Ads match classes; `ahrefs_client.MATCH_CLASS_ENDPOINTS` maps each to a Keywords Explorer
+# endpoint.
+MATCH_CLASS_ENDPOINTS = ahrefs_client.MATCH_CLASS_ENDPOINTS
 
 MODEL = "claude-sonnet-5"
 _MAX_TOKENS = 64000
@@ -76,13 +73,14 @@ _EFFORT = "medium"
 _CACHE_TTL = "1h"
 
 # Expansion is 3 HTTP calls per seed and seeds are independent, so they go out together. Bounded
-# because DataForTopicClusttering rate-limits per account and a 12-seed run would otherwise open 36 sockets at
+# because Ahrefs rate-limits per account and a 12-seed run would otherwise open 36 sockets at
 # once against an API that answers in seconds, not milliseconds.
 _MAX_CONCURRENT_EXPANSIONS = 6
 
 
 class KeywordProviderError(RuntimeError):
-    """DataForTopicClusttering refused a request, or answered in a shape we cannot read."""
+    """Ahrefs refused a request, answered in a shape we cannot read, or the region names no country
+    it has data for. The message is one sentence the operator can act on."""
 
 
 # ======================================================================================
@@ -131,7 +129,8 @@ class KeywordRunConfig:
 
 
 # Seeds are the service name plus the handful of phrasings a buyer actually searches for. Kept
-# deliberately small: every seed costs three DataForTopicClusttering calls, and the expansion endpoints return
+# deliberately small: every seed costs three Ahrefs calls (billed in API units per row), and the
+# expansion endpoints return
 # the long tail anyway — a seed list is a set of *starting points*, not a keyword list.
 _SEED_SUFFIXES = ("services", "agency")
 
@@ -217,161 +216,24 @@ class RawKeyword:
     source: str
 
 
-def _dig(item: dict, *paths: tuple[str, ...]) -> Any:
-    """First non-None value among several nested paths.
-
-    DataForTopicClusttering nests differently per endpoint — `keyword_suggestions` wraps everything under
-    `keyword_data`, `keyword_ideas` sometimes returns it flat. Rather than branch per endpoint
-    (and break the moment one of them changes shape), try both and take whichever answers.
-    """
-    for path in paths:
-        cursor: Any = item
-        for key in path:
-            if not isinstance(cursor, dict):
-                cursor = None
-                break
-            cursor = cursor.get(key)
-        if cursor is not None:
-            return cursor
-    return None
-
-
-class DataForTopicClustteringClient:
-    """Minimal async DataForTopicClusttering Labs client — just the four calls the match classes need."""
-
-    def __init__(self, login: str, password: str, timeout: float = 90.0) -> None:
-        token = base64.b64encode(f"{login}:{password}".encode()).decode()
-        self._client = httpx.AsyncClient(
-            base_url=DataForTopicClusttering_BASE,
-            headers={"Authorization": f"Basic {token}", "Content-Type": "application/json"},
-            timeout=timeout,
-        )
-
-    async def aclose(self) -> None:
-        await self._client.aclose()
-
-    async def _post(self, endpoint: str, payload: dict) -> list[dict]:
-        response = await self._client.post(endpoint, json=[payload])
-        response.raise_for_status()
-        body = response.json()
-
-        tasks = body.get("tasks") or []
-        if not tasks:
-            raise KeywordProviderError(f"{endpoint}: no tasks in response ({body.get('status_message')})")
-        task = tasks[0]
-        # DataForTopicClusttering reports per-task failures inside a 200 response — an unknown location_name
-        # arrives here, not as an HTTP error.
-        if task.get("status_code") != 20000:
-            raise KeywordProviderError(f"{endpoint}: {task.get('status_code')} {task.get('status_message')}")
-        results = task.get("result") or []
-        if not results:
-            return []
-        return results[0].get("items") or []
-
-    async def locations(self) -> list[str]:
-        """Every `location_name` the Labs endpoints accept.
-
-        A GET, not a POST like everything else here, and it returns its rows directly under
-        `result` rather than nested in `result[0].items` — so it cannot share `_post`.
-        """
-        response = await self._client.get(_LOCATIONS_ENDPOINT)
-        response.raise_for_status()
-        tasks = response.json().get("tasks") or []
-        if not tasks or tasks[0].get("status_code") != 20000:
-            status = tasks[0].get("status_message") if tasks else "no tasks in response"
-            raise KeywordProviderError(f"{_LOCATIONS_ENDPOINT}: {status}")
-        return [str(row["location_name"]) for row in (tasks[0].get("result") or []) if row.get("location_name")]
-
-    async def expand(
-        self, seed: str, match_class: str, config: KeywordRunConfig
-    ) -> list[tuple[str, int | None, int | None]]:
-        endpoint = MATCH_CLASS_ENDPOINTS[match_class]
-        payload: dict[str, Any] = {
-            "location_name": config.location_name,
-            "language_name": config.language_name,
-            "limit": config.limit_per_class,
-        }
-        if match_class == "broad":
-            payload["keywords"] = [seed]
-        else:
-            payload["keyword"] = seed
-        if match_class == "phrase":
-            payload["include_seed_keyword"] = True
-        if match_class == "related":
-            payload["depth"] = 2
-
-        out: list[tuple[str, int | None, int | None]] = []
-        for item in await self._post(endpoint, payload):
-            keyword = _dig(item, ("keyword_data", "keyword"), ("keyword",))
-            if not keyword:
-                continue
-            volume = _dig(
-                item,
-                ("keyword_data", "keyword_info", "search_volume"),
-                ("keyword_info", "search_volume"),
-            )
-            difficulty = _dig(
-                item,
-                ("keyword_data", "keyword_properties", "keyword_difficulty"),
-                ("keyword_properties", "keyword_difficulty"),
-            )
-            out.append((str(keyword), volume, difficulty))
-        return out
-
-    async def overview(
-        self, keywords: list[str], config: KeywordRunConfig
-    ) -> dict[str, tuple[int | None, int | None]]:
-        """Volume/difficulty for the seeds themselves — the `exact` match class."""
-        items = await self._post(
-            "dataforseo_labs/google/keyword_overview/live",
-            {
-                "keywords": keywords,
-                "location_name": config.location_name,
-                "language_name": config.language_name,
-            },
-        )
-        out: dict[str, tuple[int | None, int | None]] = {}
-        for item in items:
-            keyword = _dig(item, ("keyword",), ("keyword_data", "keyword"))
-            if not keyword:
-                continue
-            out[str(keyword).lower()] = (
-                _dig(item, ("keyword_info", "search_volume"), ("keyword_data", "keyword_info", "search_volume")),
-                _dig(
-                    item,
-                    ("keyword_properties", "keyword_difficulty"),
-                    ("keyword_data", "keyword_properties", "keyword_difficulty"),
-                ),
-            )
-        return out
-
-
 # ======================================================================================
 # Location resolution
 #
-# `location_name` is filled from the ICP intake's free-text "region" answer, and DataForTopicClusttering Labs
-# accepts only names from its own list. Verified against the live API: that list holds **94 entries
-# and every one is a country**. There is no Melbourne, no Victoria, no California — not under any
-# spelling, because sub-national locations are not supported by these endpoints at all.
+# `location_name` is filled from the ICP intake's free-text "region" answer, and Ahrefs Keywords
+# Explorer accepts only a two-letter **country** code from its own list (`ahrefs_client.COUNTRIES`,
+# verified against the live API). There is no Melbourne, no Victoria, no California: volumes are
+# national.
 #
-# That is what makes this a lookup rather than string surgery. An earlier version here split the
-# region on commas and tried progressively broader forms, which happens to rescue
-# "Melbourne,Victoria,Australia" and does nothing whatsoever for "Melbourne VIC Australia" — the
-# form an operator actually typed. Any such heuristic is a guess at how someone writes an address;
-# matching against the real list is a guess at nothing.
+# That is what makes this a lookup rather than string surgery. Splitting the region on commas and
+# trying broader forms rescues "Melbourne,Victoria,Australia" and does nothing for "Melbourne VIC
+# Australia" — the form an operator actually types. Matching against the real list guesses at
+# nothing.
 # ======================================================================================
 
-_LOCATIONS_ENDPOINT = "dataforseo_labs/locations_and_languages"
-
-# Cached for the process. The list is 94 country names and changes about never, so re-fetching it
-# per run would spend a request to learn the same thing.
-_supported_locations: tuple[str, ...] | None = None
-_locations_lock = asyncio.Lock()
-
-# What people write, mapped to what the API calls it. Only for cases the substring match cannot
-# reach on its own — an abbreviation or an older name shares no words with the supported entry, so
-# no amount of matching finds it. Everything that *does* share a word ("Melbourne VIC Australia" ->
-# Australia) is handled by the matcher and must not be listed here.
+# What people write, mapped to the name in `ahrefs_client.COUNTRIES`. Only for cases the phrase
+# match cannot reach on its own — an abbreviation or an older name shares no words with the
+# supported entry. Everything that *does* share a word ("Melbourne VIC Australia" -> Australia) is
+# handled by the matcher and must not be listed here.
 _LOCATION_ALIASES: dict[str, str] = {
     "usa": "United States",
     "u s a": "United States",
@@ -395,10 +257,14 @@ _LOCATION_ALIASES: dict[str, str] = {
     "czech republic": "Czechia",
     "holland": "Netherlands",
     "ivory coast": "Cote d'Ivoire",
-    "burma": "Myanmar (Burma)",
+    "burma": "Myanmar",
     "macedonia": "North Macedonia",
     "uae dubai": "United Arab Emirates",
 }
+
+# Sub-national names that contain a country's (or an alias's) name, removed before matching: "New
+# South Wales" is in Australia, not the United Kingdom, and "New Mexico" is not Mexico.
+_SUB_NATIONAL = ("new south wales", "new jersey", "new mexico", "new england")
 
 
 def _words(text: str) -> str:
@@ -418,9 +284,8 @@ def match_location(region: str, supported: Iterable[str]) -> str | None:
       3. A known alias appears the same way ("Dubai, UAE" -> United Arab Emirates).
 
     Where several match, the *earliest* in the string wins: "Australia and New Zealand" resolves to
-    Australia, because someone listing markets leads with their main one. (Preferring the longest
-    match instead would answer New Zealand, and it buys nothing — verified against the live list,
-    no supported name is a whole-phrase substring of another, so there is no overlap to break.)
+    Australia, because someone listing markets leads with their main one. A longer name starting at
+    the same place wins over a shorter one inside it ("Papua New Guinea", not "Guinea").
 
     Returns None rather than guessing when nothing matches — a city with no country ("Sydney NSW")
     is genuinely unresolvable here, and see `resolve_location` for why a wrong country is worse than
@@ -429,84 +294,52 @@ def match_location(region: str, supported: Iterable[str]) -> str | None:
     if not region or not region.strip():
         return None
 
-    needle = _words(region)
-    by_name = {name.lower(): name for name in supported}
-
+    names = list(supported)
+    by_name = {name.lower(): name for name in names}
     exact = by_name.get(region.strip().lower())
     if exact:
         return exact
 
-    contained = [(needle.index(_words(name)), name) for name in supported if _words(name) in needle]
-    if contained:
-        return min(contained)[1]
+    needle = _words(region)
+    for phrase in _SUB_NATIONAL:
+        needle = needle.replace(_words(phrase), " ")
 
-    aliased = [(needle.index(_words(a)), a) for a in _LOCATION_ALIASES if _words(a) in needle]
+    contained = [(needle.index(_words(name)), -len(name), name) for name in names if _words(name) in needle]
+    if contained:
+        return min(contained)[2]
+
+    aliased = [(needle.index(_words(a)), -len(a), a) for a in _LOCATION_ALIASES if _words(a) in needle]
     if aliased:
-        canonical = _LOCATION_ALIASES[min(aliased)[1]]
-        # Only if the API actually still lists it — an alias table can outlive its target.
+        canonical = _LOCATION_ALIASES[min(aliased)[2]]
+        # Only if the provider actually still lists it — an alias table can outlive its target.
         return by_name.get(canonical.lower())
 
     return None
 
 
-async def supported_locations(dfs: DataForTopicClustteringClient) -> tuple[str, ...]:
-    """Every `location_name` the Labs endpoints accept, fetched once per process.
+def resolve_location(config: KeywordRunConfig) -> str:
+    """The Ahrefs country for this run, resolved from the operator's free-text region.
 
-    Returns an empty tuple if the list cannot be fetched. The caller then leaves the operator's
-    region untouched rather than second-guessing it — being unable to check a name is not evidence
-    that it is wrong.
-    """
-    global _supported_locations
-    if _supported_locations is not None:
-        return _supported_locations
-
-    async with _locations_lock:
-        if _supported_locations is not None:  # filled while waiting on the lock
-            return _supported_locations
-        try:
-            names = await dfs.locations()
-        except Exception as exc:  # noqa: BLE001 — an unreachable list must not fail the run
-            logger.warning("Could not fetch the supported location list (%s)", exc)
-            return ()
-        _supported_locations = tuple(names)
-        logger.info("Loaded %d supported keyword locations", len(_supported_locations))
-        return _supported_locations
-
-
-async def resolve_location(dfs: DataForTopicClustteringClient, config: KeywordRunConfig) -> str:
-    """The supported location name for this run, resolved from the operator's free-text region.
-
-    Resolved once, up front, so the ~12 expansion calls that follow all carry a name known to work
-    rather than each discovering the same rejection separately — which is exactly what produced a
-    wall of identical `40501 Invalid Field: 'location_name'` errors and a run with nothing in it but
-    its own seeds.
+    Resolved once, up front, so the expansion calls that follow all carry a country known to work
+    rather than each discovering the same 400 separately.
 
     Widening a region to its country changes what the volumes mean — national demand is not metro
-    demand — so the substitution is logged loudly with both names. It is still the right trade,
-    because the country figure is the only one these endpoints can produce.
+    demand — so the substitution is logged with both names. It is still the right trade, because
+    the country figure is the only one Ahrefs can produce.
 
-    An unmatched region is left exactly as the operator wrote it, and the run then fails with the
-    provider's own complaint. The alternative — falling back to a default country — would build a
-    keyword set for somewhere the client does not trade and report it as fact.
+    An unmatched region raises `KeywordProviderError` with a sentence the operator can act on. The
+    alternative — a default country — would build a keyword set for somewhere the client does not
+    trade and report it as fact.
     """
-    supported = await supported_locations(dfs)
-    if not supported:
-        return config.location_name
-
-    matched = match_location(config.location_name, supported)
+    matched = match_location(config.location_name, ahrefs_client.COUNTRIES)
     if matched is None:
-        logger.warning(
-            "Region %r does not name any of the %d locations the keyword provider supports "
-            "(they are all countries). Sending it unchanged.",
-            config.location_name,
-            len(supported),
+        raise KeywordProviderError(
+            f"Region {config.location_name!r} does not name a country Ahrefs has keyword data for. "
+            "Add the country to the region answer (for example \"Melbourne, Australia\")."
         )
-        return config.location_name
-
     if matched != config.location_name:
-        logger.warning(
-            "Region %r is not a supported keyword location; using %r. Search volumes will be "
-            "national, not local — these endpoints have no sub-national locations at all.",
+        logger.info(
+            "Region %r resolved to %r for Ahrefs. Search volumes are national, not local.",
             config.location_name,
             matched,
         )
@@ -516,18 +349,16 @@ async def resolve_location(dfs: DataForTopicClustteringClient, config: KeywordRu
 def provider_name() -> str:
     """Which keyword source this process is configured for.
 
-    `stub` is the experiment's `--dry-run` promoted to configuration: it exercises the whole
-    pipeline — clean, hierarchy, cluster, validate, and every piece of UI downstream of it — on
-    fabricated keywords, at zero provider spend. It is also the automatic fallback when no
-    DataForTopicClusttering credentials are present, so a developer without a key gets a working pipeline
-    rather than a 500.
+    `stub` exercises the whole pipeline — clean, hierarchy, cluster, validate, and every piece of UI
+    downstream of it — on fabricated keywords, at zero provider spend. It is also the automatic
+    fallback when no `AHREFS_API_KEY` is present, so a developer without a key gets a working
+    pipeline rather than a 500. The stub's numbers never reach a Plan of Action as measured
+    volumes: `sub_service_discovery` refuses them.
     """
     configured = (os.environ.get("KEYWORDS_PROVIDER") or "").strip().lower()
-    if configured in {"stub", "DataForTopicClusttering"}:
+    if configured in {"stub", "ahrefs"}:
         return configured
-    if os.environ.get("DataForTopicClusttering_LOGIN") and os.environ.get("DataForTopicClusttering_PASSWORD"):
-        return "DataForTopicClusttering"
-    return "stub"
+    return "ahrefs" if ahrefs_client.is_configured() else "stub"
 
 
 def _stub_keywords(config: KeywordRunConfig) -> list[RawKeyword]:
@@ -553,33 +384,32 @@ def _stub_keywords(config: KeywordRunConfig) -> list[RawKeyword]:
 
 async def fetch_keywords(
     config: KeywordRunConfig,
-    dfs: DataForTopicClustteringClient | None,
+    client: ahrefs_client.AhrefsClient | None,
     errors: list[str] | None = None,
 ) -> list[RawKeyword]:
     """Service -> seed -> {exact, phrase, related, broad}. Every seed is kept even when empty,
     per the prompt's "Keep every seed in the service hierarchy even if its extracted keyword
     lists are empty".
 
-    A per-class failure is survivable — the other three classes still have data — so each one is
-    caught rather than raised. But the *reason* must not die in the log: when every class fails the
-    same way ("Invalid Field: 'location_name'"), that sentence is the entire diagnosis, and a caller
-    that only sees an empty list has to guess at it.
+    `config.location_name` must already be a name in `ahrefs_client.COUNTRIES` (`resolve_location`).
 
-    So pass `errors` to collect them. An out-parameter rather than a richer return type because
-    every caller wants the keywords and only one wants the failures, and widening the return type
-    would push that asymmetry onto all of them.
+    A per-class failure is survivable — the other classes still have data — so each one is caught
+    rather than raised. But the *reason* must not die in the log: when every class fails the same
+    way ("Ahrefs rejected the API key"), that sentence is the entire diagnosis, and a caller that
+    only sees an empty list has to guess at it. So pass `errors` to collect them.
     """
-    if dfs is None:
+    if client is None:
         return _stub_keywords(config)
 
+    country = ahrefs_client.country_code(config.location_name)
     raw: list[RawKeyword] = []
     all_seeds = [s for seeds in config.services.values() for s in seeds]
     try:
-        exact_metrics = await dfs.overview(all_seeds, config)
+        exact_metrics = await client.overview(all_seeds, country)
     except Exception as exc:  # noqa: BLE001 — the seed's own metrics are a nice-to-have
-        logger.warning("keyword_overview failed (%s); seeds will carry null volume", exc)
+        logger.warning("Ahrefs overview failed (%s); seeds will carry null volume", exc)
         if errors is not None:
-            errors.append(f"keyword_overview: {exc}")
+            errors.append(f"overview: {exc}")
         exact_metrics = {}
 
     semaphore = asyncio.Semaphore(_MAX_CONCURRENT_EXPANSIONS)
@@ -587,7 +417,7 @@ async def fetch_keywords(
     async def one(service: str, seed: str, match_class: str) -> list[RawKeyword]:
         async with semaphore:
             try:
-                rows = await dfs.expand(seed, match_class, config)
+                rows = await client.expand(seed, match_class, country, config.limit_per_class)
             except Exception as exc:  # noqa: BLE001 — one class failing must not lose the others
                 logger.warning("%s expansion for %r failed: %s", match_class, seed, exc)
                 if errors is not None:
@@ -599,13 +429,23 @@ async def fetch_keywords(
             logger.warning("%s / %s / %s: no keywords returned", service, seed, match_class)
         else:
             logger.info("%s / %s / %s: %d keywords", service, seed, match_class, len(rows))
-        return [RawKeyword(kw, vol, diff, match_class, seed, service, "DataForTopicClusttering") for kw, vol, diff in rows]
+        return [RawKeyword(m.keyword, m.volume, m.difficulty, match_class, seed, service, "ahrefs") for m in rows]
 
     jobs = []
     for service, seeds in config.services.items():
         for seed in seeds:
-            volume, difficulty = exact_metrics.get(seed.lower(), (None, None))
-            raw.append(RawKeyword(seed, volume, difficulty, "exact", seed, service, "DataForTopicClusttering"))
+            seed_metrics = exact_metrics.get(seed.lower())
+            raw.append(
+                RawKeyword(
+                    seed,
+                    seed_metrics.volume if seed_metrics else None,
+                    seed_metrics.difficulty if seed_metrics else None,
+                    "exact",
+                    seed,
+                    service,
+                    "ahrefs",
+                )
+            )
             jobs += [one(service, seed, cls_) for cls_ in ("phrase", "related", "broad")]
 
     for batch in await asyncio.gather(*jobs):
@@ -1236,6 +1076,8 @@ class KeywordReport:
     vocabulary: list[str]
     dropped: list[dict]
     warnings: list[str]
+    #: The country the volumes are for (Ahrefs has countries only). "" for the stub provider.
+    location: str = ""
 
     def to_context_value(self) -> dict:
         """The JSONB payload written to `context_entries.value`.
@@ -1252,27 +1094,28 @@ class KeywordReport:
             "provider": self.provider,
             "config_fingerprint": self.config_fingerprint,
             "warnings": self.warnings,
+            "location": self.location,
         }
 
 
 async def build_keyword_report(config: KeywordRunConfig, on_usage: OnUsage | None = None) -> KeywordReport:
     """Fetch, clean, cluster and validate — the whole experiment, once, for one config."""
     provider = provider_name()
-    dfs: DataForTopicClustteringClient | None = None
-    if provider == "DataForTopicClusttering":
-        dfs = DataForTopicClustteringClient(os.environ["DataForTopicClusttering_LOGIN"], os.environ["DataForTopicClusttering_PASSWORD"])
-
+    client: ahrefs_client.AhrefsClient | None = None
     provider_errors: list[str] = []
-    resolved_location = config.location_name
+    if provider == "ahrefs":
+        # Settle the country before spending a dozen calls on it — see `resolve_location`. Raises
+        # with an actionable sentence when the region names no country Ahrefs has.
+        config = replace(config, location_name=resolve_location(config))
+        try:
+            client = ahrefs_client.AhrefsClient()
+        except ahrefs_client.AhrefsError as exc:
+            raise KeywordProviderError(str(exc)) from exc
     try:
-        if dfs is not None:
-            # Settle the location before spending a dozen calls on it — see `resolve_location`.
-            resolved_location = await resolve_location(dfs, config)
-            config = replace(config, location_name=resolved_location)
-        raw = await fetch_keywords(config, dfs, provider_errors)
+        raw = await fetch_keywords(config, client, provider_errors)
     finally:
-        if dfs is not None:
-            await dfs.aclose()
+        if client is not None:
+            await client.aclose()
 
     clean, dropped, vocabulary = run_keyword_pipeline(raw, config)
     logger.info("Keyword pipeline: %d raw -> %d clean (%d dropped)", len(raw), len(clean), len(dropped))
@@ -1297,10 +1140,9 @@ async def build_keyword_report(config: KeywordRunConfig, on_usage: OnUsage | Non
             provider_errors or "none (the calls succeeded and returned no rows)",
         )
         # Lead with what the provider actually said. These failures are near-always one
-        # configuration mistake repeated across every call — most often a `location_name` the API
-        # does not recognise, because it comes straight from a free-text "region" answer in the ICP
-        # intake and DataForTopicClusttering accepts only its own location names. Reporting that sentence is the
-        # difference between a one-line fix and an afternoon.
+        # configuration mistake repeated across every call — most often a rejected key or an
+        # account out of API units. Reporting that sentence is the difference between a one-line fix
+        # and an afternoon.
         if provider_errors:
             unique = list(dict.fromkeys(provider_errors))
             detail = unique[0] if len(unique) == 1 else "; ".join(unique[:3])
@@ -1310,8 +1152,8 @@ async def build_keyword_report(config: KeywordRunConfig, on_usage: OnUsage | Non
         raise KeywordProviderError(
             f"The keyword provider accepted every request but returned no keywords beyond the "
             f"{len(raw)} seed {'term' if len(raw) == 1 else 'terms'} themselves. Check that "
-            f"{config.location_name!r} is a location it has data for, and that the account has "
-            f"balance remaining."
+            f"{config.location_name!r} is a country Ahrefs has data for, and that the Ahrefs account "
+            f"has API units remaining."
         )
 
     hierarchy = build_service_hierarchy(clean, config)
@@ -1343,4 +1185,5 @@ async def build_keyword_report(config: KeywordRunConfig, on_usage: OnUsage | Non
         vocabulary=sorted(vocabulary),
         dropped=dropped,
         warnings=warnings,
+        location=config.location_name if provider == "ahrefs" else "",
     )

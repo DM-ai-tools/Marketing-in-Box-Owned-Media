@@ -380,7 +380,7 @@ export function composeServicesAnswer(picked: PickedService[], other: string): s
 /** The Plan of Action's sub-service picker. Phase 1's last stage suggests the sub-services Phase 2
  * builds: when the walk reaches `servicesFieldId`, the server reads the client's menu for the ones it
  * already has under the primary service, suggests the missing ones from the approved competitor
- * research and the ICP, and puts a DataForSEO volume on every keyword
+ * research and the ICP, and puts an Ahrefs volume on every keyword
  * (`app/services/sub_service_discovery.py`). It rides the same `service-choice` card kind as the
  * Pillar Page's picker, so loading, resume and stop treat it the same; `serviceScan.plan` marks it.
  *
@@ -413,10 +413,10 @@ export function composePlanSubServicesAnswer(
   other: string,
   source: { volumeSource: string; location: string },
 ): string {
-  const measured = source.volumeSource === "dataforseo";
+  const measured = source.volumeSource === "ahrefs";
   const lines = [
     measured
-      ? `Volume source: DataForSEO, monthly Google searches in ${source.location || "the client's country"}.`
+      ? `Volume source: Ahrefs, monthly Google searches in ${source.location || "the client's country"}.`
       : "Volume source: not measured. Estimate volumes and label each one (est.).",
   ];
   for (const c of picked) {

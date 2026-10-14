@@ -1288,7 +1288,7 @@ export const ASSET_CATALOG: AssetDefinition[] = [
       },
       /* Answered on a `service-choice` card rather than typed (`SERVICE_SCAN_OPTIONS.plan_of_action`):
        * the server reads the client's menu for the sub-services it already has, suggests the missing
-       * ones from the approved competitor research and the ICP, and puts a DataForSEO volume on every
+       * ones from the approved competitor research and the ICP, and puts an Ahrefs volume on every
        * keyword (`app/services/sub_service_discovery.py`). The operator confirms the list. */
       txt("sub_services_to_expand_into_phase_2", "Sub-Services to Expand Into (Phase 2)", {
         helpText: "Read from the client's site and the competitor research, then confirmed by you.",

@@ -4,6 +4,8 @@ import { AssetReader } from "./pipeline/AssetReader";
 import { ChatDeleteDialog } from "./pipeline/ChatDeleteDialog";
 import { GenerationDeleteDialog } from "./pipeline/GenerationDeleteDialog";
 import { ChatHistorySidebar } from "./pipeline/ChatHistorySidebar";
+import { ProviderNoticeToast } from "./pipeline/ProviderNoticeToast";
+import { AhrefsActivity } from "./pipeline/AhrefsActivity";
 import { FaultDialog } from "./pipeline/FaultDialog";
 import { GenerationStream } from "./pipeline/GenerationStream";
 import { PipelineDiagram } from "./pipeline/PipelineDiagram";
@@ -117,7 +119,10 @@ function App() {
       <ChatDeleteDialog />
       {/* Raised from a generation card's ⋯ menu; root-mounted because the card animates on transform. */}
       <GenerationDeleteDialog />
-      {/* Raised from the pipeline store when a sub-service lands after the plan was approved. */}
+      {/* Raised from the pipeline store when Ahrefs keyword data could not be fetched. */}
+      <ProviderNoticeToast />
+      {/* Ahrefs at work: an animated chip while keyword data is fetched, and what it measured. */}
+      <AhrefsActivity />
 
       {/* Docked from `xl` up, where a third column still leaves the transcript a workable width;
           below that the same sidebar is reachable from the nav as a drawer. */}

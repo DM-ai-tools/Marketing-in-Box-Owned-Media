@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
-import { motion } from "framer-motion";
+import { motion, useReducedMotion } from "framer-motion";
+import { CountUp } from "./AhrefsActivity";
 import { usePipelineStore } from "./pipelineStore";
 import type { PipelineMessage } from "./pipelineStore";
 import type { PlanSubServiceCandidate } from "./pipelineApi";
@@ -8,7 +9,7 @@ import type { PlanSubServiceCandidate } from "./pipelineApi";
  *
  * Two groups: what the client's site already has a page for under the primary service (read off
  * its own menu, each with its real URL), and what it should add (suggested from the approved
- * competitor research and the ICP). Every row carries its keyword cluster and, when DataForSEO is
+ * competitor research and the ICP). Every row carries its keyword cluster and, when Ahrefs is
  * configured, the measured monthly volume — the card says plainly when it is not, because the plan
  * then labels every volume as an estimate.
  *
@@ -20,6 +21,7 @@ export function PlanSubServiceCard({ message }: { message: PipelineMessage }) {
   const confirm = usePipelineStore((s) => s.confirmPlanSubServices);
   const skip = usePipelineStore((s) => s.skipServices);
   const retry = usePipelineStore((s) => s.retryServiceScan);
+  const reduceMotion = useReducedMotion();
 
   const scan = message.serviceScan;
   const plan = scan?.plan;
@@ -41,7 +43,7 @@ export function PlanSubServiceCard({ message }: { message: PipelineMessage }) {
   const suggested = plan.candidates.filter((c) => c.status !== "existing");
   const typedCount = other.split(/[,;\n]/).filter((s) => s.trim()).length;
   const total = picked.length + typedCount;
-  const measured = plan.volumeSource === "dataforseo";
+  const measured = plan.volumeSource === "ahrefs";
 
   function toggle(name: string) {
     setPicked((current) => (current.includes(name) ? current.filter((n) => n !== name) : [...current, name]));
@@ -89,13 +91,23 @@ export function PlanSubServiceCard({ message }: { message: PipelineMessage }) {
 
       {scan.status === "ready" && !superseded && (
         <>
-          <p className="mt-2 text-[0.7rem] text-[var(--fg-faint)]">
+          <p className="mt-2 flex flex-wrap items-center gap-1.5 text-[0.7rem] text-[var(--fg-faint)]">
+            {measured && <AhrefsBadge still={!!reduceMotion} />}
             {measured
-              ? `Monthly Google searches from DataForSEO${plan.location ? `, ${plan.location}` : ""}.`
+              ? `Monthly Google searches${plan.location ? `, ${plan.location}` : ""}.`
               : "Search volumes not measured: the plan will label its volumes as estimates."}
           </p>
-          <CandidateGroup title="Already on the client's site" rows={existing} picked={picked} onToggle={toggle} />
-          <CandidateGroup title="Suggested to add" rows={suggested} picked={picked} onToggle={toggle} />
+          {plan.volumeError && (
+            <p
+              role="alert"
+              className="mt-1.5 rounded-lg border px-2.5 py-1.5 text-[0.72rem] leading-relaxed"
+              style={{ borderColor: "var(--color-signal-amber)", color: "var(--fg)" }}
+            >
+              {plan.volumeError}
+            </p>
+          )}
+          <CandidateGroup title="Already on the client's site" rows={existing} picked={picked} onToggle={toggle} still={!!reduceMotion} />
+          <CandidateGroup title="Suggested to add" rows={suggested} picked={picked} onToggle={toggle} still={!!reduceMotion} />
           {!plan.candidates.length && (
             <p className="mt-2 text-[0.75rem] text-[var(--fg-muted)]">{scan.notes[0] ?? "No sub-services were found."}</p>
           )}
@@ -182,11 +194,13 @@ function CandidateGroup({
   rows,
   picked,
   onToggle,
+  still,
 }: {
   title: string;
   rows: PlanSubServiceCandidate[];
   picked: string[];
   onToggle: (name: string) => void;
+  still: boolean;
 }) {
   if (!rows.length) return null;
   return (
@@ -214,7 +228,14 @@ function CandidateGroup({
                   <span className="flex flex-wrap items-baseline justify-between gap-x-2">
                     <span className="font-medium">{row.name}</span>
                     <span className="text-[0.72rem] tabular-nums text-[var(--fg-muted)]">
-                      {row.combined_volume != null ? `${row.combined_volume.toLocaleString("en-US")}/mo` : "volume not measured"}
+                      {row.combined_volume != null ? (
+                        <>
+                          <CountUp to={row.combined_volume} still={still} />
+                          /mo
+                        </>
+                      ) : (
+                        "volume not measured"
+                      )}
                     </span>
                   </span>
                   <span className="block truncate text-[0.68rem] text-[var(--fg-faint)]">
@@ -253,4 +274,25 @@ function pathOf(url: string): string {
   } catch {
     return url;
   }
+}
+
+/** "Ahrefs" with a soft pulse ring, marking volumes that were measured rather than estimated. */
+function AhrefsBadge({ still }: { still: boolean }) {
+  return (
+    <span className="relative inline-flex items-center gap-1 rounded-full border border-[var(--border)] px-1.5 py-[1px] font-semibold text-[var(--color-electric-blue)]">
+      <span className="relative flex h-1.5 w-1.5">
+        {!still && (
+          <motion.span
+            aria-hidden
+            className="absolute inset-0 rounded-full bg-[var(--color-electric-blue)]"
+            initial={{ scale: 1, opacity: 0.6 }}
+            animate={{ scale: 2.6, opacity: 0 }}
+            transition={{ duration: 1.4, repeat: 2, ease: "easeOut" }}
+          />
+        )}
+        <span className="relative h-1.5 w-1.5 rounded-full bg-[var(--color-electric-blue)]" />
+      </span>
+      Ahrefs
+    </span>
+  );
 }

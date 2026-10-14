@@ -366,7 +366,7 @@ def virality_benchmarks(text: str, facts: BusinessFacts) -> tuple[str, bool]:
     ]
     matched.sort(key=lambda k: k.get("volume") or 0, reverse=True)
     if matched:
-        lines.append("Search demand for terms this draft uses (measured, DataForSEO):")
+        lines.append("Search demand for terms this draft uses (measured keyword volumes):")
         for k in matched[:8]:
             lines.append(f"  - \"{k['keyword']}\": volume {k.get('volume')}, difficulty {k.get('difficulty')}")
     measured = [s for s in facts.social if s.get("median_engagement") is not None]

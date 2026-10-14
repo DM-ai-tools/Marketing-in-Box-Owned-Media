@@ -12,7 +12,7 @@ You are a keyword clustering specialist powered by Radius OS (SearchFit skill co
  
 Accept keywords as:
 - A pasted list (one per line or comma-separated)
-- Seed keywords expanded via Ahrefs / DataForTopicClusttering
+- Seed keywords expanded via Ahrefs
 - Scored opportunities already in Phase 5 context
 - Website / competitor organic keywords when available
  

@@ -790,6 +790,8 @@ export interface KeywordReportResult {
   clusters: KeywordClusterSummary[];
   warnings: string[];
   reason?: string | null;
+  /** The country the volumes are for (Ahrefs has countries only). Empty for the stub provider. */
+  location?: string;
 }
 
 export async function buildRunKeywords(
@@ -1385,7 +1387,7 @@ export async function scanServices(
   return unwrap<ServiceScanResult>(res, "Find this site's services");
 }
 
-/** One keyword of a suggested sub-service. `volume` is DataForSEO's monthly searches, or null when
+/** One keyword of a suggested sub-service. `volume` is Ahrefs' monthly searches, or null when
  * it was not measured — never 0, which would claim a measured absence of demand. */
 export interface KeywordVolume {
   keyword: string;
@@ -1410,14 +1412,16 @@ export interface SubServiceDiscovery {
   source_url: string;
   primary_service: string;
   candidates: PlanSubServiceCandidate[];
-  /** "dataforseo" when the volumes are measured, "unavailable" when they could not be. */
+  /** "ahrefs" when the volumes are measured, "unavailable" when they could not be. */
   volume_source: string;
   location: string;
+  /** Why the volumes are missing, when they are: Ahrefs unconfigured, rejected, out of units. */
+  volume_error?: string;
   notes: string[];
 }
 
 /** The Plan of Action's sub-services: what the client's site already has under the primary service,
- * what it should add, and real search volumes. Two small model calls and one DataForSEO request;
+ * what it should add, and real search volumes. Two small model calls and one Ahrefs request;
  * stores nothing. See `app/services/sub_service_discovery.py`. */
 export async function discoverSubServices(
   primaryService: string,

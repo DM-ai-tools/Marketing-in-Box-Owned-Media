@@ -37,6 +37,7 @@
  */
 
 import { splitHtmlBlocks } from "./htmlBlocks";
+import { AHREFS_USAGE_LABEL, isAhrefsUsageHeading } from "./ahrefsUsage";
 import { BUSINESS_CHECK_LABEL, isBusinessCheckHeading } from "./businessCheck";
 import { COMPETITOR_SOURCES_LABEL, isCompetitorSourcesHeading } from "./competitorSources";
 import { isTopicSuggestionsHeading, TOPIC_SUGGESTIONS_LABEL } from "./topicSuggestions";
@@ -303,7 +304,9 @@ export function parseAssetDocument(text: string | undefined | null): AssetDocume
         ? COMPETITOR_SOURCES_LABEL
         : isBusinessCheckHeading(line)
           ? BUSINESS_CHECK_LABEL
-          : rule.match(line),
+          : isAhrefsUsageHeading(line)
+            ? AHREFS_USAGE_LABEL
+            : rule.match(line),
   );
 
   const sections: DocSection[] = [];

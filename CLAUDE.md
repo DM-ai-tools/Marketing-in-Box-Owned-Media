@@ -711,6 +711,75 @@ palette.
 
 ---
 
+## Ahrefs — keyword data
+
+Ahrefs Keywords Explorer (API v3) is the only keyword source. It replaced DataForSEO, and nothing
+reads DataForSEO credentials any more.
+
+The key is `AHREFS_API_KEY` in the backend `.env`, sent as a bearer token, server-side only.
+With no key, `keywords.provider_name()` is `stub`. That keeps the pipeline working on fabricated
+keywords, and `sub_service_discovery` refuses to show those numbers as measured.
+
+**`app/services/ahrefs_client.py` is the only module that talks to Ahrefs.** It returns raw fields,
+and deciding relevance, brand and intent stays in `keywords.py`.
+
+- **Match classes.** `keywords.fetch_keywords` maps each class to its own endpoint:
+  - `exact` → `overview`;
+  - `phrase` → `matching-terms`;
+  - `related` → `related-terms`;
+  - `broad` → `search-suggestions`.
+- **Country codes only.** `country` must be a lowercase two-letter code; anything else is a 400.
+  `COUNTRIES` is the list the live API accepts, by name.
+  - `keywords.resolve_location` matches the free-text region to a country.
+  - Sub-national names are stripped first: New South Wales is not Wales, New Jersey is not Jersey.
+  - A region naming no country raises `KeywordProviderError` with the fix ("Melbourne, Australia").
+    It never falls back to a default country.
+- **Shapes verified live, not from the docs.**
+  - CPC is US cents (`cpc_dollars`).
+  - A missing value is `null` and stays `None`, never 0.
+  - A rejected key answers 401 with a JSON *list*, `["Error","Unauthorized"]`. `_error_detail`
+    reads every shape, after that shape once crashed the error path.
+  - `related-terms` returns broad neighbours ("facebook", "instagram"). `keywords.is_relevant`
+    drops them.
+- **Units are money.** Ahrefs bills per request and per row. `limit_per_class` is the dial for
+  clustering. `overview` sends every keyword in one request, chunked at `_OVERVIEW_CHUNK`.
+- **Every failure is shown to the operator, never swallowed.** `AhrefsError` carries one actionable
+  sentence: rejected key, no units or plan (402/403), rate limit (429), bad country, or other.
+  - **Keyword prepass.** The route turns the error into a 502 with that sentence. `runKeywordPrepass`
+    posts it in the transcript and raises `uiStore.notifyProvider`.
+  - **Plan discovery.** The error becomes `volume_error`, shown on the card and raised as the same
+    notice.
+  - **Where it renders.** `ProviderNoticeToast` is root-mounted and stays until dismissed. The run
+    carries on without volumes, so it is a notice, not the blocking `FaultDialog`.
+- **Success is shown too.** `AhrefsActivity` (root, bottom-left) runs while either call is out, as
+  an equaliser and a sheen.
+  - It finishes with a drawn check and a count-up of what was measured, then leaves after 4.5s.
+  - It finishes only when Ahrefs actually answered (`provider` / `volume_source` is `ahrefs`). The
+    stub provider or a skip just clears it.
+  - `startAhrefsActivity` returns an id, so an older call cannot finish a newer one's chip.
+  - The sub-service card counts its volumes up under an "Ahrefs" badge.
+  - All of it is static under reduced motion. `smoke/planPhase1.tsx` pins the states.
+- **Every deliverable says what Ahrefs did for it.** `lib/ahrefsUsage.ts` appends an "Ahrefs keyword
+  data" section. It is last in the appendix, after Business check (`assetAppendixFor`), so it
+  appears in the reader and in every export.
+  - **How it was used.** Up to four ways, each read from the transcript:
+    - the leg's search demand map (`keywordReport` on the prepass announcement, with its country,
+      `location` on the keyword report);
+    - the grounded topics the asset was built on;
+    - the Plan of Action's sub-service sizing;
+    - a business check benchmarked on those volumes.
+  - **What was measured.** Tables follow: clusters by volume, chosen topics with keyword, volume and
+    difficulty, and the confirmed sub-services with their volumes.
+  - **When it is absent.** Only Ahrefs answers count, never the stub. An asset Ahrefs did not touch
+    gets no section, and a Phase 2 track never claims Phase 1's map.
+  - **Not part of the asset.** Like the other appendices it is never written into `message.text`.
+    `assetDocument` treats its heading as a section boundary, and `assetGlance` skips it.
+  - `smoke/ahrefsUsage.tsx` pins it.
+- **Tests never hit the live API.** `tests/test_ahrefs_client.py` uses an `httpx.MockTransport`.
+  Discovery tests patch `ahrefs_client.AhrefsClient`.
+
+---
+
 ## SociaVault — live social post data for Stage 10
 
 `social_content_strategy_audit`'s `raw_post_data_source` field asks for real posts with real
@@ -1139,9 +1208,13 @@ then measures again:
    - it suggests the missing ones (status `new`, a proposed slug), each with a 4-6 keyword cluster.
    - **An `existing` item needs a URL the scan found.** Otherwise `_parse_reply` demotes it to `new`
      with a note: a page the site does not link to is never reported as built.
-3. **One DataForSEO `keyword_overview` request** measures every keyword on the card. Without
-   DataForSEO credentials the volumes stay `None`, the card says so, and the plan labels its volumes
-   "(est.)". **Never the stub provider's numbers, and never 0.**
+3. **One Ahrefs `overview` request** measures every keyword on the card (`ahrefs_client.py`).
+   **Never the stub provider's numbers, and never 0.** Any failure leaves the volumes `None` and
+   sets `volume_error`:
+   - Causes include no key, a rejected key, no units left, a region with no country, or a network
+     error.
+   - The card shows `volume_error` as a warning and the store raises the provider toast.
+   - The list still stands, and the plan labels its volumes "(est.)".
 
 The operator confirms the list on the card. Everything starts ticked; they can untick, type others,
 or skip.
@@ -1179,7 +1252,7 @@ or skip.
 
 ### Rules
 
-- **Credits are money.** Discovery costs two Haiku calls and one DataForSEO request, capped at
+- **Credits are money.** Discovery costs two Haiku calls and one Ahrefs request, capped at
   `MAX_CANDIDATES` × `MAX_KEYWORDS_PER_CANDIDATE` keywords.
 - **The plan speaks the pipeline's vocabulary.** Its phases are titled like the toggle
   (`PHASE_META.scope`). Step 2 lists Phase 1's 14 stages and Step 3 Phase 2's 9 by their catalog

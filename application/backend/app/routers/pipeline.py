@@ -87,6 +87,7 @@ from app.services.competitor import (
     to_prompt_text,
 )
 from app.services import (
+    ahrefs_client,
     asset_check as asset_check_service,
     business_facts as business_facts_service,
     cro_settings,
@@ -1442,7 +1443,7 @@ async def get_asset_readiness(
 # every later headline suggestion is grounded in, so it behaves like `_run_competitor_prepass` —
 # it runs, it reports a status, and its output is filed to the Context Store.
 #
-# Deliberately per-run rather than per-stage. One clustering pass costs real money at DataForTopicClusttering
+# Deliberately per-run rather than per-stage. One clustering pass costs real money at Ahrefs
 # (three calls per seed) and, more importantly, running it per stage would give the blog and the
 # pillar page *different* keyword universes for the same service — so the topics chosen at one
 # stage would stop lining up with the topics chosen at the next.
@@ -1490,6 +1491,8 @@ class KeywordReportResponse(BaseModel):
     clusters: list[KeywordClusterOut] = []
     warnings: list[str] = []
     reason: str | None = None
+    #: The country the volumes are for — what the asset's "Ahrefs keyword data" section names.
+    location: str = ""
 
 
 def _cluster_summaries(report: dict) -> list[KeywordClusterOut]:
@@ -1577,6 +1580,7 @@ async def build_run_keywords(run_id: str, payload: BuildKeywordsRequest) -> Keyw
                     total_keywords=int(report.get("total_keywords") or 0),
                     clusters=_cluster_summaries(report),
                     warnings=list(stored.get("warnings") or []),
+                    location=str(stored.get("location") or ""),
                 )
 
     async def on_usage(call_usage: usage_service.CallUsage) -> None:
@@ -1590,7 +1594,7 @@ async def build_run_keywords(run_id: str, payload: BuildKeywordsRequest) -> Keyw
 
     try:
         result = await keywords_service.build_keyword_report(config, on_usage)
-    except keywords_service.KeywordProviderError as exc:
+    except (keywords_service.KeywordProviderError, ahrefs_client.AhrefsError) as exc:
         # The provider refusing is not a run-blocking fault: headline suggestions degrade to
         # framework-only grounding, which is worse but still works. Surfaced as a 502 so the caller
         # can say so, and so a bad `location_name` is visible rather than silently absorbed.
@@ -1635,6 +1639,7 @@ async def build_run_keywords(run_id: str, payload: BuildKeywordsRequest) -> Keyw
         total_keywords=int(result.report.get("total_keywords") or 0),
         clusters=_cluster_summaries(result.report),
         warnings=result.warnings,
+        location=result.location,
     )
 
 
@@ -1665,6 +1670,7 @@ async def get_run_keywords(run_id: str) -> KeywordReportResponse:
         total_keywords=int(report.get("total_keywords") or 0),
         clusters=_cluster_summaries(report),
         warnings=list(stored.get("warnings") or []),
+        location=str(stored.get("location") or ""),
     )
 
 
@@ -2918,7 +2924,7 @@ async def scan_services_route(payload: ServiceScanRequest) -> ServiceScanRespons
 #
 # Phase 1's last stage suggests the sub-services Phase 2 builds. Discovery reads the client's menu,
 # the competitor listings this run already approved and its ICP, suggests what is missing, and puts
-# a real DataForSEO volume on every keyword. It stores nothing: the operator confirms the list on a
+# a real Ahrefs volume on every keyword. It stores nothing: the operator confirms the list on a
 # card, and the confirmed list is filed with `POST /runs/{id}/plan-sub-services`.
 # --------------------------------------------------------------------------------------
 
@@ -2953,6 +2959,8 @@ class SubServiceDiscoveryResponse(BaseModel):
     candidates: list[SubServiceCandidateOut]
     volume_source: str
     location: str = ""
+    #: Why the volumes are missing (Ahrefs unconfigured, rejected, out of units). The card warns with it.
+    volume_error: str = ""
     notes: list[str] = []
 
 
@@ -2976,7 +2984,7 @@ async def _discovery_context(run_id: str | None) -> tuple[str, str]:
 @router.post("/plan/sub-services/discover", response_model=SubServiceDiscoveryResponse)
 async def discover_sub_services_route(payload: SubServiceDiscoveryRequest) -> SubServiceDiscoveryResponse:
     """The sub-services the client's site already has under the primary service, the ones it should
-    add, and real search volumes for each. Two Haiku calls and one DataForSEO request."""
+    add, and real search volumes for each. Two Haiku calls and one Ahrefs request."""
     competitors, icp = await _discovery_context(payload.run_id)
     try:
         found = await sub_service_discovery.discover(

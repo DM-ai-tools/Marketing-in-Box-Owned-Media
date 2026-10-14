@@ -19,14 +19,15 @@ Measure, then judge, then measure again — the order `service_scan.py` and `ass
    suggests the missing ones competitors cover. Each comes with a 4-6 keyword cluster. An "existing"
    item must carry a URL the scan found (`_parse_reply` drops it otherwise), so a page the site does
    not link to can never be reported as already built.
-3. **Measure, one DataForSEO call.** `keyword_overview` returns the real monthly volume for every
-   keyword at once. With no DataForSEO credentials the volumes stay `None` and the card says so —
+3. **Measure, one Ahrefs call.** Keywords Explorer's `overview` returns the real monthly volume for
+   every keyword at once (`ahrefs_client.py`). With no key, or any Ahrefs failure, the volumes stay
+   `None` and `volume_error` says why, which the card shows as a warning —
    never a stub number, because a plan built on an invented volume reads exactly like one built on a
    real one.
 
 Credits
 -------
-Two Haiku calls and one keyword_overview request, whatever the size of the site. The competitor
+Two Haiku calls and one Ahrefs overview request, whatever the size of the site. The competitor
 listings are read from the run, never searched again. `MAX_CANDIDATES` and `MAX_KEYWORDS_PER_CANDIDATE`
 bound the provider request.
 
@@ -39,12 +40,13 @@ from __future__ import annotations
 
 import json
 import logging
-import os
+
 import re
 import time
-from dataclasses import asdict, dataclass, field, replace
+from dataclasses import asdict, dataclass, field
 from urllib.parse import urlparse
 
+from app.services import ahrefs_client
 from app.services import keywords as keyword_service
 from app.services import service_scan
 from app.services.claude_client import get_client
@@ -86,7 +88,7 @@ class DiscoveryError(Exception):
 @dataclass
 class KeywordVolume:
     keyword: str
-    #: Monthly searches from DataForSEO. None when the provider is not configured or had no data —
+    #: Monthly searches from Ahrefs. None when the provider is not configured or had no data —
     #: never 0, which would claim a measured absence of demand.
     volume: int | None = None
 
@@ -117,10 +119,12 @@ class Discovery:
     source_url: str
     primary_service: str
     candidates: list[SubServiceCandidate] = field(default_factory=list)
-    #: `dataforseo` when the volumes are real, `unavailable` when they could not be fetched.
+    #: `ahrefs` when the volumes are real, `unavailable` when they could not be fetched.
     volume_source: str = "unavailable"
-    #: The country the volumes are for. DataForSEO Labs only has countries.
+    #: The country the volumes are for. Ahrefs only has countries.
     location: str = ""
+    #: Why the volumes are missing, when they are: shown to the operator as a warning on the card.
+    volume_error: str = ""
     notes: list[str] = field(default_factory=list)
 
     def as_dict(self) -> dict[str, object]:
@@ -269,15 +273,20 @@ async def _ask(prompt: str, on_usage: OnUsage | None) -> str:
 
 
 async def _fill_volumes(discovery: Discovery, region: str) -> None:
-    """One `keyword_overview` request for every keyword on the card. Never the stub provider."""
-    if keyword_service.provider_name() != "DataForTopicClusttering":
-        discovery.notes.append(
-            "Search volumes are not available: DataForSEO is not configured on this server. The plan "
-            "will label every volume as an estimate."
-        )
-        return
+    """One Ahrefs `overview` request for every keyword on the card. Never the stub provider.
+
+    Any failure — no key, a rejected key, no API units left, a region with no country, a network
+    error — leaves the volumes `None` and sets `volume_error` to one sentence. The card shows it as a
+    warning, so the operator knows the plan's volumes will be estimates and why, rather than finding
+    a list with no numbers on it."""
     keywords = list(dict.fromkeys(k.keyword for c in discovery.candidates for k in c.keywords))
     if not keywords:
+        return
+    if not ahrefs_client.is_configured():
+        discovery.volume_error = (
+            "Ahrefs is not configured on this server (AHREFS_API_KEY is empty), so search volumes "
+            "could not be fetched. The plan will label every volume as an estimate."
+        )
         return
     config = keyword_service.KeywordRunConfig(
         business_name="",
@@ -286,25 +295,27 @@ async def _fill_volumes(discovery: Discovery, region: str) -> None:
         language_name=keyword_service.DEFAULT_LANGUAGE,
         services={},
     )
-    dfs = keyword_service.DataForTopicClustteringClient(
-        os.environ["DataForTopicClusttering_LOGIN"], os.environ["DataForTopicClusttering_PASSWORD"]
-    )
+    client: ahrefs_client.AhrefsClient | None = None
     try:
-        config = replace(config, location_name=await keyword_service.resolve_location(dfs, config))
-        metrics = await dfs.overview(keywords, config)
+        country = keyword_service.resolve_location(config)
+        client = ahrefs_client.AhrefsClient()
+        metrics = await client.overview(keywords, ahrefs_client.country_code(country))
     except Exception as exc:  # noqa: BLE001 — the list still stands without volumes
         logger.warning("Sub-service volumes failed: %s", exc)
-        discovery.notes.append(f"Search volumes could not be fetched ({exc}). The plan will label them as estimates.")
+        discovery.volume_error = (
+            f"Ahrefs could not fetch search volumes: {exc} The plan will label every volume as an estimate."
+        )
         return
     finally:
-        await dfs.aclose()
+        if client is not None:
+            await client.aclose()
 
     for candidate in discovery.candidates:
         for kw in candidate.keywords:
-            volume = metrics.get(kw.keyword.lower(), (None, None))[0]
-            kw.volume = int(volume) if isinstance(volume, (int, float)) else None
-    discovery.volume_source = "dataforseo"
-    discovery.location = config.location_name
+            found = metrics.get(kw.keyword.lower())
+            kw.volume = found.volume if found else None
+    discovery.volume_source = "ahrefs"
+    discovery.location = country
 
 
 # --------------------------------------------------------------------------------------

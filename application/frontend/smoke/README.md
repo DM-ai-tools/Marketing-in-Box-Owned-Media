@@ -62,6 +62,9 @@ superseded, interrupted, failed, refining — without a browser or a new depende
   The losslessness check there is word-multiset containment rather than line matching, and the
   comment above it records why: two weaker versions of that check each let a real data-loss bug
   through.
+- `ahrefsUsage.tsx` — the "Ahrefs keyword data" section at the end of an asset. It checks which
+  assets get it and what it says and tables. It checks that the stub provider, a failed lookup or
+  another leg's data never appear, and that the section comes last and is parsed as its own section.
 - `planPhase1.tsx` — the Plan of Action as Phase 1's last stage. It checks that the sub-service field
   opens the discovery card rather than a question, and that the confirmed answer and the
   `plan_sub_services` text filed on the run have the same line shape. It also checks that a skip
