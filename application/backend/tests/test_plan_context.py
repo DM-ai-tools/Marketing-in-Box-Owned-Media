@@ -1,10 +1,12 @@
-"""The Plan of Action runs at the end of Phase 2 and covers every sub-service.
+"""The Plan of Action is Phase 1's last stage: a delivery record of Phase 1, and a roadmap.
 
 Pinned here:
-  - the three engagement-wide documents render what the plan needs and leave out what it must not,
+  - the Phase 1 document reports each deliverable as measured facts plus an excerpt, never invents
+    one, and carries the keyword clusters' measured volumes,
   - the server's composed keys and the frontend's are the same list,
-  - Phase 2's prompt is Phase 1's plus exactly the declared edits, so the two cannot drift,
-  - the inputs Phase 2 drops on the server are the ones the frontend drops.
+  - there is no Phase 2 plan stage on either side any more,
+  - the plan's inputs are wired the way the prompt describes them (composed Phase 1 document,
+    competitor listings gathered from the run, regulated flag from CRO's settings).
 
 No network and no database: prompts and TypeScript sources are read off disk.
 """
@@ -15,21 +17,21 @@ import re
 from pathlib import Path
 
 from app.services import plan_context as pc
-from app.services.generation import PHASE2_OVERRIDES, build_prompt
-from app.services.generation import _config as stage_config
+from app.services.generation import PHASE2_OVERRIDES, PHASE2_STAGE_CONFIGS, build_prompt
 
 _ROOT = Path(__file__).resolve().parents[2]
 _PROMPTS = _ROOT / "backend" / "assets" / "Prompts"
 _CATALOG = (_ROOT / "frontend" / "src" / "data" / "assetCatalog.ts").read_text(encoding="utf-8")
 _PHASE2_CATALOG = (_ROOT / "frontend" / "src" / "data" / "phase2Catalog.ts").read_text(encoding="utf-8")
+_PIPELINE_DATA = (_ROOT / "frontend" / "src" / "pipeline" / "pipelineData.ts").read_text(encoding="utf-8")
 
 
-def _read(path: Path) -> str:
-    return path.read_bytes().decode("utf-8").replace("\r\n", "\n")
+def _plan_block() -> str:
+    return _CATALOG.split('asset_id: "plan_of_action"', 1)[1].split("// ----------------", 1)[0]
 
 
 # --------------------------------------------------------------------------------------
-# Rendering
+# The Phase 1 document
 # --------------------------------------------------------------------------------------
 
 
@@ -38,7 +40,8 @@ def test_phase1_assets_lists_what_exists_and_names_it_done() -> None:
     text = pc.render_phase1_assets({"pillar_page": page, "blog": "A blog.", "podcast": "  "})
     assert "treat as done" in text
     assert "## Pillar Page Design" in text and "## Blog Post" in text
-    assert "Podcast" not in text, "a blank document is not a built asset"
+    assert "## Podcast" not in text, "a blank document is not a built asset"
+    assert "Not built in Phase 1:" in text and "Podcast Episode" in text.split("Not built in Phase 1:", 1)[1]
     assert "Rewritten" in text
     assert "<h1>" not in text and "color:red" not in text, "an HTML deliverable is reduced to its words"
 
@@ -47,26 +50,51 @@ def test_phase1_assets_is_empty_when_nothing_was_built() -> None:
     assert pc.render_phase1_assets({}) == ""
 
 
+def test_each_deliverable_leads_with_its_measured_facts() -> None:
+    blog = "# How Much Should You Spend on Social Ads?\n\n## Budgets\n\nText.\n\n## Benchmarks\n\nMore text here."
+    cro = "# CRO Audit\n\n**Score: 58/100**\n\n## Layer 1\n\nx"
+    sms = "## Message 1\nHi\n## Message 2\nHi\n## Message 6\nBye"
+    text = pc.render_phase1_assets({"blog": blog, "cro": cro, "sms_sequence": sms})
+    assert "- Title: How Much Should You Spend on Social Ads?" in text
+    assert "- Sections: Budgets | Benchmarks" in text
+    assert "- Page score stated in the audit: 58/100" in text
+    assert "- Messages in the sequence: 6" in text
+    assert "- Length: about" in text
+
+
+def test_the_value_ladder_reports_its_offers_from_the_parser() -> None:
+    ladder = (
+        "## Rung 1 — Entry\n\n"
+        '1. **[Audit] "Free Social Audit"**\n   - Price: $0\n   - Estimated Value: $500\n   - Ascends To: Sprint\n\n'
+        '2. **[Sprint] "30-Day Sprint"**\n   - Price: $1,500\n   - Estimated Value: $3,000\n   - Ascends To: Retainer\n'
+    )
+    facts = pc.asset_facts("offers", ladder)
+    offers = next((f for f in facts if f.startswith("Offers on the ladder")), "")
+    assert "Free Social Audit" in offers and "30-Day Sprint" in offers
+
+
+def test_no_fact_is_invented_for_a_document_that_does_not_state_it() -> None:
+    facts = pc.asset_facts("cro", "# Audit\n\nNo score here.")
+    assert not any("score" in f.lower() for f in facts)
+    assert not any("Messages" in f for f in pc.asset_facts("sms_sequence", "Just text."))
+
+
+def test_keyword_clusters_close_the_document_with_measured_volumes() -> None:
+    rows = [
+        {"keyword": "social media agency", "volume": 2400},
+        {"keyword": "meta ads agency", "volume": 880},
+        {"keyword": "unmeasured", "volume": None},
+    ]
+    text = pc.render_phase1_assets({"blog": "# A blog\n\ntext"}, rows)
+    block = text.split("## Keyword Clusters (measured search volume)", 1)[1]
+    assert "- social media agency — 2,400/mo" in block
+    assert block.index("social media agency") < block.index("meta ads agency")
+    assert "unmeasured" not in block, "a keyword with no volume is not reported as measured"
+
+
 def test_the_value_ladder_is_looked_up_under_both_keys() -> None:
     assert pc.keys_for("offers") == ("offers", "offer_ladder")
     assert pc.keys_for("blog") == ("blog",)
-
-
-def test_every_sub_service_is_named_and_what_is_missing_is_listed() -> None:
-    meta = pc.SubServiceTrack("Meta Ads", {"icp": "Buyer.", "cro": "Copy.", "pillar_page": "Page."})
-    google = pc.SubServiceTrack("Google Ads", {"icp": "Other buyer."})
-    text = pc.render_phase2_assets([meta, google])
-
-    assert "(2): Meta Ads, Google Ads" in text
-    assert "## Meta Ads" in text and "## Google Ads" in text
-    assert "Built and approved: ICP — Ideal Customer Profile, CRO — Page Rewrite, Pillar Page Design." in text
-    assert "Not yet built: Funnel, Lead Magnet" in text
-
-
-def test_a_sub_service_with_nothing_approved_is_not_reported_as_built() -> None:
-    text = pc.render_phase2_assets([pc.SubServiceTrack("Meta Ads", {"icp": "Buyer."}), pc.SubServiceTrack("TikTok")])
-    assert "TikTok" not in text
-    assert pc.render_phase2_assets([pc.SubServiceTrack("TikTok")]) == ""
 
 
 def test_excerpts_are_cut_and_say_so() -> None:
@@ -77,12 +105,9 @@ def test_excerpts_are_cut_and_say_so() -> None:
     assert pc.excerpt("Short.", 300) == "Short."
 
 
-def test_the_phase2_documents_are_bounded_by_the_number_of_sub_services() -> None:
-    """Ten sub-services at nine documents each is the largest block in the plan's prompt; keep it
-    inside a budget a stage can carry."""
-    docs = {a: "Word. " * 500 for a in pc.PHASE2_ASSET_IDS}
-    text = pc.render_phase2_assets([pc.SubServiceTrack(f"Sub {i}", docs) for i in range(10)])
-    assert len(text) < 90_000
+def test_the_phase1_document_is_bounded() -> None:
+    docs = {a: "# Title\n\n## Section\n\n" + "Word. " * 5000 for a in pc.PHASE1_ASSET_IDS}
+    assert len(pc.render_phase1_assets(docs)) < 40_000
 
 
 # --------------------------------------------------------------------------------------
@@ -100,16 +125,25 @@ def test_composed_keys_are_declared_server_composed_in_the_frontend() -> None:
     assert set(pc.COMPOSED_KEYS) <= set(re.findall(r'"(\w+)"', block))
 
 
-def test_the_frontend_re_points_the_plan_fields_at_the_composed_keys() -> None:
-    delta = _PHASE2_CATALOG.split("  plan_of_action: {", 1)[1].split("\n  funnel_hub_media:", 1)[0]
-    pointed = set(re.findall(r'context_key: "(plan_\w+)"', delta))
-    assert pointed == set(pc.COMPOSED_KEYS)
+def test_the_phase1_plan_reads_the_composed_document() -> None:
+    block = _plan_block()
+    phase1 = block.split('"existing_phase_1_assets_optional"', 1)[1].split("},", 1)[0]
+    assert 'context_key: "plan_phase1_assets"' in phase1
 
 
-def test_phase2_drops_the_same_inputs_on_both_sides() -> None:
-    delta = _PHASE2_CATALOG.split("  plan_of_action: {", 1)[1].split("fromComposed", 1)[0]
-    frontend = set(re.findall(r'"(\w+)"', delta.split("dropFields:", 1)[1]))
-    assert frontend == set(PHASE2_OVERRIDES["plan_of_action"].drop_fields)
+def test_the_competitor_input_gathers_the_listings_discovery_reads() -> None:
+    from app.services.sub_service_discovery import COMPETITOR_LISTING_KEYS
+
+    keys = _CATALOG.split("const PLAN_COMPETITOR_KEYS = [", 1)[1].split("];", 1)[0]
+    assert tuple(re.findall(r'"(\w+)"', keys)) == COMPETITOR_LISTING_KEYS
+    competitor = _plan_block().split('"competitor_list"', 1)[1].split("},", 2)
+    assert "context_keys: PLAN_COMPETITOR_KEYS" in "".join(competitor[:2])
+
+
+def test_the_regulated_flag_is_read_from_cros_settings() -> None:
+    block = _plan_block().split('bool("regulated_field_flag"', 1)[1].split("},", 1)[0]
+    assert 'context_key: "cro_client_settings"' in block
+    assert 'sub_key: "regulated_field_flag"' in block
 
 
 def test_asset_ids_the_plan_reads_are_real_stages() -> None:
@@ -121,71 +155,36 @@ def test_asset_ids_the_plan_reads_are_real_stages() -> None:
 
 
 # --------------------------------------------------------------------------------------
-# The Phase 2 prompt
+# There is one plan, and it is Phase 1's
 # --------------------------------------------------------------------------------------
 
-_BUILT_INPUT = (
-    "Phase 2 Sub-Services Already Built (optional): [YOUR ANSWER or leave blank — every sub-service whose "
-    "pillar page, funnel, lead magnet or other assets are already built, with what each has, so Phase 2 "
-    'marks it complete rather than re-briefing it. If none are built yet, say "none — Phase 2 not started."]\n'
-)
-_DROPPED_INPUTS = (
-    "CRO / Messaging Framework (optional): [YOUR ANSWER or leave blank — paste, attach, or reference the CRO "
-    "audit / psychological-layer framework already established, so tone and locked terminology carry through "
-    "every asset in this plan.]\n"
-    "Existing Funnels / Lead Magnets (optional): [YOUR ANSWER or leave blank — reference any funnel document or "
-    "lead magnet already established, so this plan is additive rather than duplicative.]\n"
-    "Existing Value Ladder / Offers (optional): [YOUR ANSWER or leave blank — reference any value ladder already "
-    "established, so funnel conversion events point at real, already-defined next steps (consultation, audit, "
-    "retainer tier) rather than inventing new ones.]\n"
-)
-_B2_START = "B2) Existing Phase 2 Work"
-_B2_END = "C) ICP and CRO Framework"
-_STEP3_START = "A sub-service listed under Phase 2 Sub-Services Already Built"
-_STEP3_END = "Every sub-service must feel distinct"
-_STEP8_ADDED = (
-    " Mark every Phase 2 asset listed as already\nbuilt as done in the same way, and schedule only what is still to build."
-)
+
+def test_there_is_no_phase2_plan_on_the_server() -> None:
+    assert "plan_of_action" not in PHASE2_OVERRIDES
+    assert "plan_of_action" not in PHASE2_STAGE_CONFIGS
+    assert not (_PROMPTS / "Phase2" / "Plan-of-Action-Architect-Prompt_phase2.md").exists()
 
 
-def test_phase2_prompt_is_phase1s_plus_exactly_the_declared_edits() -> None:
-    """Reverse the edits and the result must be the Phase 1 prompt byte for byte. An improvement made
-    to `Plan-of-Action-Architect-Prompt.md` and not carried across fails here."""
-    text = _read(_PROMPTS / "Phase2" / "Plan-of-Action-Architect-Prompt_phase2.md")
-
-    text = text.replace(_BUILT_INPUT, "", 1)
-    anchor = "Existing Phase 1 Assets (optional):"
-    assert anchor in text
-    # The dropped inputs sat between Brand-adjacent lines: put them back in front of the brand input.
-    text = text.replace("Brand Design Reference (optional):", _DROPPED_INPUTS + "Brand Design Reference (optional):", 1)
-
-    b2_start = text.index(_B2_START)
-    text = text[:b2_start] + text[text.index(_B2_END) :]
-    s3_start = text.index(_STEP3_START)
-    text = text[:s3_start] + text[text.index(_STEP3_END) :]
-    assert _STEP8_ADDED in text
-    text = text.replace(_STEP8_ADDED, "", 1)
-
-    assert text == _read(_PROMPTS / "Plan-of-Action-Architect-Prompt.md")
+def test_there_is_no_phase2_plan_in_the_frontend() -> None:
+    phase2_ids = _PIPELINE_DATA.split("const PHASE2_ASSET_IDS = [", 1)[1].split("] as const;", 1)[0]
+    assert '"plan_of_action"' not in phase2_ids
+    assert "DEFERRED_TO_PHASE2" not in _PIPELINE_DATA
+    assert "plan_of_action:" not in _PHASE2_CATALOG
+    assert "plan_phase2_assets" not in _CATALOG
 
 
-def test_phase2_plan_builds_from_its_own_file_and_renders_the_new_input() -> None:
-    cfg = stage_config("plan_of_action", "phase2")
-    assert cfg.prompt_file == "Phase2/Plan-of-Action-Architect-Prompt_phase2.md"
-
-    prompt = build_prompt(
-        "plan_of_action",
-        {"phase_2_sub_services_already_built_optional": "Meta Ads: pillar page built"},
-        "phase2",
-    )
-    inputs = prompt.split("— END OF INPUTS —")[0]
-    assert "Phase 2 Sub-Services Already Built (optional)" in inputs
-    assert "Meta Ads: pillar page built" in inputs
-    for label in ("CRO / Messaging Framework", "Existing Funnels / Lead Magnets", "Existing Value Ladder"):
-        assert label not in inputs, "a Phase 2 plan must not ask for one sub-service's document as the client's"
-
-
-def test_phase1_plan_is_unchanged_in_the_server() -> None:
-    """Chats that already hold a Phase 1 plan keep resolving it."""
+def test_the_plan_inputs_render_in_phase1() -> None:
     inputs = build_prompt("plan_of_action", {}, "phase1").split("— END OF INPUTS —")[0]
-    assert "CRO / Messaging Framework" in inputs
+    for label in ("Existing Phase 1 Assets", "Sub-Services to Expand Into (Phase 2)", "CRO / Messaging Framework"):
+        assert label in inputs
+    assert "Phase 2 Sub-Services Already Built" not in inputs
+
+
+def test_the_prompt_asks_for_status_url_priority_and_month_per_sub_service() -> None:
+    text = (_PROMPTS / "Plan-of-Action-Architect-Prompt.md").read_text(encoding="utf-8")
+    step3 = text.split("# STEP 3 —", 1)[1].split("# STEP 4 —", 1)[0]
+    for line in ("Status: EXISTING PAGE — ENHANCE", "Proposed URL:", "Priority: [rank from Step 7] | Month:"):
+        assert line in step3, line
+    assert "Email is\nnot a separate asset" in step3, "email folds into Funnel and Lead Magnet"
+    step7 = text.split("# STEP 7 —", 1)[1].split("# STEP 8 —", 1)[0]
+    assert "never scheduled after" in step7, "the ranking sets the build order"

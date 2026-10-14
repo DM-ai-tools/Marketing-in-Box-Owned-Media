@@ -100,6 +100,7 @@ from app.services import (
     keywords as keywords_service,
     media_storage,
     service_scan as service_scan_service,
+    sub_service_discovery,
     openai_image_client,
     runway_image_client,
     page_replica as page_replica_service,
@@ -822,32 +823,30 @@ async def _root_run_id(session: AsyncSession, run_uuid: uuid.UUID) -> uuid.UUID:
 
 
 async def _compose_plan_context(session: AsyncSession, run_uuid: uuid.UUID, context_key: str) -> str:
-    """One of the Plan of Action's engagement-wide documents, built from the root run and all of
-    its sub-service runs as they stand now. "" when there is nothing to say."""
+    """One of the Plan of Action's Phase 1 documents, built from the Phase 1 run as it stands now.
+    "" when there is nothing to say. See `app/services/plan_context.py`."""
     root = await _root_run_id(session, run_uuid)
 
     if context_key == plan_context.ROOT_ICP_KEY:
         return plan_context.render_root_icp(await _entry_text_on_run(session, root, ("icp",)))
 
-    if context_key == plan_context.PHASE1_ASSETS_KEY:
-        docs = {
-            asset_id: await _entry_text_on_run(session, root, plan_context.keys_for(asset_id))
-            for asset_id in plan_context.PHASE1_ASSET_IDS
-        }
-        return plan_context.render_phase1_assets(docs)
-
-    children = (
-        await session.execute(select(Run.id).where(Run.source_run_id == root).order_by(Run.created_at))
-    ).scalars().all()
-    tracks: list[plan_context.SubServiceTrack] = []
-    for index, child in enumerate(children, start=1):
-        label = (await _entry_text_on_run(session, child, (plan_context.SUB_SERVICE_KEY,))).strip()
-        docs = {
-            asset_id: await _entry_text_on_run(session, child, plan_context.keys_for(asset_id))
-            for asset_id in plan_context.PHASE2_ASSET_IDS
-        }
-        tracks.append(plan_context.SubServiceTrack(label or f"Sub-service {index}", docs))
-    return plan_context.render_phase2_assets(tracks)
+    docs = {
+        asset_id: await _entry_text_on_run(session, root, plan_context.keys_for(asset_id))
+        for asset_id in plan_context.PHASE1_ASSET_IDS
+    }
+    keywords: list[dict[str, object]] = []
+    keyword_entry = (
+        await session.execute(
+            select(ContextEntry)
+            .where(ContextEntry.run_id == root, ContextEntry.context_key == KEYWORD_CONTEXT_KEY)
+            .order_by(ContextEntry.version.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    if keyword_entry is not None and isinstance(keyword_entry.value, dict):
+        rows = keyword_entry.value.get("clean_keywords")
+        keywords = rows if isinstance(rows, list) else []
+    return plan_context.render_phase1_assets(docs, keywords)
 
 
 class SubServiceRequest(BaseModel):
@@ -2912,6 +2911,121 @@ async def scan_services_route(payload: ServiceScanRequest) -> ServiceScanRespons
     except service_scan_service.ServiceScanError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     return ServiceScanResponse.model_validate(scan.as_dict())
+
+
+# --------------------------------------------------------------------------------------
+# The Plan of Action's sub-services — see `app/services/sub_service_discovery.py`
+#
+# Phase 1's last stage suggests the sub-services Phase 2 builds. Discovery reads the client's menu,
+# the competitor listings this run already approved and its ICP, suggests what is missing, and puts
+# a real DataForSEO volume on every keyword. It stores nothing: the operator confirms the list on a
+# card, and the confirmed list is filed with `POST /runs/{id}/plan-sub-services`.
+# --------------------------------------------------------------------------------------
+
+
+class SubServiceDiscoveryRequest(BaseModel):
+    url: str = ""
+    primary_service: NonBlankStr
+    region: str = ""
+    chat_session_id: str | None = None
+    run_id: str | None = None
+
+
+class KeywordVolumeOut(BaseModel):
+    keyword: str
+    volume: int | None = None
+
+
+class SubServiceCandidateOut(BaseModel):
+    name: str
+    status: str
+    url: str = ""
+    slug: str = ""
+    parent: str = ""
+    why: str = ""
+    keywords: list[KeywordVolumeOut] = []
+    combined_volume: int | None = None
+
+
+class SubServiceDiscoveryResponse(BaseModel):
+    source_url: str
+    primary_service: str
+    candidates: list[SubServiceCandidateOut]
+    volume_source: str
+    location: str = ""
+    notes: list[str] = []
+
+
+async def _discovery_context(run_id: str | None) -> tuple[str, str]:
+    """The run's approved competitor listings and ICP, as the judge reads them. ("", "") with no run."""
+    if not run_id:
+        return "", ""
+    try:
+        run_uuid = uuid.UUID(run_id)
+    except ValueError:
+        return "", ""
+    async with get_sessionmaker()() as session:
+        listings = {
+            key: await _entry_text_on_run(session, run_uuid, (key,))
+            for key in sub_service_discovery.COMPETITOR_LISTING_KEYS
+        }
+        icp = await _entry_text_on_run(session, run_uuid, ("icp",))
+    return sub_service_discovery.competitor_block(listings), icp
+
+
+@router.post("/plan/sub-services/discover", response_model=SubServiceDiscoveryResponse)
+async def discover_sub_services_route(payload: SubServiceDiscoveryRequest) -> SubServiceDiscoveryResponse:
+    """The sub-services the client's site already has under the primary service, the ones it should
+    add, and real search volumes for each. Two Haiku calls and one DataForSEO request."""
+    competitors, icp = await _discovery_context(payload.run_id)
+    try:
+        found = await sub_service_discovery.discover(
+            payload.url,
+            payload.primary_service,
+            region=payload.region,
+            competitors=competitors,
+            icp=icp,
+            on_usage=usage_service.recorder(
+                kind="sub_service_discovery",
+                chat_session_id=payload.chat_session_id,
+                run_id=payload.run_id,
+                asset_id="plan_of_action",
+                phase="phase1",
+            ),
+        )
+    except sub_service_discovery.DiscoveryError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return SubServiceDiscoveryResponse.model_validate(found.as_dict())
+
+
+class PlanSubServicesRequest(BaseModel):
+    content: NonBlankStr
+
+
+@router.post("/runs/{run_id}/plan-sub-services")
+async def save_plan_sub_services(run_id: str, payload: PlanSubServicesRequest) -> dict[str, object]:
+    """File the sub-services the operator confirmed for the plan, so a Phase 2 run built on this one
+    offers them as its sub-service choices. A correction appends a version; the latest wins."""
+    try:
+        run_uuid = uuid.UUID(run_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid run_id: {run_id!r}") from exc
+    key = sub_service_discovery.PLAN_SUB_SERVICES_KEY
+    async with get_sessionmaker()() as session:
+        if await session.get(Run, run_uuid) is None:
+            raise HTTPException(status_code=404, detail=f"Run not found: {run_id}")
+        names = sub_service_discovery.names_for_phase2(payload.content)
+        session.add(
+            ContextEntry(
+                run_id=run_uuid,
+                context_key=key,
+                version=await _next_version(session, run_uuid, key),
+                value={"content": payload.content, "names": names},
+                written_by_asset_id=None,
+            )
+        )
+        await session.commit()
+    return {"run_id": run_id, "names": names}
 
 
 async def _read_selected_service_pages(

@@ -78,19 +78,7 @@
         "file",
         "text"
       ],
-      "raw_explanation": "YOUR ANSWER or leave blank — if a CRO audit, rebuilt pillar page, lead magnet, funnel, blog, SMS sequence, or SEO pass already exists for the primary service, reference or attach it here so Phase 1 is marked complete rather than re-planned from scratch. If nothing exists yet, say \"greenfield — Phase 1 not started.\""
-    },
-    {
-      "field_id": "phase_2_sub_services_already_built_optional",
-      "label": "Phase 2 Sub-Services Already Built (optional)",
-      "kind": "file_attach",
-      "required": false,
-      "source": "user_input",
-      "accepted_types": [
-        "file",
-        "text"
-      ],
-      "raw_explanation": "YOUR ANSWER or leave blank — every sub-service whose pillar page, funnel, lead magnet or other assets are already built, so the sub-service expansion marks them complete rather than re-briefing them. If none are built yet, say \"none — Phase 2 not started.\""
+      "raw_explanation": "YOUR ANSWER or leave blank — every Phase 1: Core Service asset (the Step 2 list) already built for the primary service, each with the measured facts of what it is (title, length, sections, stated scores, offers, message counts) and an excerpt, plus the keyword clusters' measured volumes. If nothing exists yet, say \"greenfield — Phase 1 not started.\""
     },
     {
       "field_id": "sub_services_to_expand_into_phase_2",
@@ -98,7 +86,7 @@
       "kind": "text",
       "required": true,
       "source": "user_input",
-      "raw_explanation": "YOUR ANSWER — list the logical sub-categories of the primary service that deserve their own dedicated pillar page, e.g. for \"Google Ads Management\": Search, Shopping, Display, Remarketing, YouTube, Performance Max, Local Service Ads, Audit. If you want these inferred rather than supplied, say \"infer 6-10 sub-services from the primary service and industry norms.\""
+      "raw_explanation": "YOUR ANSWER — the sub-services of the primary service confirmed for Phase 2, one per line: name — status (existing page on the client's site, or new) — the existing page's URL or a proposed slug — the keyword cluster with each keyword's monthly search volume — the combined volume — and the volume source (DataForSEO for a named country, or \"not measured\"). If you want these inferred rather than supplied, say \"infer 6-10 sub-services from the primary service and industry norms.\""
     },
     {
       "field_id": "industry_verticals_to_target_phase_3_optional",
@@ -178,7 +166,7 @@
         "file",
         "text"
       ],
-      "raw_explanation": "YOUR ANSWER — attach or reference a file/spreadsheet of 3-6 direct competitors in this industry and region. Used for the current-state content gap analysis and the \"why we rank sub-services this way\" reasoning. If none supplied, name 3-6 well-known competitors from general knowledge and flag this as an assumption. Confirmed: unlike 9 of the other 15 main assets, Plan of Action has no paired numbered Competitor Analysis file — this is a plain, general, user-supplied-or-inferred list, not a reference to one of the 10 numbered competitor prompts.",
+      "raw_explanation": "YOUR ANSWER — the competitor research already approved in this engagement, or a file/spreadsheet of 3-6 direct competitors in this industry and region. Used for the current-state content gap analysis and the \"why we rank sub-services this way\" reasoning. If none supplied, name 3-6 well-known competitors from general knowledge and flag this as an assumption.",
       "fallback_instruction": "If none supplied, name 3-6 well-known competitors from general knowledge and flag this as an assumption."
     },
     {
@@ -191,7 +179,7 @@
         "file",
         "text"
       ],
-      "raw_explanation": "YOUR ANSWER — attach or reference a keyword research export if one exists. If left blank, state estimated monthly search volumes using judgement and clearly label every volume figure as an estimate, not verified data.",
+      "raw_explanation": "YOUR ANSWER — attach or reference a keyword research export if one exists. If left blank, use the volumes supplied with the sub-services and Phase 1 keyword clusters, and label every other volume figure as an estimate, not verified data.",
       "fallback_instruction": "If left blank, state estimated monthly search volumes using judgement and clearly label every volume figure as an estimate, not verified data."
     },
     {
@@ -210,7 +198,7 @@
       "required": true,
       "source": "user_input",
       "default": 3,
-      "raw_explanation": "YOUR ANSWER — default 3 (Quick Win / Sub-Service Expansion / Full Sitemap Expansion). State a different number and their names if this business needs a different shape, e.g. a 2-phase plan for a smaller operator."
+      "raw_explanation": "YOUR ANSWER — default 3 (Core Service / Sub-Service / Full Sitemap Expansion). State a different number and their names if this business needs a different shape, e.g. a 2-phase plan for a smaller operator."
     },
     {
       "field_id": "delivery_capacity",
@@ -227,7 +215,9 @@
       "required": true,
       "source": "user_input",
       "raw_explanation": "YOUR ANSWER — Yes/No. If yes, name the regulation so no-guarantee, compliance-safe language is applied throughout every asset description.",
-      "conditional_children": ["regulation_name"]
+      "conditional_children": [
+        "regulation_name"
+      ]
     },
     {
       "field_id": "regulation_name",
@@ -235,7 +225,10 @@
       "kind": "text",
       "required": false,
       "source": "user_input",
-      "conditional_on": { "field": "regulated_field_flag", "equals": true },
+      "conditional_on": {
+        "field": "regulated_field_flag",
+        "equals": true
+      },
       "raw_explanation": "Name the regulation so no-guarantee, compliance-safe language is applied throughout every asset description."
     },
     {

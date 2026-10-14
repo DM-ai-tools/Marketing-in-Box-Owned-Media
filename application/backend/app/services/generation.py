@@ -326,26 +326,9 @@ PHASE2_OVERRIDES: dict[str, Phase2Override] = {
         "Funnel-Hub-Media-Architect-Prompt_phase2.md",
         label_overrides=(("service_or_product_line_being_funnel_mapped", "sub-service or product line being funnel-mapped"),),
     ),
-    # The last stage of Phase 2, and the only one that covers the whole engagement rather than one
-    # sub-service. The plan's roadmap Phase 2 *is* this app's Phase 2, so it has to be written after
-    # it: run at the end of Phase 1 it scheduled sub-service work that was about to be built, and
-    # reported finished work as missing. See `app/services/plan_context.py`.
-    #
-    # Three inputs are dropped because the engagement-wide documents carry them. A Phase 2 run's own
-    # CRO rewrite, funnel and value ladder are the *sub-service's*, and the ordinary context lookup
-    # would hand the plan one sub-service's page copy as "the CRO framework" for the whole client.
-    # The headline service's versions are inside "Existing Phase 1 Assets", and each sub-service's
-    # are inside "Phase 2 Sub-Services Already Built".
-    "plan_of_action": Phase2Override(
-        "Plan-of-Action-Architect-Prompt_phase2.md",
-        drop_fields=frozenset(
-            {
-                "cro_messaging_framework_optional",
-                "existing_funnels_lead_magnets_optional",
-                "existing_value_ladder_offers_optional",
-            }
-        ),
-    ),
+    # No `plan_of_action`: the plan is Phase 1's last stage. It summarises the headline service's
+    # finished work and suggests the sub-services Phase 2 then builds — see
+    # `app/services/plan_context.py` and `app/services/sub_service_discovery.py`.
 }
 
 

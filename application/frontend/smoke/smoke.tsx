@@ -283,30 +283,27 @@ const PAGE = [
 }
 
 /* ---------- Plan of Action sees what the run already built ----------
- * The plan decides which Phase 1 work is done from "Existing Phase 1 Assets". As a typed question it
- * was left blank, and a plan written after the funnel and lead magnet were approved scheduled them
- * again as missing. Both inputs now read the run's own approved documents, in the shape `saveStage`
- * files them (its own asset_id plus every key it publishes). */
+ * The plan's Phase 1 section is a delivery record, built from "Existing Phase 1 Assets". That input
+ * reads the server-composed `plan_phase1_assets` (measured facts plus an excerpt per deliverable —
+ * `app/services/plan_context.py`, whose rendering `tests/test_plan_context.py` pins). The funnels
+ * input still gathers the run's own documents, in the shape `saveStage` files them. */
 {
   const plan = ASSET_BY_ID.plan_of_action;
   const phase1 = plan.fields.find((f) => f.field_id === "existing_phase_1_assets_optional")!;
   const funnels = plan.fields.find((f) => f.field_id === "existing_funnels_lead_magnets_optional")!;
   const entry = (assetId: string, text: string) => ({ assetId, label: ASSET_BY_ID[assetId].label, text });
   const funnelDoc = entry("funnel", "# Funnel Overview\n\nStage 1: awareness. Stage 2: the quiz.");
-  const pillarHtml = `<!doctype html><html><head><style>${"x".repeat(5000)}</style></head><body><h1>Pillar headline</h1><p>${"word ".repeat(800)}</p></body></html>`;
+  const record = "Built and approved in Phase 1 for the headline service (treat as done, do not re-plan): Funnel.";
   const context = {
     funnel: funnelDoc,
     funnel_stages: funnelDoc,
     lead_magnet: entry("lead_magnet", "# The ROI Calculator lead magnet"),
-    pillar_page: entry("pillar_page", pillarHtml),
+    plan_phase1_assets: { assetId: "plan_phase1_assets", label: "Phase 1 deliverables (headline service)", text: record },
   };
 
-  const p1 = resolveContext(phase1, context);
+  ok("plan: Phase 1 assets read the composed delivery record", phase1.context_key === "plan_phase1_assets" && !phase1.context_keys);
   ok("plan: Phase 1 assets are read from the run, not asked", planField(phase1, context, {}).action === "confirm-context");
-  ok("plan: the funnel is listed as built", !!p1?.text.includes("Built and approved earlier in this run") && !!p1?.text.includes(ASSET_BY_ID.funnel.label), p1?.text.slice(0, 300));
-  ok("plan: a document published under two keys is listed once", (p1?.text.match(/## Funnel/g) ?? []).length === 1, p1?.text);
-  ok("plan: the pillar page arrives as words, not <head> boilerplate", !!p1?.text.includes("Pillar headline") && !p1?.text.includes("<style"), p1?.text.slice(0, 400));
-  ok("plan: each document is an excerpt", (p1?.text.length ?? 0) < 4500, String(p1?.text.length));
+  ok("plan: the record is what the plan receives", resolveContext(phase1, context)?.text === record);
   ok("plan: with nothing built yet, it is still asked", planField(phase1, {}, {}).action === "ask");
 
   const fl = resolveContext(funnels, context);

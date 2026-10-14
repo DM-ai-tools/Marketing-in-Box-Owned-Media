@@ -29,6 +29,8 @@ import {
   streamContinueStage,
   streamGenerateStage,
   scanServices,
+  discoverSubServices,
+  savePlanSubServices,
   streamRefineStage,
   suggestHeadlines,
   updateChatSession,
@@ -43,6 +45,7 @@ import type {
   CompetitorAnalysisResult,
   HeadlineCandidate,
   IndustryProfileResult,
+  PlanSubServiceCandidate,
   PrepassEvent,
   ScannedService,
   SourceRunSummary,
@@ -62,6 +65,9 @@ import {
   INDUSTRY_TEXT_FIELD,
   NEW_PAGE_OPTIONS,
   NO_REFERENCE_SCOPE,
+  PLAN_INFER_SUB_SERVICES,
+  PLAN_SUB_SERVICES_KEY,
+  PLAN_SUB_SERVICE_OPTION,
   PHASE2_AUDIENCE_INDUSTRY_FACT,
   PHASE2_AUDIENCE_INDUSTRY_FIELDS,
   PHASE_META,
@@ -70,10 +76,12 @@ import {
   SERVICE_SCAN_OPTIONS,
   SUB_SERVICE_FIELD,
   competitorStageFor,
+  composePlanSubServicesAnswer,
   composeServicesAnswer,
   noReferenceAnswer,
   industryBucketForLabel,
   phase2AudienceIndustryKey,
+  planSubServiceNames,
   stageAt,
   stagesFor,
   totalStagesFor,
@@ -81,7 +89,6 @@ import {
 import type { PickedService, PipelinePhase } from "./pipelineData";
 import { SUB_SERVICE_FACT, phase2StartingContext } from "../data/phase2Catalog";
 import { PLAN_COMPOSED_KEYS, SERVER_COMPOSED_CONTEXT_KEYS } from "../data/assetCatalog";
-import { useUiStore } from "../store/uiStore";
 import { INDUSTRY_PROFILES, isIndustryBucket, notRecommendedReason } from "../data/industryProfiles";
 import { specifyPrefix } from "../lib/specifyChoice";
 
@@ -134,6 +141,22 @@ export interface ServiceScanState {
   /** What was submitted, for the history view. */
   chosen?: PickedService[];
   other?: string;
+  /** Set on the Plan of Action's sub-service picker (`PLAN_SUB_SERVICE_OPTION`), which suggests
+   * sub-services rather than only listing the site's. Its picks are keyed by name, since a
+   * suggested sub-service has no page URL yet. */
+  plan?: PlanDiscoveryState;
+}
+
+/** The Plan of Action's sub-service discovery, carried on its `service-choice` card. */
+export interface PlanDiscoveryState {
+  primaryService: string;
+  region: string;
+  candidates: PlanSubServiceCandidate[];
+  /** "dataforseo" when the volumes are measured. */
+  volumeSource: string;
+  location: string;
+  /** Names confirmed, for the history view. */
+  chosenNames?: string[];
 }
 
 /** A `kind: "stage-advisory"` card. Advice, never removal — see `data/industryProfiles.ts`.
@@ -565,6 +588,8 @@ interface PipelineState {
   /** Pillar Page: the services picked on a `service-choice` card, plus any typed. */
   confirmServices: (messageId: string, picked: PickedService[], other: string) => void;
   skipServices: (messageId: string) => void;
+  /** Plan of Action: the sub-services confirmed on its `service-choice` card, plus any typed. */
+  confirmPlanSubServices: (messageId: string, names: string[], other: string) => void;
   retryServiceScan: (messageId: string) => void;
   submitFreeform: (raw: string) => void;
   skipField: () => void;
@@ -2553,6 +2578,79 @@ async function loadServiceScan(get: () => PipelineState, set: (partial: Partial<
   }
 }
 
+/** Whether the walk has reached the Plan of Action's sub-service field. */
+function isPlanSubServiceField(asset: AssetDefinition, field: FieldDef): boolean {
+  return asset.asset_id === PLAN_SUB_SERVICE_OPTION.assetId && field.field_id === PLAN_SUB_SERVICE_OPTION.servicesFieldId;
+}
+
+/** The Plan of Action's sub-service card, opened in its loading state. Its inputs are this intake's
+ * own answers where it has them, else the run's profile. See `PLAN_SUB_SERVICE_OPTION`. */
+function openPlanDiscovery(
+  get: () => PipelineState,
+  set: (partial: Partial<PipelineState>) => void,
+  asset: AssetDefinition,
+  field: FieldDef,
+  answers: Record<string, unknown>,
+) {
+  const state = get();
+  const text = (v: unknown) => (typeof v === "string" ? v.trim() : "");
+  const primaryService =
+    text(answers[PLAN_SUB_SERVICE_OPTION.serviceFieldId]) || text(state.clientProfile.target_service) || "";
+  const region = text(answers[PLAN_SUB_SERVICE_OPTION.regionFieldId]) || text(state.clientProfile.region);
+  const url =
+    pageUrlFromAnswer(answers[PLAN_SUB_SERVICE_OPTION.websiteFieldId]) ?? pageUrlFromAnswer(state.clientProfile.website_url);
+  const card = push(get, set, {
+    role: "assistant",
+    kind: "service-choice",
+    assetId: asset.asset_id,
+    field,
+    serviceScan: {
+      status: "loading",
+      url,
+      services: [],
+      preselected: [],
+      notes: [],
+      plan: { primaryService, region, candidates: [], volumeSource: "unavailable", location: "" },
+    },
+  });
+  void loadPlanDiscovery(get, set, card.id);
+}
+
+async function loadPlanDiscovery(get: () => PipelineState, set: (partial: Partial<PipelineState>) => void, messageId: string) {
+  const scan = get().messages.find((m) => m.id === messageId)?.serviceScan;
+  const plan = scan?.plan;
+  if (!scan || !plan) return;
+  if (!plan.primaryService) {
+    patchMessage(get, set, messageId, {
+      serviceScan: { ...scan, status: "error", error: "The primary service is not on record yet. Type the sub-services below instead." },
+    });
+    return;
+  }
+  try {
+    const result = await discoverSubServices(plan.primaryService, { url: scan.url, region: plan.region, ...attribution(get) });
+    const current = get().messages.find((m) => m.id === messageId)?.serviceScan;
+    if (!current?.plan || current.status !== "loading") return;
+    patchMessage(get, set, messageId, {
+      serviceScan: {
+        ...current,
+        status: "ready",
+        url: result.source_url || current.url,
+        notes: result.notes,
+        // Every suggestion starts ticked: the operator's job on this card is to take out what does
+        // not belong, and an unticked list would read as "nothing recommended".
+        preselected: result.candidates.map((c) => c.name),
+        plan: { ...current.plan, candidates: result.candidates, volumeSource: result.volume_source, location: result.location },
+      },
+    });
+  } catch (err) {
+    const current = get().messages.find((m) => m.id === messageId)?.serviceScan;
+    if (!current) return;
+    patchMessage(get, set, messageId, {
+      serviceScan: { ...current, status: "error", error: err instanceof Error ? err.message : String(err) },
+    });
+  }
+}
+
 /** Answer the landing-page follow-up: the reference becomes the no-reference sentinel, and the
  * scope is the landing page's whole design system, so neither question is asked again. */
 function answerLandingPage(
@@ -2649,6 +2747,13 @@ function advanceIntake(
         serviceScan: { status: "loading", url: serviceScanUrl(get(), answers, serviceScan), services: [], preselected: [], notes: [] },
       });
       void loadServiceScan(get, set, card.id);
+      return;
+    }
+
+    // The Plan of Action's sub-services: found on the client's site and suggested from the
+    // competitor research, then confirmed. See `PLAN_SUB_SERVICE_OPTION`.
+    if (isPlanSubServiceField(asset, result.field)) {
+      openPlanDiscovery(get, set, asset, result.field, answers);
       return;
     }
 
@@ -2976,21 +3081,13 @@ function finishPhase(get: () => PipelineState, set: (partial: Partial<PipelineSt
       : {}),
   });
   const skipped = skippedAssetIds(get().messages, phase).size;
-  // Phase 1 stops one stage short of the Plan of Action on purpose (`DEFERRED_TO_PHASE2`). Said at
-  // the point the operator would otherwise look for it, because a roadmap that is simply absent from
-  // the end of the pipeline reads as a stage that failed to run.
-  const planNote =
-    phase === "phase1"
-      ? " The Plan of Action isn't generated here: it is written at the end of Phase 2, once your sub-services are built, so that one plan covers all of them."
-      : "";
   push(get, set, {
     role: "assistant",
     kind: "text",
     text:
       (skipped
         ? `${PHASE_META[phase].label} is complete. ${total - skipped} of ${total} assets were generated and saved to the Context Store, and ${skipped} ${skipped === 1 ? "was" : "were"} skipped as rarely needed for this industry. Use "Start here" on a skipped stage to build it anyway.`
-        : `All ${total} ${PHASE_META[phase].label} assets have been generated and saved to the Context Store. ${PHASE_META[phase].label} is complete.`) +
-      planNote,
+        : `All ${total} ${PHASE_META[phase].label} assets have been generated and saved to the Context Store. ${PHASE_META[phase].label} is complete.`),
   });
 }
 
@@ -3235,7 +3332,38 @@ function askSubService(get: () => PipelineState, set: (partial: Partial<Pipeline
     navStatus: "Awaiting Input",
     progress: 4,
   });
-  push(get, set, { role: "assistant", kind: "question", field: SUB_SERVICE_FIELD });
+  const question = push(get, set, { role: "assistant", kind: "question", field: SUB_SERVICE_FIELD });
+  void offerPlannedSubServices(get, set, question.id);
+}
+
+/** Put the sub-services the parent run's Plan of Action confirmed first among the choices.
+ *
+ * The plan is Phase 1's last stage and it is where the sub-services were chosen, so a Phase 2 run
+ * built on that run opens on them rather than on the generic list. Read from the parent run
+ * (`plan_sub_services`, filed when the plan's picker was confirmed). No plan, or a failed read,
+ * leaves the generic choices as they are. */
+async function offerPlannedSubServices(
+  get: () => PipelineState,
+  set: (partial: Partial<PipelineState>) => void,
+  questionId: string,
+) {
+  const parent = get().sourceRunId ?? get().runId;
+  if (!parent) return;
+  const entry = await fetchRunContext(parent, PLAN_SUB_SERVICES_KEY).catch(() => null);
+  const planned = entry ? planSubServiceNames(entry.content) : [];
+  if (!planned.length) return;
+  const message = get().messages.find((m) => m.id === questionId);
+  if (!message?.field || message.answered || message.superseded) return;
+  const rest = (SUB_SERVICE_FIELD.choices ?? []).filter(
+    (choice) => !planned.some((name) => name.toLowerCase() === choice.toLowerCase()),
+  );
+  patchMessage(get, set, questionId, {
+    field: {
+      ...message.field,
+      choices: [...planned, ...rest],
+      helpText: `The first ${planned.length === 1 ? "choice is" : `${planned.length} choices are`} the sub-services your Plan of Action confirmed, in its order. ${SUB_SERVICE_FIELD.helpText ?? ""}`.trim(),
+    },
+  });
 }
 
 /** Offer the Phase 1 runs this sub-service run could be built on.
@@ -3560,45 +3688,12 @@ function nextUnexecutedIndex(state: PipelineState): number {
   // A stage the operator chose to skip on an industry advisory is passed over too — otherwise
   // approving the stage after it would walk straight back to the one they just declined.
   const skipped = skippedAssetIds(state.messages, state.phase, trackId);
-  // One Plan of Action covers every sub-service, so a later sub-service's walk does not build a
-  // second one: it ends, and `notifyPlanOutOfDate` offers the re-run of the one that exists.
-  const planExists = state.phase === "phase2" && planOfActionApproved(state.messages);
   const stages = stagesFor(state.phase);
   for (let i = 0; i < stages.length; i++) {
     const id = stages[i].asset.asset_id;
-    if (planExists && id === PLAN_ASSET_ID) continue;
     if (!approved.has(id) && !skipped.has(id)) return i;
   }
   return stages.length;
-}
-
-const PLAN_ASSET_ID = "plan_of_action";
-
-/** Whether this chat has an approved Plan of Action, on any Phase 2 track.
- *
- * Across tracks on purpose: the plan is the one deliverable that is not per-sub-service. Read off
- * the transcript like `approvedAssetIds`, so it survives a reload with the messages and needs no
- * state of its own to go stale. */
-export function planOfActionApproved(messages: PipelineMessage[]): boolean {
-  return messages.some(
-    (m) =>
-      m.kind === "generation" &&
-      m.savePhase === "saved" &&
-      m.assetId === PLAN_ASSET_ID &&
-      (m.phase ?? "phase2") === "phase2",
-  );
-}
-
-/** Tell the operator the plan no longer covers everything the engagement holds.
- *
- * Raised when a sub-service's run ends, or one of its stages is re-run, after a plan was approved.
- * Never for the plan itself, and never mid-walk: ten approvals in a new sub-service's run would be
- * ten identical interruptions. The question is whether to re-run once it is finished. */
-function notifyPlanOutOfDate(get: () => PipelineState, approvedAssetId: string | undefined): void {
-  const state = get();
-  if (state.phase !== "phase2" || approvedAssetId === PLAN_ASSET_ID) return;
-  if (!planOfActionApproved(state.messages)) return;
-  useUiStore.getState().askPlanRerun({ subService: state.clientProfile[SUB_SERVICE_FACT] ?? "" });
 }
 
 /** Stages this leg skipped on an industry advisory and has not since built.
@@ -4002,9 +4097,47 @@ export const usePipelineStore = create<PipelineState>((set, get) => ({
     const intake = state.intake;
     const scan = message?.serviceScan;
     if (!message || !scan || !isServiceScanOpen(message) || !intake || !message.field) return;
-    intake.answers[message.field.field_id] = "NONE";
+    // The plan's picker skipped: the prompt's own "infer" instruction, so the plan still has
+    // sub-services to brief rather than none.
+    const isPlan = Boolean(scan.plan);
+    intake.answers[message.field.field_id] = isPlan ? PLAN_INFER_SUB_SERVICES : "NONE";
     patchMessage(get, set, messageId, { serviceScan: { ...scan, status: "skipped" } });
-    push(get, set, { role: "user", kind: "text", text: "No specific services: cover what the page copy covers." });
+    push(get, set, {
+      role: "user",
+      kind: "text",
+      text: isPlan ? "Let the plan infer the sub-services." : "No specific services: cover what the page copy covers.",
+    });
+    set({ editSeed: null });
+    applyAnswerAndAdvance(get, set, intake, message.field);
+  },
+
+  confirmPlanSubServices: (messageId, names, other) => {
+    const state = get();
+    const message = liveMessage(state, messageId);
+    const intake = state.intake;
+    const scan = message?.serviceScan;
+    const plan = scan?.plan;
+    if (!message || !scan || !plan || !isServiceScanOpen(message) || !intake || !message.field) return;
+    if (intake.awaitingFieldId !== PLAN_SUB_SERVICE_OPTION.servicesFieldId) return;
+
+    const picked = plan.candidates.filter((c) => names.includes(c.name));
+    const answer = composePlanSubServicesAnswer(picked, other, { volumeSource: plan.volumeSource, location: plan.location });
+    if (!answer) {
+      get().skipServices(messageId);
+      return;
+    }
+    intake.answers[PLAN_SUB_SERVICE_OPTION.servicesFieldId] = answer;
+    const typed = other.split(/[,;\n]/).map((s) => s.trim()).filter(Boolean);
+    const chosenNames = [...picked.map((c) => c.name), ...typed];
+    patchMessage(get, set, messageId, { serviceScan: { ...scan, status: "done", other, plan: { ...plan, chosenNames } } });
+    push(get, set, { role: "user", kind: "text", text: `Plan these sub-services: ${chosenNames.join(", ")}` });
+
+    // Filed on the run so a Phase 2 run built on this one offers the same sub-services. A failure
+    // costs that convenience only: the plan has its answer either way.
+    const runId = get().runId;
+    if (runId) {
+      savePlanSubServices(runId, answer).catch((err) => console.warn("Could not file the plan's sub-services", err));
+    }
     set({ editSeed: null });
     applyAnswerAndAdvance(get, set, intake, message.field);
   },
@@ -4013,7 +4146,8 @@ export const usePipelineStore = create<PipelineState>((set, get) => ({
     const message = liveMessage(get(), messageId);
     if (!message?.serviceScan || message.serviceScan.status !== "error") return;
     patchMessage(get, set, messageId, { serviceScan: { ...message.serviceScan, status: "loading", error: undefined } });
-    void loadServiceScan(get, set, messageId);
+    if (message.serviceScan.plan) void loadPlanDiscovery(get, set, messageId);
+    else void loadServiceScan(get, set, messageId);
   },
 
   submitFreeform: (raw) => {
@@ -4330,10 +4464,6 @@ export const usePipelineStore = create<PipelineState>((set, get) => ({
       const isRerun = returnIndex !== null;
       const target = nextUnexecutedIndex(get());
       const done = target >= total;
-
-      // A sub-service finished — or one of its earlier stages was re-run — after the plan was
-      // written, so the plan is behind. Said once, here, rather than on every approval.
-      if (isRerun || done) notifyPlanOutOfDate(get, message.assetId);
 
       if (isRerun) {
         // The parked intake belongs to whichever stage the operator was standing in. Restored only

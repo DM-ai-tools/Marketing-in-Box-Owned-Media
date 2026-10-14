@@ -62,6 +62,11 @@ superseded, interrupted, failed, refining — without a browser or a new depende
   The losslessness check there is word-multiset containment rather than line matching, and the
   comment above it records why: two weaker versions of that check each let a real data-loss bug
   through.
+- `planPhase1.tsx` — the Plan of Action as Phase 1's last stage. It checks that the sub-service field
+  opens the discovery card rather than a question, and that the confirmed answer and the
+  `plan_sub_services` text filed on the run have the same line shape. It also checks that a skip
+  tells the plan to infer them, and that a Phase 2 run built on that run lists the planned
+  sub-services first.
 
 ## What they do not cover
 

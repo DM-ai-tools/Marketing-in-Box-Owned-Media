@@ -49,8 +49,6 @@ PHASE2_ASSET_IDS = [
     "sms_sequence",
     "content_marketing_strategy",
     "funnel_hub_media",
-    # Last, and about the whole engagement: see tests/test_plan_context.py.
-    "plan_of_action",
 ]
 
 

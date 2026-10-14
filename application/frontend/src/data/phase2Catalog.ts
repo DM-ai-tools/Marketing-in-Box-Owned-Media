@@ -93,15 +93,6 @@ interface Phase2Delta {
    * walk resolved, absent -> asked. Absent is the expected case for a parent run approved before
    * that document existed, and asking is the right answer there rather than a guess. */
   fromParentSettings?: readonly string[];
-  /** field_id -> the server-composed, engagement-wide document that answers it, with the Phase 2
-   * help text for what that document now is.
-   *
-   * For the Plan of Action only, which is the one stage that is about the whole engagement rather
-   * than one sub-service. Its ordinary context fields read this *run's* documents, and in a Phase 2
-   * run those are one sub-service's — so "the CRO framework" would be one sub-service's page copy
-   * and "existing funnels" one sub-service's funnel. These read the composed keys instead
-   * (`PLAN_COMPOSED_KEYS`), which look across the Phase 1 run and every sub-service under it. */
-  fromComposed?: Readonly<Record<string, { context_key: string; helpText: string }>>;
   description?: string;
 }
 
@@ -242,49 +233,6 @@ const DELTAS: Record<string, Phase2Delta> = {
     // the cluster architecture instead of re-briefing them, which it can only do if it has them.
     gatherContext: { existing_content_assets_optional: ["funnel_stages", "lead_magnet"] },
   },
-  // The last stage of Phase 2, and the only one that covers every sub-service at once.
-  //
-  // It belongs here and not in Phase 1 because the roadmap's "Phase 2" is this app's Phase 2: asked
-  // at the end of Phase 1 it scheduled sub-service work that was about to be built, and listed
-  // finished work as missing. Run last, "already built" is a fact the server can read.
-  //
-  // The three documents below are composed on read from the Phase 1 run and every sub-service run
-  // under it (`app/services/plan_context.py`), not taken from this run's own context — which in a
-  // Phase 2 run is one sub-service's. The three inputs that would have read this run's CRO rewrite,
-  // funnel and value ladder are dropped: those are the sub-service's, and the headline service's
-  // equivalents are inside the Phase 1 document. `PHASE2_OVERRIDES["plan_of_action"]` drops the same
-  // three on the server.
-  plan_of_action: {
-    dropFields: [
-      "cro_messaging_framework_optional",
-      "existing_funnels_lead_magnets_optional",
-      "existing_value_ladder_offers_optional",
-    ],
-    fromComposed: {
-      icp_document: {
-        context_key: "plan_root_icp",
-        helpText: "The headline service's ICP, from the Phase 1 run. Each sub-service's own ICP is in the Phase 2 document.",
-      },
-      existing_phase_1_assets_optional: {
-        context_key: "plan_phase1_assets",
-        helpText: "Everything approved for the headline service, so the plan marks it done instead of scheduling it again.",
-      },
-      phase_2_sub_services_already_built_optional: {
-        context_key: "plan_phase2_assets",
-        helpText: "Every sub-service built so far under this client, read fresh from each one's run.",
-      },
-    },
-    // Worked out from CRO's claim substantiation tier (`DERIVED_SUB_KEYS` in `lib/contextSubKeys.ts`):
-    // tiers 2 and 3 are "Yes". `regulation_name` stays a question — CRO never asks for the name of
-    // the regulation — but it is only reached when this resolves to Yes.
-    fromParentSettings: ["regulated_field_flag"],
-    rewordHelp: {
-      sub_services_to_expand_into_phase_2:
-        'List every sub-service this plan should cover — the ones already built are marked complete. Say "infer 6-10 sub-services" to have the rest inferred.',
-    },
-    description:
-      "One phased roadmap for the whole engagement, written after Phase 2: it marks the headline service and every sub-service already built as done, and schedules the rest.",
-  },
   funnel_hub_media: {
     relabel: { service_or_product_line_being_funnel_mapped: "sub-service or product line being funnel-mapped" },
     fromSubService: ["service_or_product_line_being_funnel_mapped"],
@@ -335,10 +283,7 @@ function applyDelta(asset: AssetDefinition, delta: Phase2Delta): AssetDefinition
   const askOutright = delta.askOutright ?? {};
   const fromSettings = new Set(delta.fromParentSettings ?? []);
   const rewordHelp = delta.rewordHelp ?? {};
-  const composed = delta.fromComposed ?? {};
-
   for (const fieldId of [
-    ...Object.keys(composed),
     ...dropped,
     ...Object.keys(relabel),
     ...(delta.fromSubService ?? []),
@@ -379,12 +324,6 @@ function applyDelta(asset: AssetDefinition, delta: Phase2Delta): AssetDefinition
     }
   }
 
-  for (const fieldId of Object.keys(composed)) {
-    if (dropped.has(fieldId) || askOutright[fieldId] || gather[fieldId] || fromSettings.has(fieldId) || rewordHelp[fieldId]) {
-      throw new Error(`Phase 2 delta for "${asset.asset_id}" answers field "${fieldId}" from two sources`);
-    }
-  }
-
   for (const fieldId of fromSettings) {
     // A field cannot be answered from two places. `fromSubService` wins silently if both were set,
     // and the settings document would simply never be consulted for it — so say so instead.
@@ -412,27 +351,6 @@ function applyDelta(asset: AssetDefinition, delta: Phase2Delta): AssetDefinition
         // said. Constructing the field fresh is what guarantees every route to it is gone —
         // `context_key`, `sub_key`, `fallback` and all. Nothing conditional is carried across
         // because `ctx()` cannot produce it, so a context_reference never has any.
-        // Rebuilt, like `askOutright`, for the opposite reason: the original field may carry
-        // `context_keys` (a gathered set, with an excerpt length) and an `icp_*` wildcard, and any of
-        // them left on would send the lookup back to this run's own documents. Named fields only, so
-        // nothing the composed document does not use survives by accident.
-        const fromServer = composed[f.field_id];
-        if (fromServer) {
-          return {
-            field_id: f.field_id,
-            label,
-            kind: "context_reference",
-            required: f.required,
-            source: "auto_from_context",
-            context_key: fromServer.context_key,
-            // Absent is the expected case before anything is built, and asking is the right answer.
-            fallback: "ask_user_if_missing",
-            overridable: false,
-            helpText: fromServer.helpText,
-            placeholder: f.placeholder,
-          } satisfies FieldDef;
-        }
-
         const asked = askOutright[f.field_id];
         if (asked) {
           return {

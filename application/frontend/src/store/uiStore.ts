@@ -79,14 +79,6 @@ interface UiState {
    * a warning rendered there would be laid out inside a 85vw-wide panel instead of over the app.
    * The sidebar raises the question, `ChatDeleteDialog` at the root asks it. */
   pendingChatDelete: { id: string; title: string } | null;
-  /** Set when a sub-service was built or changed after the Plan of Action was approved, so the plan
-   * no longer covers everything the engagement holds. `PlanRerunDialog` at the root asks about it.
-   *
-   * Here for the reason `pendingChatDelete` is: the pipeline store decides *when* the plan has gone
-   * stale (`saveStage`), but the question is about the whole app and must not be laid out inside
-   * whichever pane happened to be on screen. Not persisted: the staleness itself is re-derivable
-   * from the transcript, and a notice that outlived the session would be about a moment that is gone. */
-  pendingPlanRerun: { subService: string } | null;
   /** The generation card the delete confirmation is asking about. Root-mounted for the reason
    * `pendingChatDelete` is: the card animates on `transform`. See `GenerationDeleteDialog`. */
   pendingGenerationDelete: { messageId: string; label: string; approved: boolean } | null;
@@ -112,8 +104,6 @@ interface UiState {
   toggleDemoMode: () => void;
   askDeleteChat: (target: { id: string; title: string }) => void;
   cancelDeleteChat: () => void;
-  askPlanRerun: (target: { subService: string }) => void;
-  dismissPlanRerun: () => void;
 }
 
 /**
@@ -134,7 +124,6 @@ export const useUiStore = create<UiState>((set) => ({
   transcriptFocus: null,
   demoMode: false,
   pendingChatDelete: null,
-  pendingPlanRerun: null,
   pendingGenerationDelete: null,
   openSidebar: () => set({ sidebarOpen: true }),
   closeSidebar: () => set({ sidebarOpen: false }),
@@ -183,8 +172,6 @@ export const useUiStore = create<UiState>((set) => ({
   toggleDemoMode: () => set((s) => ({ demoMode: !s.demoMode, readerMessageId: null })),
   askDeleteChat: (pendingChatDelete) => set({ pendingChatDelete }),
   cancelDeleteChat: () => set({ pendingChatDelete: null }),
-  askPlanRerun: (pendingPlanRerun) => set({ pendingPlanRerun }),
-  dismissPlanRerun: () => set({ pendingPlanRerun: null }),
   askDeleteGeneration: (pendingGenerationDelete) => set({ pendingGenerationDelete }),
   cancelDeleteGeneration: () => set({ pendingGenerationDelete: null }),
 }));

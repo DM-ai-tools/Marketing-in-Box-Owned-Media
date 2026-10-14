@@ -1095,41 +1095,99 @@ reading it would search the market for the phrase "NEW PAGE — no existing URL"
 
 ---
 
-## The Plan of Action — written after Phase 2, one plan for every sub-service
+## The Plan of Action — Phase 1's last stage, and where Phase 2's sub-services are chosen
 
-The plan's roadmap has a "Phase 2" (expand into sub-services) and it is this app's Phase 2. It used
-to be Phase 1's last stage, so it scheduled sub-service work that was about to be built and listed
-finished sub-services as missing. It is now Phase 2's **last stage** (`PHASE2_ASSET_IDS`), and Phase 1
-stops at 14 stages (`DEFERRED_TO_PHASE2`) and says so when it finishes.
+The plan is stage 15 of Phase 1 and nowhere else; Phase 2 has no plan stage. It does two jobs:
+- It is the **delivery record** for Phase 1: what each deliverable is, not just that it exists.
+- It is the **roadmap**: the sub-services Phase 2 builds, then the Phase 3 verticals and locations.
 
-- **Composed on read, never stored.** A run reads *down* `source_run_id`, never sideways, so the plan
-  cannot see sibling sub-services through ordinary inheritance. `app/services/plan_context.py`
-  composes three documents from the root Phase 1 run and every run under it, and
-  `GET /pipeline/runs/{id}/context/{key}` dispatches on `COMPOSED_KEYS`: `plan_root_icp`,
-  `plan_phase1_assets`, `plan_phase2_assets`. A stored copy would be stale the moment another
-  sub-service was approved. The frontend re-reads them on every entry to the stage
-  (`hydrateContextFromDb`, `PLAN_COMPOSED_KEYS`) — the one exception to "in-session values win".
-- **Excerpts, not documents.** The question the plan asks of a deliverable is whether it exists and
-  what it is about. The ICP is the exception. `PHASE2_EXCERPT_CHARS` bounds the block that grows with
-  every sub-service.
-- **Each run names its sub-service.** The server did not know it; `POST /pipeline/runs/{id}/sub-service`
-  files it as a `sub_service` context entry when a track is created or its sub-service corrected.
-- **Three inputs are dropped in Phase 2** (CRO framework, existing funnels/lead magnets, existing
-  value ladder), on both sides (`PHASE2_OVERRIDES`, `DELTAS.plan_of_action`). In a Phase 2 run those
-  would be one sub-service's documents offered as the client's. The headline service's are inside
-  `plan_phase1_assets`.
-- **One plan, not one per track.** `nextUnexecutedIndex` skips the plan for a track once any track
-  has an approved one. When a later sub-service finishes (or one of its stages is re-run), the store
-  raises `uiStore.pendingPlanRerun` and `PlanRerunDialog` offers the re-run — once, at the end, not on
-  every approval. Staleness is read off the transcript, so it needs no state to clear.
+The model is the Traffic Radius plan (`docs/TrafficRadius_Owned_Media_Plan_of_Action.docx`). That
+plan listed the pages the client already had, named the sub-services competitors had and the client
+lacked, and put a volume on every keyword.
+
+It used to be Phase 2's last stage, re-run per sub-service (`PlanRerunDialog`). That was dropped: the
+plan is where the sub-services are *chosen*, so it has to come before them. A plan is not updated
+with Phase 2's progress.
+
+### The Phase 1 record — `plan_context.py`
+
+- `plan_phase1_assets` is **composed on read** from the Phase 1 run (`COMPOSED_KEYS`, dispatched by
+  `GET /pipeline/runs/{id}/context/{key}`; `PLAN_COMPOSED_KEYS` on the frontend, always re-read).
+- **Measured facts first, then an excerpt**, per deliverable:
+  - title, word count and section outline;
+  - the numbers the document itself states: CRO score /100, the ladder's offers and prices
+    (`parse_offer_ladder`), SMS and email counts;
+  - the run's `keyword_clusters` top keywords with their measured volumes, at the end.
+- **Parsed, never summarised by a model.** A model reading the documents back would be a second
+  place for a fact to be invented. The plan's own model writes the prose (Step 2: "Asset N", 2-4
+  lines each, only facts the inputs state).
+- A deliverable not built is listed as "Not built in Phase 1", and the plan briefs it as outstanding.
+
+### The sub-services — `sub_service_discovery.py`
+
+When the plan's intake reaches `sub_services_to_expand_into_phase_2`, the walk opens a
+`service-choice` card with `serviceScan.plan` set (`PLAN_SUB_SERVICE_OPTION`, `PlanSubServiceCard`).
+It does not open a text question. `POST /pipeline/plan/sub-services/discover` measures, judges,
+then measures again:
+
+1. **The client's own menu.** `service_scan.scan_services(phase="phase2", focus=primary service)` is
+   one free fetch and one Haiku call, and returns real URLs. On trafficradius.com.au, Social Media
+   Marketing's Meta Ads and LinkedIn Ads pages.
+2. **One Haiku call judges.** It sees the scan, the competitor listings this run already approved
+   (`COMPETITOR_LISTING_KEYS`, never re-searched) and the ICP:
+   - it keeps the existing sub-services that belong under the primary service;
+   - it suggests the missing ones (status `new`, a proposed slug), each with a 4-6 keyword cluster.
+   - **An `existing` item needs a URL the scan found.** Otherwise `_parse_reply` demotes it to `new`
+     with a note: a page the site does not link to is never reported as built.
+3. **One DataForSEO `keyword_overview` request** measures every keyword on the card. Without
+   DataForSEO credentials the volumes stay `None`, the card says so, and the plan labels its volumes
+   "(est.)". **Never the stub provider's numbers, and never 0.**
+
+The operator confirms the list on the card. Everything starts ticked; they can untick, type others,
+or skip.
+- **Confirm.** The answer is `composePlanSubServicesAnswer`'s shape: a volume-source line, then per
+  line name — status with URL or slug — keywords with volumes — combined volume.
+- **Skip.** The answer is the prompt's own "infer 6-10 sub-services" wording.
+
+### The hand-off to Phase 2
+
+- **Where it is filed.** The confirmed text is filed on the Phase 1 run as `plan_sub_services`
+  (`POST /pipeline/runs/{id}/plan-sub-services`).
+- **What Phase 2 does with it.** `askSubService` reads it from the parent run
+  (`offerPlannedSubServices`). The planned names lead the sub-service choices, in the plan's order,
+  and the generic list follows.
+- **The reader.** `planSubServiceNames` and the server's `names_for_phase2` read one line pattern.
+  `tests/test_sub_service_discovery.py` checks the two.
+
+### The prompt
+
+`Plan-of-Action-Architect-Prompt.md` has one file and no Phase 2 twin.
+- **Step 3 brief fields.** Each sub-service is briefed under Phase 2's 9 stage names, so a
+  suggestion can be run as-is. Each brief also gets:
+  - `Status` (existing page, so enhance; or new, so build), plus `Proposed URL`;
+  - the keyword cluster, using measured volumes exactly;
+  - `Priority | Month`.
+- **Email has no asset of its own.** It folds into the Funnel and Lead Magnet briefs, because no
+  stage builds an email sequence.
+- **Ordering rules.** Step 7's ranking sets the build order: a higher-ranked sub-service is never
+  scheduled after a lower-ranked one. The reference plan broke this. Funnels are numbered across
+  phases.
+- **Phase 3 additions.** Phase 3 gains I (content refresh and consolidation). Step 8 closes each
+  phase with QA (internal links, cannibalisation, sitemap, schema).
+- **Inputs read from the run.** The competitor input gathers `PLAN_COMPETITOR_KEYS`. The regulated
+  flag reads `cro_client_settings` (`DERIVED_SUB_KEYS`).
+
+### Rules
+
+- **Credits are money.** Discovery costs two Haiku calls and one DataForSEO request, capped at
+  `MAX_CANDIDATES` × `MAX_KEYWORDS_PER_CANDIDATE` keywords.
 - **The plan speaks the pipeline's vocabulary.** Its phases are titled like the toggle
-  (`PHASE_META.scope`: "Phase 1: Core Service", "Phase 2: Sub-Service"). Step 2 lists Phase 1's
-  14 stages by their catalog labels, and Step 3's per-sub-service schema is Phase 2's 9 stages, in
-  pipeline order. `plan_context.LABELS` are the same catalog labels. The mind map tags each name
-  (`icp`, `offer`, `webinar`, `book`, `podcast`, `strategy` kinds in `lib/planTree.ts`).
-  `tests/test_plan_names_match_pipeline.py` reads the frontend catalog and fails on any drift.
-- `Phase2/Plan-of-Action-Architect-Prompt_phase2.md` is Phase 1's file plus declared edits;
-  `tests/test_plan_context.py` reverses them and requires the original byte for byte.
+  (`PHASE_META.scope`). Step 2 lists Phase 1's 14 stages and Step 3 Phase 2's 9 by their catalog
+  labels, and `plan_context.LABELS` uses the same labels. `tests/test_plan_names_match_pipeline.py`
+  fails on drift.
+- `tests/test_plan_context.py` pins the record and the wiring, and that no Phase 2 plan exists on
+  either side. `tests/test_sub_service_discovery.py` pins discovery and the route.
+  `smoke/planPhase1.tsx` drives the card and the hand-off.
 
 ## Output style — bullets, not paragraphs
 

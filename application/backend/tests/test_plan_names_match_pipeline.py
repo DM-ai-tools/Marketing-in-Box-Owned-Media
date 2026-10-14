@@ -21,7 +21,7 @@ from app.services import plan_context as pc
 from app.services.generation import _PROMPTS_DIR
 
 _FRONTEND = Path(__file__).resolve().parents[2] / "frontend" / "src"
-PROMPTS = ("Plan-of-Action-Architect-Prompt.md", "Phase2/Plan-of-Action-Architect-Prompt_phase2.md")
+PROMPTS = ("Plan-of-Action-Architect-Prompt.md",)
 
 
 def _catalog_labels() -> dict[str, str]:

@@ -6,6 +6,7 @@ import {
   SUB_SERVICE_FACT,
 } from "../data/phase2Catalog";
 import type { AssetDefinition, FieldDef } from "../data/types";
+import type { PlanSubServiceCandidate } from "./pipelineApi";
 import { INDUSTRY_BUCKETS, INDUSTRY_PROFILES } from "../data/industryProfiles";
 import type { IndustryBucket } from "../data/industryProfiles";
 
@@ -70,20 +71,10 @@ const PHASE2_ASSET_IDS = [
   "sms_sequence",
   "content_marketing_strategy",
   "funnel_hub_media",
-  // Last, and about the whole engagement rather than this sub-service: it reads the Phase 1 run and
-  // every sub-service built under it (`app/services/plan_context.py`). See `DEFERRED_TO_PHASE2`.
-  "plan_of_action",
+  // No Plan of Action: it is Phase 1's last stage. It summarises the headline service's finished
+  // work and suggests the sub-services this phase then builds (`plan_sub_services`, offered by
+  // `askSubService`).
 ] as const;
-
-/** Assets the Phase 1 walk does not build, because they are written after Phase 2.
- *
- * The Plan of Action's roadmap has a "Phase 2" of its own — expand into sub-services — and that is
- * this app's Phase 2. Run at the end of Phase 1 it had nothing to say about them: it scheduled work
- * that was about to be built and reported finished sub-services as missing. So Phase 1 stops one
- * stage earlier and says so (`finishPhase`); the plan is the last stage of Phase 2, where every
- * sub-service built so far can be read. Still in `ASSET_CATALOG`, so existing chats that already
- * hold an approved Phase 1 plan keep resolving it. */
-export const DEFERRED_TO_PHASE2: ReadonlySet<string> = new Set(["plan_of_action"]);
 
 /** Number a run of assets 1..n and attach its display metadata.
  *
@@ -105,7 +96,7 @@ function buildStages(assets: AssetDefinition[]): PipelineStageDef[] {
  * `pipeline.py`), so it never gets its own review gate — the operator reviews the main asset
  * that consumed it. */
 export const PHASE1_STAGES: PipelineStageDef[] = buildStages(
-  ASSET_CATALOG.filter((a) => a.category !== "Competitor Research" && !DEFERRED_TO_PHASE2.has(a.asset_id)),
+  ASSET_CATALOG.filter((a) => a.category !== "Competitor Research"),
 );
 
 /** The Phase 2 stages, in Phase 2's own order, using Phase 2's own intake.
@@ -384,6 +375,72 @@ export function composeServicesAnswer(picked: PickedService[], other: string): s
     .filter(Boolean);
   if (extras.length) lines.push(`- Other (typed by the operator): ${extras.join(", ")}`);
   return lines.join("\n");
+}
+
+/** The Plan of Action's sub-service picker. Phase 1's last stage suggests the sub-services Phase 2
+ * builds: when the walk reaches `servicesFieldId`, the server reads the client's menu for the ones it
+ * already has under the primary service, suggests the missing ones from the approved competitor
+ * research and the ICP, and puts a DataForSEO volume on every keyword
+ * (`app/services/sub_service_discovery.py`). It rides the same `service-choice` card kind as the
+ * Pillar Page's picker, so loading, resume and stop treat it the same; `serviceScan.plan` marks it.
+ *
+ * The confirmed list is the field's answer (`composePlanSubServicesAnswer`) and is also filed on the
+ * run as `plan_sub_services`, which a Phase 2 run built on this one offers as its sub-service
+ * choices (`planSubServiceNames`). Both read one line shape; `smoke/planPhase1.tsx` pins it. */
+export const PLAN_SUB_SERVICE_OPTION = {
+  assetId: "plan_of_action",
+  servicesFieldId: "sub_services_to_expand_into_phase_2",
+  serviceFieldId: "primary_service_being_expanded",
+  websiteFieldId: "client_website_url",
+  regionFieldId: "region_country",
+} as const;
+
+/** The context key the confirmed list is filed under (`PLAN_SUB_SERVICES_KEY` on the server). */
+export const PLAN_SUB_SERVICES_KEY = "plan_sub_services";
+
+/** What the plan is told when the operator skips the picker. The prompt's own wording for it. */
+export const PLAN_INFER_SUB_SERVICES = "infer 6-10 sub-services from the primary service and industry norms.";
+
+function formatVolume(volume: number | null): string {
+  return volume === null ? "not measured" : `${volume.toLocaleString("en-US")}/mo`;
+}
+
+/** The `sub_services_to_expand_into_phase_2` answer: a line on where the volumes came from, then
+ * one line per sub-service — name, status with its URL or proposed slug, keyword cluster with
+ * volumes, combined volume — then any typed by the operator, as new. */
+export function composePlanSubServicesAnswer(
+  picked: PlanSubServiceCandidate[],
+  other: string,
+  source: { volumeSource: string; location: string },
+): string {
+  const measured = source.volumeSource === "dataforseo";
+  const lines = [
+    measured
+      ? `Volume source: DataForSEO, monthly Google searches in ${source.location || "the client's country"}.`
+      : "Volume source: not measured. Estimate volumes and label each one (est.).",
+  ];
+  for (const c of picked) {
+    const where = c.status === "existing" ? `EXISTING PAGE — enhance: ${c.url}` : `NEW PAGE — proposed slug: ${c.slug}`;
+    const keywords = c.keywords.map((k) => `${k.keyword} (${formatVolume(k.volume)})`).join(", ");
+    const combined = c.combined_volume === null ? "" : ` — combined ${formatVolume(c.combined_volume)}`;
+    lines.push(`- ${c.name} — ${where}${keywords ? ` — keywords: ${keywords}` : ""}${combined}`);
+  }
+  for (const name of other.split(/[,;\n]/).map((s) => s.trim()).filter(Boolean)) {
+    lines.push(`- ${name} — NEW PAGE (typed by the operator; keywords not measured)`);
+  }
+  return lines.length > 1 ? lines.join("\n") : "";
+}
+
+/** The sub-service names a `plan_sub_services` document holds, in order. Mirrors
+ * `names_for_phase2` in `app/services/sub_service_discovery.py`. */
+export function planSubServiceNames(content: string): string[] {
+  const names: string[] = [];
+  for (const line of content.split("\n")) {
+    const m = /^\s*-\s+(.+?)(?:\s+—\s+|$)/.exec(line);
+    const name = m?.[1]?.trim();
+    if (name && !names.includes(name)) names.push(name);
+  }
+  return names;
 }
 
 /** Main assets whose competitor analysis runs as its own reviewable step *before* the stage's

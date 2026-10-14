@@ -35,6 +35,7 @@ import { StageGateCard } from "./StageGateCard";
 import { EditAnswerButton } from "./EditAnswerButton";
 import { ScrapeCard } from "./ScrapeCard";
 import { ServiceChoiceCard } from "./ServiceChoiceCard";
+import { PlanSubServiceCard } from "./PlanSubServiceCard";
 import { IndustryGuessOptions, StageAdvisoryCard } from "./IndustryCards";
 import { AssetCheckPanel } from "./AssetCheckPanel";
 import { ImageNotes, ReplicaPanel, RevisionNotes } from "./ReplicaPanel";
@@ -1261,7 +1262,7 @@ function MessageRow({ message, flashed }: { message: PipelineMessage; flashed?: 
       content = <StageAdvisoryCard message={message} />;
       break;
     case "service-choice":
-      content = <ServiceChoiceCard message={message} />;
+      content = message.serviceScan?.plan ? <PlanSubServiceCard message={message} /> : <ServiceChoiceCard message={message} />;
       break;
     default:
       content = <TextBubble message={message} />;

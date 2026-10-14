@@ -136,24 +136,15 @@ const ctx = (
   ...(opts.context_keys ? { context_keys: opts.context_keys } : {}),
 });
 
-/** Every Phase 1 deliverable that runs before the Plan of Action, by the key its approved output is
- * stored under in the session (`saveStage` files each stage under its own asset_id) and in the
- * database (`save_stage` writes `context_key = asset_id`). The ICP is not here: the plan reads it
- * whole through its own input. */
-const PLAN_PHASE1_ASSET_KEYS = [
-  "cro",
-  "pillar_page",
-  "funnel",
-  "funnel_hub_media",
-  "offers",
-  "lead_magnet",
-  "blog",
-  "content_marketing_strategy",
-  "social_content_strategy_audit",
-  "webinar",
-  "book",
-  "podcast",
-  "sms_sequence",
+/** The competitor listings a Phase 1 run approves that describe competitors' service pages. The
+ * Plan of Action's competitor input gathers them instead of asking for a file; the server's
+ * sub-service discovery reads the same set (`COMPETITOR_LISTING_KEYS` in
+ * `app/services/sub_service_discovery.py`). */
+const PLAN_COMPETITOR_KEYS = [
+  "competitor_analysis_seo_pillar_page",
+  "competitor_analysis_cro",
+  "competitor_analysis_offers",
+  "competitor_analysis_content_marketing",
 ];
 
 const txt = (field_id: string, label: string, opts: Partial<FieldDef> = {}): FieldDef => ({
@@ -254,22 +245,21 @@ export const SERVER_COMPOSED_CONTEXT_KEYS: ReadonlySet<string> = new Set([
   "industry_profile",
   "plan_root_icp",
   "plan_phase1_assets",
-  "plan_phase2_assets",
+  "plan_sub_services",
 ]);
 
-/** The Plan of Action's three engagement-wide documents, and what each is called on a card.
+/** The Plan of Action's Phase 1 documents, and what each is called on a card.
  *
  * Unlike `cro_client_settings` these are never written by any stage: the server composes them on
- * read from the Phase 1 run and every sub-service run under it (`app/services/plan_context.py`,
- * `COMPOSED_KEYS` — `tests/test_plan_context.py` proves the two lists agree). That is why they are
- * read through the context route and *never trusted from the session*: a copy fetched earlier knows
- * nothing about a sub-service approved since, and "one plan covering all sub-services" is only true
- * if the plan sees every track as it stands now. `hydrateContextFromDb` refetches them on every
- * entry to the stage. */
+ * read from the Phase 1 run (`app/services/plan_context.py`, `COMPOSED_KEYS` —
+ * `tests/test_plan_context.py` proves the two lists agree): every approved deliverable as measured
+ * facts plus an excerpt, so the plan's Phase 1 section is a delivery record rather than a list of
+ * names. Read through the context route and *never trusted from the session*: a deliverable re-run
+ * after an earlier visit to the stage must be reported as it stands now. `hydrateContextFromDb`
+ * refetches them on every entry to the stage. */
 export const PLAN_COMPOSED_KEYS: Readonly<Record<string, string>> = {
   plan_root_icp: "ICP (headline service)",
   plan_phase1_assets: "Phase 1 deliverables (headline service)",
-  plan_phase2_assets: "Phase 2 sub-services built so far",
 };
 
 export const ASSET_CATALOG: AssetDefinition[] = [
@@ -1257,7 +1247,8 @@ export const ASSET_CATALOG: AssetDefinition[] = [
     asset_id: "plan_of_action",
     label: "Plan of Action",
     category: "Planning",
-    description: "A phased, multi-month roadmap expanding one primary service into sub-services, verticals, and locations.",
+    description:
+      "Phase 1's last stage: a detailed record of everything Phase 1 delivered, and a phased roadmap that suggests the sub-services Phase 2 builds, then verticals and locations.",
     live: false,
     writesContextKeys: ["plan_of_action_summary"],
     fields: [
@@ -1279,38 +1270,29 @@ export const ASSET_CATALOG: AssetDefinition[] = [
         helpText: "The hub page the expansion hangs off — the live URL, or the one it will eventually live at.",
         placeholder: "e.g. https://northpathdigital.com.au/social-media-marketing",
       }),
-      /* Gathered from this run, not asked. The prompt decides from this one input which Phase 1 work
-       * is already done ("treat that work as done — do not re-plan"; Step 8 "Mark Phase 1 as already
-       * complete"). As a typed question it was routinely left blank, so a plan written at the end of
-       * a run that had just built the CRO rewrite, funnel, lead magnet and blog reported them as
-       * missing and scheduled them again. Excerpts, not whole documents: the question is *which*
-       * assets exist, and the pillar page alone is a full HTML file. The funnel and lead magnet still
-       * arrive whole, through their own input below. Still overridable, and still asked when the run
-       * has built none of them. */
+      /* Composed by the server, not asked: every deliverable this run approved, as measured facts
+       * (title, length, sections, stated scores, offers, message counts) plus an excerpt, and the
+       * keyword clusters' volumes (`app/services/plan_context.py`). The plan's Phase 1 section is a
+       * delivery record built from it. Asked only when the run has built nothing. */
       {
         ...file("existing_phase_1_assets_optional", "Existing Phase 1 Assets (optional)", {
           required: false,
-          helpText: "Everything approved earlier in this run, so the plan marks it done instead of scheduling it again.",
+          helpText: "Everything Phase 1 delivered, read from this run, so the plan reports it in detail instead of scheduling it again.",
           placeholder: "e.g. ICP done, pillar page live, funnel built, no lead magnet yet",
         }),
         // `kind` stays `file_attach`, so when nothing has been built yet it is asked exactly as before.
         source: "auto_from_context",
-        context_keys: PLAN_PHASE1_ASSET_KEYS,
-        context_excerpt_chars: 1200,
+        context_key: "plan_phase1_assets",
         overridable: true,
         fallback: "ask_user_if_missing",
       },
-      // Phase 2 only, and answered by the server rather than asked: see `plan_of_action` in
-      // `data/phase2Catalog.ts`. Optional and file-shaped like its Phase 1 twin above, so the one
-      // place it is ever asked — a run with no sub-service built — takes "skip".
-      file("phase_2_sub_services_already_built_optional", "Phase 2 Sub-Services Already Built (optional)", {
-        required: false,
-        helpText: "Every sub-service already built, so the plan marks it done instead of briefing it again.",
-        placeholder: "e.g. Meta Ads: ICP, page copy, pillar page and funnel built; no lead magnet yet",
-      }),
+      /* Answered on a `service-choice` card rather than typed (`SERVICE_SCAN_OPTIONS.plan_of_action`):
+       * the server reads the client's menu for the sub-services it already has, suggests the missing
+       * ones from the approved competitor research and the ICP, and puts a DataForSEO volume on every
+       * keyword (`app/services/sub_service_discovery.py`). The operator confirms the list. */
       txt("sub_services_to_expand_into_phase_2", "Sub-Services to Expand Into (Phase 2)", {
-        helpText: 'Say "infer 6-10 sub-services" to have them inferred instead.',
-        placeholder: "e.g. Organic social, paid social, community management, influencer campaigns",
+        helpText: "Read from the client's site and the competitor research, then confirmed by you.",
+        placeholder: "e.g. Meta Ads, LinkedIn Ads, TikTok Ads",
       }),
       txt("industry_verticals_to_target_phase_3_optional", "Industry Verticals to Target (Phase 3, optional)", {
         required: false,
@@ -1332,7 +1314,18 @@ export const ASSET_CATALOG: AssetDefinition[] = [
       }),
       ctx("existing_value_ladder_offers_optional", "Existing Value Ladder / Offers (optional)", "offer_ladder", { required: false }),
       ctx("brand_design_reference_optional", "Brand Design Reference (optional)", "design_tokens", { required: false }),
-      file("competitor_list", "Competitor List", { required: false, helpText: "3-6 direct competitors. If none supplied, well-known ones will be named and flagged as an assumption." }),
+      // The competitor research Phase 1 already approved, offered rather than asked for as a file.
+      {
+        ...file("competitor_list", "Competitor List", {
+          required: false,
+          helpText: "The competitor research approved earlier in this run. If none, well-known competitors are named and flagged as an assumption.",
+        }),
+        source: "auto_from_context",
+        context_keys: PLAN_COMPETITOR_KEYS,
+        context_excerpt_chars: 2500,
+        overridable: true,
+        fallback: "ask_user_if_missing",
+      },
       file("keyword_search_volume_data_source_optional", "Keyword / Search Volume Data Source (optional)", { required: false }),
       num("plan_length", "Plan Length (months)", {
         default: 12,
@@ -1345,7 +1338,16 @@ export const ASSET_CATALOG: AssetDefinition[] = [
         placeholder: "e.g. 3",
       }),
       txt("delivery_capacity", "Delivery Capacity", { helpText: "Solo operator, small team, or full agency." }),
-      bool("regulated_field_flag", "Is this a regulated field?", { conditional_children: ["regulation_name"] }),
+      // Worked out from CRO's claim substantiation tier (`DERIVED_SUB_KEYS` in `lib/contextSubKeys.ts`):
+      // tiers 2 and 3 are "Yes". Asked when CRO's settings cannot answer it. `regulation_name` stays a
+      // question — CRO never asks for the name of the regulation — and is only reached on Yes.
+      {
+        ...bool("regulated_field_flag", "Is this a regulated field?", { conditional_children: ["regulation_name"] }),
+        source: "auto_from_context",
+        context_key: "cro_client_settings",
+        sub_key: "regulated_field_flag",
+        fallback: "ask_user_if_missing",
+      },
       txt("regulation_name", "Regulation Name", {
         required: false,
         conditional_on: { field: "regulated_field_flag", equals: true },

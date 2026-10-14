@@ -1385,6 +1385,68 @@ export async function scanServices(
   return unwrap<ServiceScanResult>(res, "Find this site's services");
 }
 
+/** One keyword of a suggested sub-service. `volume` is DataForSEO's monthly searches, or null when
+ * it was not measured — never 0, which would claim a measured absence of demand. */
+export interface KeywordVolume {
+  keyword: string;
+  volume: number | null;
+}
+
+/** A sub-service the Plan of Action could brief: one the client's site already has, or a new one. */
+export interface PlanSubServiceCandidate {
+  name: string;
+  status: "existing" | "new";
+  /** The existing page's URL, or "" for a new one. */
+  url: string;
+  /** The page's real path, or a proposed one. */
+  slug: string;
+  parent: string;
+  why: string;
+  keywords: KeywordVolume[];
+  combined_volume: number | null;
+}
+
+export interface SubServiceDiscovery {
+  source_url: string;
+  primary_service: string;
+  candidates: PlanSubServiceCandidate[];
+  /** "dataforseo" when the volumes are measured, "unavailable" when they could not be. */
+  volume_source: string;
+  location: string;
+  notes: string[];
+}
+
+/** The Plan of Action's sub-services: what the client's site already has under the primary service,
+ * what it should add, and real search volumes. Two small model calls and one DataForSEO request;
+ * stores nothing. See `app/services/sub_service_discovery.py`. */
+export async function discoverSubServices(
+  primaryService: string,
+  opts: { url?: string | null; region?: string; runId?: string | null; chatSessionId?: string | null } = {},
+): Promise<SubServiceDiscovery> {
+  const res = await fetch("/api/pipeline/plan/sub-services/discover", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      primary_service: primaryService,
+      url: opts.url ?? "",
+      region: opts.region ?? "",
+      run_id: opts.runId ?? null,
+      chat_session_id: opts.chatSessionId ?? null,
+    }),
+  });
+  return unwrap<SubServiceDiscovery>(res, "Suggest sub-services");
+}
+
+/** File the sub-services confirmed for the plan, so a Phase 2 run built on this one offers them. */
+export async function savePlanSubServices(runId: string, content: string): Promise<{ names: string[] }> {
+  const res = await fetch(`/api/pipeline/runs/${runId}/plan-sub-services`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ content }),
+  });
+  return unwrap<{ names: string[] }>(res, "Save the plan's sub-services");
+}
+
 /** Check a draft (saved or not) against the client's offers, funnel, business rules and predicted
  * virality. Stores nothing; one low-effort model call plus free rule checks. */
 export async function checkAsset(

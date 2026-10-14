@@ -1,47 +1,40 @@
-"""What the Plan of Action reads from the whole engagement — the headline service *and* every
-sub-service built under it.
+"""What the Plan of Action reads about the work Phase 1 has already finished.
 
-The Plan of Action is the one deliverable that is about the engagement rather than about one service.
-Its prompt asks for the Phase 1 work already done and for the sub-services to expand into, and every
-sub-service Phase 2 has built is "already done" by the plan's own definition. It used to run as the
-last stage of Phase 1, before any of that existed, so it scheduled work the operator had finished or
-was about to finish.
+The Plan of Action is Phase 1's last stage. It does two jobs: summarise what was delivered for the
+headline service, in enough detail that the summary is worth reading on its own, and suggest the
+sub-services Phase 2 builds next (`sub_service_discovery.py`). This module is the first job.
 
-It now runs at the end of Phase 2. Phase 2 stores one run per sub-service, each pointing at the Phase
-1 run with `source_run_id`, and a run reads *down* that chain (a sub-service sees its parent) and never
-sideways or up. This module is the one place that reads the other way: given any run in the
-engagement it finds the root and every sibling, and renders three documents the Plan's inputs read.
+The summary used to be "one line each", from a 1,200-character excerpt per deliverable. A reader of
+the plan could see that a lead magnet existed and not what it was. So each deliverable now arrives
+as **measured facts first** — its title, length, section outline, and the numbers the document
+itself states (the CRO score, the ladder's offers and prices, the SMS and email counts) — then an
+excerpt, and the run's keyword clusters close the document with their measured volumes. Parsed,
+never summarised by a model: a model reading the documents back would be a second place for a fact
+to be invented, and the plan's own model writes the prose from these facts anyway.
 
-They are **composed on read**, not stored. A stored copy would be stale the moment another
-sub-service was approved, and "one plan covering all sub-services" is only true if the plan sees every
-track as it stands now. `GET /pipeline/runs/{id}/context/{key}` dispatches on `COMPOSED_KEYS`, so the
-frontend reads them through the same route it uses for every other document.
-
-Excerpts, not documents. The question the Plan asks of each deliverable is *whether it exists and
-what it is about*, and a pillar page alone is a full HTML file. The ICP is the exception: Step 0(C)
-builds the whole plan from it.
+**Composed on read**, not stored: `GET /pipeline/runs/{id}/context/{key}` dispatches on
+`COMPOSED_KEYS`, so a deliverable re-run after the plan was entered is still current. A Phase 2
+run's documents are never read here: Phase 2 starts from the plan, it does not feed it.
 """
 
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
 
 from app.services.asset_check import draft_text
+from app.services.business_facts import parse_offer_ladder
 
-#: The context key a sub-service's run files its own name under. Not an asset's output: the frontend
-#: writes it when the track is created, because nothing else on the server records which sub-service
-#: a run is for.
+#: The context key a Phase 2 run files its own sub-service name under (`POST /runs/{id}/sub-service`).
+#: Not an asset's output: nothing else on the server records which sub-service a run is for.
 SUB_SERVICE_KEY = "sub_service"
 
 ROOT_ICP_KEY = "plan_root_icp"
 PHASE1_ASSETS_KEY = "plan_phase1_assets"
-PHASE2_ASSETS_KEY = "plan_phase2_assets"
 
 #: Keys that are composed on read rather than stored. Mirrored as `PLAN_COMPOSED_KEYS` in the
 #: frontend's `data/assetCatalog.ts`; `tests/test_plan_context.py` parses that file to prove the two
 #: agree, because a key declared on one side only is a plan field that silently goes back to asking.
-COMPOSED_KEYS: frozenset[str] = frozenset({ROOT_ICP_KEY, PHASE1_ASSETS_KEY, PHASE2_ASSETS_KEY})
+COMPOSED_KEYS: frozenset[str] = frozenset({ROOT_ICP_KEY, PHASE1_ASSETS_KEY})
 
 #: The stage names the operator sees (`label` in the frontend's `data/assetCatalog.ts`). The plan
 #: prompt's Step 2 and Step 3 lists use the same names, so the plan, its inputs and the pipeline all
@@ -81,7 +74,8 @@ PHASE1_ASSET_IDS: tuple[str, ...] = (
     "sms_sequence",
 )
 
-#: What one sub-service's Phase 2 run builds. `icp` leads: it is the sub-service's own buyer.
+#: What a Phase 2 run builds per sub-service, in its running order. The plan's Step 3 briefs each
+#: suggested sub-service under these names, so a suggestion can be run as-is.
 PHASE2_ASSET_IDS: tuple[str, ...] = (
     "icp",
     "cro",
@@ -97,13 +91,20 @@ PHASE2_ASSET_IDS: tuple[str, ...] = (
 #: Keys an asset's document may be filed under, where it is not just the asset id.
 ALTERNATE_KEYS: dict[str, tuple[str, ...]] = {"offers": ("offers", "offer_ladder")}
 
-PHASE1_EXCERPT_CHARS = 1200
-#: Smaller than Phase 1's because it is multiplied by every sub-service: ten sub-services at nine
-#: documents each is the largest block in the plan's prompt.
-PHASE2_EXCERPT_CHARS = 600
-PHASE2_ICP_EXCERPT_CHARS = 900
+PHASE1_EXCERPT_CHARS = 1500
+#: Section headings listed per deliverable, and keyword rows from the run's keyword clusters.
+_MAX_OUTLINE = 10
+_MAX_KEYWORDS = 15
 
 _EXCERPT_NOTE = "[Excerpt. The full document was approved in this engagement.]"
+
+_HEADING = re.compile(r"^\s{0,3}(#{1,3})\s+(.+?)\s*#*\s*$", re.MULTILINE)
+_BOLD_HEADING = re.compile(r"^\s{0,3}\*\*([^*\n]{3,90})\*\*\s*$", re.MULTILINE)
+_SCORE_100 = re.compile(r"\b(\d{1,3})\s*/\s*100\b")
+_SMS_ITEM = re.compile(
+    r"^\s{0,3}(?:#{1,4}\s*|\*\*|\|\s*)?(?:SMS|Message|Text)\s*#?\s*(\d{1,2})\b", re.IGNORECASE | re.MULTILINE
+)
+_EMAIL_ITEM = re.compile(r"^\s{0,3}(?:#{1,4}\s*|\*\*|\|\s*)?Email\s*#?\s*(\d{1,2})\b", re.IGNORECASE | re.MULTILINE)
 
 
 def keys_for(asset_id: str) -> tuple[str, ...]:
@@ -128,57 +129,91 @@ def render_root_icp(text: str) -> str:
     return (text or "").strip()
 
 
-def render_phase1_assets(docs: dict[str, str]) -> str:
-    """The headline service's approved deliverables, as the Plan's "Existing Phase 1 Assets"."""
+def _clean(text: str) -> str:
+    return re.sub(r"[*_`]+", "", text).strip(" :—-")
+
+
+def outline(text: str) -> tuple[str, list[str]]:
+    """The document's title and its section headings, in order, read off its Markdown.
+
+    The title is the first `#` heading (else the first heading of any level); the outline is the
+    `##` headings, or the `###` ones when there are none, or whole-line bold leads as a last resort.
+    """
+    plain = draft_text(text or "")
+    headings = [(len(m.group(1)), _clean(m.group(2))) for m in _HEADING.finditer(plain)]
+    headings = [(level, h) for level, h in headings if h]
+    title = next((h for level, h in headings if level == 1), headings[0][1] if headings else "")
+    sections = [h for level, h in headings if level == 2 and h != title]
+    if not sections:
+        sections = [h for level, h in headings if level == 3 and h != title]
+    if not sections:
+        sections = [_clean(m.group(1)) for m in _BOLD_HEADING.finditer(plain)]
+    return title, list(dict.fromkeys(sections))
+
+
+def asset_facts(asset_id: str, text: str) -> list[str]:
+    """What a deliverable measurably is, one fact per line. Every number is one the document states."""
+    plain = draft_text(text or "")
+    title, sections = outline(text)
+    facts: list[str] = []
+    if title:
+        facts.append(f"Title: {title}")
+    facts.append(f"Length: about {len(plain.split()):,} words")
+    if asset_id == "cro":
+        scores = [int(n) for n in _SCORE_100.findall(plain) if int(n) <= 100]
+        if scores:
+            facts.append(f"Page score stated in the audit: {scores[0]}/100")
+    if asset_id == "offers":
+        offers = parse_offer_ladder(text)
+        if offers:
+            listed = "; ".join(f"{o.title}{f' ({o.price})' if o.price else ''}" for o in offers[:12])
+            facts.append(f"Offers on the ladder ({len(offers)}): {listed}")
+    if asset_id == "sms_sequence":
+        numbers = {int(n) for n in _SMS_ITEM.findall(plain)}
+        if numbers:
+            facts.append(f"Messages in the sequence: {max(numbers)}")
+    if asset_id in ("funnel", "lead_magnet", "funnel_hub_media"):
+        emails = {int(n) for n in _EMAIL_ITEM.findall(plain)}
+        if emails:
+            facts.append(f"Nurture emails written: {max(emails)}")
+    if sections:
+        shown = sections[:_MAX_OUTLINE]
+        more = f" (+{len(sections) - len(shown)} more)" if len(sections) > len(shown) else ""
+        facts.append(f"Sections: {' | '.join(shown)}{more}")
+    return facts
+
+
+def render_keywords(rows: list[dict[str, object]]) -> str:
+    """The headline service's top keywords by measured volume, from the run's keyword clusters."""
+    ranked = sorted(
+        (r for r in rows if isinstance(r, dict) and r.get("keyword") and isinstance(r.get("volume"), (int, float))),
+        key=lambda r: -float(r["volume"]),  # type: ignore[arg-type]
+    )[:_MAX_KEYWORDS]
+    if not ranked:
+        return ""
+    lines = [f"- {r['keyword']} — {int(r['volume']):,}/mo" for r in ranked]  # type: ignore[arg-type]
+    return "## Keyword Clusters (measured search volume)\n\n" + "\n".join(lines)
+
+
+def render_phase1_assets(docs: dict[str, str], keywords: list[dict[str, object]] | None = None) -> str:
+    """The headline service's approved deliverables, as the Plan's "Existing Phase 1 Assets":
+    measured facts, then an excerpt, per deliverable. "" when nothing was built."""
     found = [(asset_id, docs[asset_id]) for asset_id in PHASE1_ASSET_IDS if (docs.get(asset_id) or "").strip()]
     if not found:
         return ""
+    built = {a for a, _ in found}
+    missing = [LABELS[a] for a in PHASE1_ASSET_IDS if a not in built]
     intro = (
-        "Built and approved earlier in this engagement for the headline service "
-        f"(treat as done, do not re-plan): {', '.join(LABELS[a] for a, _ in found)}."
+        "Built and approved in Phase 1 for the headline service (treat as done, do not re-plan): "
+        f"{', '.join(LABELS[a] for a, _ in found)}."
     )
-    sections = [f"## {LABELS[a]}\n\n{excerpt(text, PHASE1_EXCERPT_CHARS)}" for a, text in found]
+    if missing:
+        intro += f" Not built in Phase 1: {', '.join(missing)}."
+    sections = []
+    for asset_id, text in found:
+        facts = "\n".join(f"- {fact}" for fact in asset_facts(asset_id, text))
+        sections.append(f"## {LABELS[asset_id]}\n\n{facts}\n\nExcerpt:\n{excerpt(text, PHASE1_EXCERPT_CHARS)}")
+    keyword_block = render_keywords(keywords or [])
+    if keyword_block:
+        sections.append(keyword_block)
     return intro + "\n\n" + "\n\n---\n\n".join(sections)
-
-
-@dataclass(frozen=True)
-class SubServiceTrack:
-    """One Phase 2 run: the sub-service it is for and the documents it has approved so far."""
-
-    label: str
-    docs: dict[str, str] = field(default_factory=dict)
-
-    @property
-    def built(self) -> tuple[str, ...]:
-        return tuple(a for a in PHASE2_ASSET_IDS if (self.docs.get(a) or "").strip())
-
-    @property
-    def missing(self) -> tuple[str, ...]:
-        return tuple(a for a in PHASE2_ASSET_IDS if a not in self.built)
-
-
-def render_phase2_assets(tracks: list[SubServiceTrack]) -> str:
-    """Every sub-service built under the headline service, as one document.
-
-    A track that has approved nothing is left out: a sub-service the operator has only named is not
-    "built", and listing it would tell the plan to skip work that has not started. It still reaches
-    the plan through the typed "Sub-Services to Expand Into" input.
-    """
-    started = [t for t in tracks if t.built]
-    if not started:
-        return ""
-    names = ", ".join(t.label for t in started)
-    parts = [
-        f"Phase 2 sub-services already built or in progress in this engagement ({len(started)}): {names}. "
-        "Treat what each lists as built as done — do not re-brief it. What a sub-service lists as "
-        "not yet built is still to plan."
-    ]
-    for track in started:
-        lines = [f"## {track.label}", "", f"Built and approved: {', '.join(LABELS[a] for a in track.built)}."]
-        if track.missing:
-            lines.append(f"Not yet built: {', '.join(LABELS[a] for a in track.missing)}.")
-        for asset_id in track.built:
-            limit = PHASE2_ICP_EXCERPT_CHARS if asset_id == "icp" else PHASE2_EXCERPT_CHARS
-            lines += ["", f"### {LABELS[asset_id]}", "", excerpt(track.docs[asset_id], limit)]
-        parts.append("\n".join(lines))
-    return "\n\n---\n\n".join(parts)
