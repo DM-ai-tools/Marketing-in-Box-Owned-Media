@@ -256,13 +256,19 @@ Set in `app/services/generation.py`; `PageDesignInput.sheet_for(asset_id)` picks
 | `SCREENSHOT_STAGES` | `cro`, `pillar_page` | the reference images, as `image` content blocks. Free — the shots are captured once per run either way, so a stage here costs prompt tokens and no credits. `pillar_page` was missing and should not have been: its Rule 1 is that every colour, button and layout element traces back to the reference, and it was the one stage not shown the reference. |
 | everything else | `icp`, `funnel`, `sms_sequence`, `plan_of_action`, … | nothing — no palette to get wrong. |
 
-**`cro` is a replica stage only when there is a page to rewrite.** In Phase 2 (always NEW PAGE),
-and in Phase 1's NEW PAGE mode, `_cro_writes_copy_only` in `app/routers/pipeline.py` gives it no
-page design and no page template. With no page of its own, the design source fell through to
-another page. A real Phase 2 run then wrote a full ```html page into its copy, and its copy was
-assembled into a *different service's* markup. The Pillar Page is the stage that lays the page
-out, and it captures DESIGN.md (and the brief images) on its own first run.
-`tests/test_cro_copy_only.py` pins this.
+**`cro` never builds a page, in either phase.** It is still listed in `PAGE_REPLICA_STAGES`, but
+`_cro_writes_copy_only` in `app/routers/pipeline.py` gives every CRO run no page design, no
+screenshots, no generated images and no page template. Both CRO prompts' PART 2 ask for Markdown
+copy with no HTML.
+- **Why.** Handed the design, the model wrote a full ```html page into Part 2 and the card rendered
+  it. In Phase 2 and NEW PAGE mode the design came from another page, and the copy was assembled into
+  a *different service's* markup. Phase 1 runs with a real existing page also got a page nobody
+  asked for.
+- **Where the page comes from.** The Pillar Page lays it out from CRO's copy. It captures DESIGN.md
+  (and the brief images) on its own first run.
+- **What the audit still reads.** The existing page's copy reaches it through
+  `existing_page_content`.
+- `tests/test_cro_copy_only.py` pins this.
 
 ### Screenshots
 
@@ -419,7 +425,7 @@ ladder rather than alternatives — a run uses whichever rung it can reach.
 | --- | --- | --- | --- | --- |
 | 1 | `design_md.py` | palette, type, components, logo | 17 credits | the right brand, an invented page |
 | 2 | `page_structure.py` | the band sequence, nav labels, contacts, client logos, SVG inventory | **free** | the right shape, generated markup |
-| 3 | `page_replica.py` | the client's own markup with new words in it | 0-1 credits | the actual page — `cro` only; the pillar page is in design-language mode (below) |
+| 3 | `page_replica.py` | the client's own markup with new words in it | 0-1 credits | the actual page — no stage uses it now: `cro` writes copy only and the pillar page is in design-language mode (below) |
 
 ### Why rungs 2 and 3 exist
 

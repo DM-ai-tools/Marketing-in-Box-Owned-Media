@@ -3478,38 +3478,26 @@ def _template_to_stored(template: page_replica_service.PageTemplate) -> dict:
     }
 
 
-_NEW_PAGE_PREFIX = "NEW PAGE"
-
-
 def _cro_writes_copy_only(asset_id: str, phase: str, answers: dict[str, str]) -> bool:
-    """Whether this is a CRO run with no page of its own to rebuild, so it writes copy and no HTML.
+    """Whether this is a CRO run, which writes the audit and the copy and never a page.
 
-    `cro` is in `PAGE_REPLICA_STAGES` because in Phase 1 its job is to rewrite the client's
-    *existing* page, so it is handed that page's DESIGN.md, structure, screenshots and markup. With
-    no existing page, every one of those comes from somewhere else: `_design_source_url` falls
-    through to the parent pillar or the client's site. The stage then received "any HTML you
-    produce must follow the reference page's layout" plus a band-by-band structure brief, wrote a
-    full ```html page into Part 2, and the replica assembly poured its copy into *another
-    service's* page. Measured on a real Phase 2 run: the sub-service copy landed in the client's
-    Property Development Finance page.
+    The CRO stage's deliverable is its four parts: mode table, audit, rewritten copy and
+    implementation pack. The Pillar Page is the stage that lays a page out, from that copy.
 
-    Two cases, both copy-only:
+    `cro` is still in `PAGE_REPLICA_STAGES`, and handing it the page design made it build one. Given
+    DESIGN.md ("any HTML you produce must follow the reference page's layout"), the band-by-band
+    structure brief, screenshots and generated images, the model wrote a full ```html page into
+    Part 2, the card rendered it, and the replica assembly poured the copy into the page's markup.
+    That happened first in Phase 2 and NEW PAGE mode, where the reference was another service's
+    page. It then happened on Phase 1 runs with a real existing page, where nobody wanted a page
+    either.
 
-    * **Phase 2, always.** The phase runs CRO in NEW PAGE mode by construction, and its Pillar
-      Page prompt is the design replicator that lays the CRO copy out. CRO building the page as
-      well produced the same page twice, one of them against the wrong reference.
-    * **NEW PAGE mode in Phase 1.** Same situation: nothing to rewrite, and the same rule the
-      no-reference pillar path follows: take the brand, never another page's markup.
-
-    The Pillar Page still captures DESIGN.md (and generates the brief images) the first time it
-    runs, once per run as before, so nothing downstream loses its design.
+    So every CRO run is copy-only, in both phases and whatever the Existing Page URL says. The
+    existing page's copy still reaches the audit through `existing_page_content`. The Pillar Page
+    captures DESIGN.md (and generates the brief images) on its own first run, so nothing downstream
+    loses its design. `phase` and `answers` are kept so the call site reads as a decision.
     """
-    if asset_id != "cro":
-        return False
-    if phase == "phase2":
-        return True
-    existing = str(answers.get("existing_page_url") or "").strip().upper()
-    return existing.startswith(_NEW_PAGE_PREFIX)
+    return asset_id == "cro"
 
 
 async def resolve_page_template(
@@ -4591,7 +4579,7 @@ async def _generation_sse_stream(
         # simply omits the block then, and the stage's own prompt falls back to asking for brand
         # values rather than inventing a palette. Which view of it a stage sees — the full DESIGN.md
         # or the theme brief — and whether it gets the screenshots is decided in `generation.py`.
-        # A copy-only CRO run (Phase 2, or NEW PAGE mode) gets neither: see `_cro_writes_copy_only`.
+        # CRO gets neither, in either phase: it writes copy, never a page. See `_cro_writes_copy_only`.
         copy_only = _cro_writes_copy_only(asset_id, phase, answers)
         image_notes: list[str] = []
         page_design = (

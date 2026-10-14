@@ -1,10 +1,9 @@
-"""CRO writes copy, not a page, whenever there is no existing page for it to rewrite.
+"""CRO writes copy, never a page, in both phases.
 
-`cro` is a `PAGE_REPLICA_STAGES` member because in Phase 1 it rewrites the client's existing page.
-With no such page (always in Phase 2, and in Phase 1's NEW PAGE mode) the design source fell
-through to some *other* page: a real Phase 2 run got that page's DESIGN.md and structure brief,
-wrote a full ```html page into its copy, and had its copy assembled into the other service's
-markup. The Pillar Page is the stage that lays the page out; these tests pin that CRO stays copy.
+Handed the page design, CRO built a page. A real Phase 2 run got another page's DESIGN.md and
+structure brief, wrote a full ```html page into its copy, and had its copy assembled into the other
+service's markup. Phase 1 runs with a real existing page did the same, and the card rendered the
+page. The Pillar Page is the stage that lays the page out; these tests pin that CRO stays copy.
 """
 from __future__ import annotations
 
@@ -33,8 +32,8 @@ def _new_page_url_answer() -> str:
     [
         ("cro", "phase2", {}, True),
         ("cro", "phase2", {"existing_page_url": "https://client.example/page"}, True),
-        ("cro", "phase1", {"existing_page_url": "https://client.example/page"}, False),
-        ("cro", "phase1", {}, False),
+        ("cro", "phase1", {"existing_page_url": "https://client.example/page"}, True),
+        ("cro", "phase1", {}, True),
         ("pillar_page", "phase2", {}, False),
         ("pillar_page", "phase1", {"existing_page_url": "NEW PAGE — no existing URL"}, False),
         ("lead_magnet", "phase2", {}, False),
@@ -100,9 +99,19 @@ async def test_phase1_new_page_cro_is_copy_only_too(monkeypatch: pytest.MonkeyPa
 
 
 @pytest.mark.asyncio
-async def test_phase1_cro_rewriting_a_real_page_still_replicates_it(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_phase1_cro_with_a_real_page_still_writes_copy_only(monkeypatch: pytest.MonkeyPatch) -> None:
     calls = await _run_stream(monkeypatch, "cro", "phase1", {"existing_page_url": "https://client.example/page"})
-    assert (calls["design"], calls["template"]) == (1, 1)
+    assert (calls["design"], calls["template"]) == (0, 0), "Phase 1 CRO was handed a page to build"
+    assert calls["page_design"] is None
+    assert not any("replica" in e for e in calls["events"])
+
+
+def test_both_cro_prompts_ask_for_copy_not_markup() -> None:
+    prompts = REPO / "application" / "backend" / "assets" / "Prompts"
+    for path in (prompts / "Master_Prompt_Universal_Page_Rewrite_v1.md", prompts / "Phase2" / "Master_Prompt_Universal_Page_Rewrite_v1_phase2.md"):
+        text = path.read_text(encoding="utf-8")
+        part2 = text[text.index("**PART 2 — REWRITTEN PAGE**") : text.index("**PART 3")]
+        assert "no HTML, CSS or code blocks" in part2, path.name
 
 
 @pytest.mark.asyncio

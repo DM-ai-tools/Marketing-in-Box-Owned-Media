@@ -321,6 +321,8 @@ evidence.
 **PART 2 — REWRITTEN PAGE**
 Complete copy written in full, not bullets or briefs. Each section labelled with its number and
 its client-language heading. Ready to hand to a web team. Mark any skipped section and its reason.
+Copy only, in Markdown: no HTML, CSS or code blocks, and no built page. The Pillar Page stage lays
+this copy out as a page.
 
 **PART 3 — IMPLEMENTATION PACK**
 - Suggested title tag, meta description, H1, and URL (flag if the URL should stay unchanged)
