@@ -65,6 +65,13 @@ superseded, interrupted, failed, refining — without a browser or a new depende
 - `ahrefsUsage.tsx` — the "Ahrefs keyword data" section at the end of an asset. It checks which
   assets get it and what it says and tables. It checks that the stub provider, a failed lookup or
   another leg's data never appear, and that the section comes last and is parsed as its own section.
+- `secondaryKeywords.tsx` — the Pillar Page's secondary terms. Answering the head term opens the
+  Ahrefs-vs-DataForSEO card, not a question, with nothing ticked. The two columns show their totals
+  and the terms both suggested. A failed provider says why in its own column. The answer carries
+  each term's provider and volume, and Skip answers N/A.
+- `manus.tsx` — the Pillar Page built by Manus, on the card: the building state (the agent's own
+  words, elapsed time, task link), the one-line done state with credits, the fallback note saying
+  Claude built the page instead, and that a reloaded card never claims to still be building.
 - `planPhase1.tsx` — the Plan of Action as Phase 1's last stage. It checks that the sub-service field
   opens the discovery card rather than a question, and that the confirmed answer and the
   `plan_sub_services` text filed on the run have the same line shape. It also checks that a skip

@@ -30,13 +30,21 @@ import {
   streamGenerateStage,
   scanServices,
   discoverSubServices,
+  fetchSecondaryKeywords,
   savePlanSubServices,
   streamRefineStage,
   suggestHeadlines,
   updateChatSession,
 } from "./pipelineApi";
 import { ApiFaultError, StreamTruncatedError, checkAsset } from "./pipelineApi";
-import type { ReplicaReport, ReplicaStreamEvent, ReplicaTemplateInfo, RevisionEditReport } from "./pipelineApi";
+import type {
+  ManusBuildEvent,
+  ReplicaReport,
+  ReplicaStreamEvent,
+  ReplicaTemplateInfo,
+  RevisionEditReport,
+  SecondarySuggestions,
+} from "./pipelineApi";
 import type {
   ApiFault,
   AssetCheckReport,
@@ -69,6 +77,9 @@ import {
   PLAN_INFER_SUB_SERVICES,
   PLAN_SUB_SERVICES_KEY,
   PLAN_SUB_SERVICE_OPTION,
+  SECONDARY_KEYWORD_OPTION,
+  composeSecondaryTermsAnswer,
+  type PickedSecondaryTerm,
   PHASE2_AUDIENCE_INDUSTRY_FACT,
   PHASE2_AUDIENCE_INDUSTRY_FIELDS,
   PHASE_META,
@@ -147,6 +158,19 @@ export interface ServiceScanState {
    * sub-services rather than only listing the site's. Its picks are keyed by name, since a
    * suggested sub-service has no page URL yet. */
   plan?: PlanDiscoveryState;
+  /** Set on the Pillar Page's secondary-terms picker (`SECONDARY_KEYWORD_OPTION`): Ahrefs and
+   * DataForSEO suggestions for the head term, side by side. */
+  secondary?: SecondaryKeywordState;
+}
+
+/** The secondary-terms picker, carried on its `service-choice` card. */
+export interface SecondaryKeywordState {
+  headTerm: string;
+  region: string;
+  /** Null until the suggestions arrive. */
+  result: SecondarySuggestions | null;
+  /** What was submitted, for the history view. */
+  picked?: PickedSecondaryTerm[];
 }
 
 /** The Plan of Action's sub-service discovery, carried on its `service-choice` card. */
@@ -429,6 +453,8 @@ export interface PipelineMessage {
   /** Image generation that failed for this stage, as the server reported it. The stage ran without
    * those images; the card says so rather than leaving the operator to find a missing picture. */
   imageNotes?: string[];
+  /** On a Pillar Page card built by Manus: the build's latest state and its task link. */
+  manus?: ManusBuildEvent;
   /** On a Refine of a built page: how many of the requested edits landed, and why any did not. The
    * page is edited in place rather than retyped, so an edit that could not be placed is said here
    * instead of the whole page being rewritten around it. */
@@ -597,6 +623,8 @@ interface PipelineState {
   skipServices: (messageId: string) => void;
   /** Plan of Action: the sub-services confirmed on its `service-choice` card, plus any typed. */
   confirmPlanSubServices: (messageId: string, names: string[], other: string) => void;
+  /** Answer the Pillar Page's secondary terms with the ticked terms (from either provider) and any typed. */
+  confirmSecondaryKeywords: (messageId: string, picked: PickedSecondaryTerm[], other: string) => void;
   retryServiceScan: (messageId: string) => void;
   submitFreeform: (raw: string) => void;
   skipField: () => void;
@@ -1683,10 +1711,18 @@ async function streamIntoMessage(
       patchMessage(get, set, messageId, { imageNotes: merged });
     },
     onRevisionEdits: (report) => patchMessage(get, set, messageId, { revisionReport: report }),
+    onManus: (event) => {
+      const current = get().messages.find((m) => m.id === messageId)?.manus;
+      // Progress events carry no fallback message; keep the task link once one has arrived.
+      patchMessage(get, set, messageId, {
+        manus: { ...event, task_url: event.task_url ?? current?.task_url, brief: event.brief || current?.brief },
+      });
+    },
   };
   // A fresh generation or retry starts from no assembly and no image notes; a continuation keeps
   // what the first part of the stream reported.
-  if (!opts.append) patchMessage(get, set, messageId, { replica: undefined, imageNotes: undefined, revisionReport: undefined });
+  if (!opts.append)
+    patchMessage(get, set, messageId, { replica: undefined, imageNotes: undefined, revisionReport: undefined, manus: undefined });
 
   try {
     await run(
@@ -1854,6 +1890,7 @@ interface StreamHooks {
   onReplica: (event: ReplicaStreamEvent) => void;
   onImageNotes: (notes: string[]) => void;
   onRevisionEdits: (report: RevisionEditReport) => void;
+  onManus: (event: ManusBuildEvent) => void;
 }
 
 /** Who to bill the next API call to. Read at call time rather than closed over, because a chat's
@@ -2703,6 +2740,87 @@ async function loadPlanDiscovery(get: () => PipelineState, set: (partial: Partia
   }
 }
 
+/** Whether the walk has reached the Pillar Page's secondary-terms field. */
+function isSecondaryKeywordField(asset: AssetDefinition, field: FieldDef): boolean {
+  return asset.asset_id === SECONDARY_KEYWORD_OPTION.assetId && field.field_id === SECONDARY_KEYWORD_OPTION.fieldId;
+}
+
+/** The head term this intake chose, as a search seed: a numbered multi-pick keeps its first line. */
+function headTermSeed(answer: unknown): string {
+  const text = typeof answer === "string" ? answer : "";
+  const first = text.split("\n").map((l) => l.replace(/^\s*\d+[.)]\s*/, "").trim()).find(Boolean) ?? "";
+  return first.length > 80 ? "" : first;
+}
+
+/** The secondary-terms card, opened loading. With no usable head term there is nothing to seed
+ * either provider, so the plain question is asked instead. Returns whether a card was opened. */
+function openSecondaryKeywords(
+  get: () => PipelineState,
+  set: (partial: Partial<PipelineState>) => void,
+  asset: AssetDefinition,
+  field: FieldDef,
+  answers: Record<string, unknown>,
+): boolean {
+  const headTerm = headTermSeed(answers[SECONDARY_KEYWORD_OPTION.headTermFieldId]);
+  if (!headTerm) return false;
+  const region = typeof get().clientProfile.region === "string" ? get().clientProfile.region.trim() : "";
+  const card = push(get, set, {
+    role: "assistant",
+    kind: "service-choice",
+    assetId: asset.asset_id,
+    field,
+    serviceScan: {
+      status: "loading",
+      url: null,
+      services: [],
+      preselected: [],
+      notes: [],
+      secondary: { headTerm, region, result: null },
+    },
+  });
+  void loadSecondaryKeywords(get, set, card.id);
+  return true;
+}
+
+async function loadSecondaryKeywords(get: () => PipelineState, set: (partial: Partial<PipelineState>) => void, messageId: string) {
+  const scan = get().messages.find((m) => m.id === messageId)?.serviceScan;
+  const secondary = scan?.secondary;
+  if (!scan || !secondary) return;
+  const ui = useUiStore.getState();
+  const activity = ui.startAhrefsActivity(`Finding terms around "${secondary.headTerm}"…`);
+  try {
+    const result = await fetchSecondaryKeywords(secondary.headTerm, secondary.region);
+    if (result.ahrefs.status === "ok") {
+      const count = result.ahrefs.keywords.length;
+      ui.finishAhrefsActivity(activity, {
+        label: `Secondary terms${result.location ? `, ${result.location}` : ""}`,
+        count,
+        unit: count === 1 ? "term from Ahrefs" : "terms from Ahrefs",
+        extra: result.dataforseo.status === "ok" ? `${result.dataforseo.keywords.length} from DataForSEO` : undefined,
+      });
+    } else {
+      ui.clearAhrefsActivity(activity);
+    }
+    const current = get().messages.find((m) => m.id === messageId)?.serviceScan;
+    if (!current?.secondary || current.status !== "loading") return;
+    patchMessage(get, set, messageId, { serviceScan: { ...current, status: "ready", secondary: { ...current.secondary, result } } });
+    // A provider that failed (not one that is simply unconfigured) is worth a notice: its column is
+    // empty for a reason the operator can fix.
+    const failed = [result.ahrefs, result.dataforseo].filter((p) => p.status === "error");
+    if (failed.length && failed.length < 2) {
+      const p = failed[0];
+      ui.notifyProvider({ title: `${p.provider === "ahrefs" ? "Ahrefs" : "DataForSEO"} keywords unavailable`, detail: p.error });
+    }
+  } catch (err) {
+    ui.clearAhrefsActivity(activity);
+    const current = get().messages.find((m) => m.id === messageId)?.serviceScan;
+    if (!current) return;
+    patchMessage(get, set, messageId, {
+      serviceScan: { ...current, status: "error", error: err instanceof Error ? err.message : String(err) },
+    });
+  }
+}
+
 /** Answer the landing-page follow-up: the reference becomes the no-reference sentinel, and the
  * scope is the landing page's whole design system, so neither question is asked again. */
 function answerLandingPage(
@@ -2806,6 +2924,12 @@ function advanceIntake(
     // competitor research, then confirmed. See `PLAN_SUB_SERVICE_OPTION`.
     if (isPlanSubServiceField(asset, result.field)) {
       openPlanDiscovery(get, set, asset, result.field, answers);
+      return;
+    }
+
+    // The Pillar Page's secondary terms: suggested from the head term by Ahrefs and DataForSEO, side
+    // by side. See `SECONDARY_KEYWORD_OPTION`. Without a head term it is asked as a plain question.
+    if (isSecondaryKeywordField(asset, result.field) && openSecondaryKeywords(get, set, asset, result.field, answers)) {
       return;
     }
 
@@ -4152,12 +4276,18 @@ export const usePipelineStore = create<PipelineState>((set, get) => ({
     // The plan's picker skipped: the prompt's own "infer" instruction, so the plan still has
     // sub-services to brief rather than none.
     const isPlan = Boolean(scan.plan);
-    intake.answers[message.field.field_id] = isPlan ? PLAN_INFER_SUB_SERVICES : "NONE";
+    const isSecondary = Boolean(scan.secondary);
+    // The secondary terms are optional: skipped is the same answer the plain question's Skip gives.
+    intake.answers[message.field.field_id] = isPlan ? PLAN_INFER_SUB_SERVICES : isSecondary ? "N/A" : "NONE";
     patchMessage(get, set, messageId, { serviceScan: { ...scan, status: "skipped" } });
     push(get, set, {
       role: "user",
       kind: "text",
-      text: isPlan ? "Let the plan infer the sub-services." : "No specific services: cover what the page copy covers.",
+      text: isPlan
+        ? "Let the plan infer the sub-services."
+        : isSecondary
+          ? "No secondary terms."
+          : "No specific services: cover what the page copy covers.",
     });
     set({ editSeed: null });
     applyAnswerAndAdvance(get, set, intake, message.field);
@@ -4194,11 +4324,35 @@ export const usePipelineStore = create<PipelineState>((set, get) => ({
     applyAnswerAndAdvance(get, set, intake, message.field);
   },
 
+  confirmSecondaryKeywords: (messageId, picked, other) => {
+    const state = get();
+    const message = liveMessage(state, messageId);
+    const intake = state.intake;
+    const scan = message?.serviceScan;
+    const secondary = scan?.secondary;
+    if (!message || !scan || !secondary || !isServiceScanOpen(message) || !intake || !message.field) return;
+    if (intake.awaitingFieldId !== SECONDARY_KEYWORD_OPTION.fieldId) return;
+
+    const answer = composeSecondaryTermsAnswer(picked, other, secondary.result?.location ?? "");
+    if (!answer) {
+      get().skipServices(messageId);
+      return;
+    }
+    intake.answers[SECONDARY_KEYWORD_OPTION.fieldId] = answer;
+    patchMessage(get, set, messageId, { serviceScan: { ...scan, status: "done", other, secondary: { ...secondary, picked } } });
+    const terms = [...new Set(picked.map((p) => p.keyword))];
+    const typed = other.split(/[,;\n]/).map((s) => s.trim()).filter(Boolean);
+    push(get, set, { role: "user", kind: "text", text: `Secondary terms: ${[...terms, ...typed].join(", ")}` });
+    set({ editSeed: null });
+    applyAnswerAndAdvance(get, set, intake, message.field);
+  },
+
   retryServiceScan: (messageId) => {
     const message = liveMessage(get(), messageId);
     if (!message?.serviceScan || message.serviceScan.status !== "error") return;
     patchMessage(get, set, messageId, { serviceScan: { ...message.serviceScan, status: "loading", error: undefined } });
     if (message.serviceScan.plan) void loadPlanDiscovery(get, set, messageId);
+    else if (message.serviceScan.secondary) void loadSecondaryKeywords(get, set, messageId);
     else void loadServiceScan(get, set, messageId);
   },
 

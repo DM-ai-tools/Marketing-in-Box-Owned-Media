@@ -36,9 +36,10 @@ import { EditAnswerButton } from "./EditAnswerButton";
 import { ScrapeCard } from "./ScrapeCard";
 import { ServiceChoiceCard } from "./ServiceChoiceCard";
 import { PlanSubServiceCard } from "./PlanSubServiceCard";
+import { SecondaryKeywordCard } from "./SecondaryKeywordCard";
 import { IndustryGuessOptions, StageAdvisoryCard } from "./IndustryCards";
 import { AssetCheckPanel } from "./AssetCheckPanel";
-import { ImageNotes, ReplicaPanel, RevisionNotes } from "./ReplicaPanel";
+import { ImageNotes, ManusPanel, ReplicaPanel, RevisionNotes } from "./ReplicaPanel";
 import { NEW_PAGE_OPTIONS, PHASE_META, stageAt, stagesFor, totalStagesFor } from "./pipelineData";
 import { PipelineInputBar } from "./PipelineInputBar";
 import {
@@ -798,6 +799,7 @@ function GenerationCard({ message }: { message: PipelineMessage }) {
       {message.truncated && !message.streaming && message.savePhase !== "saved" && (
         <TruncatedNotice message={message} />
       )}
+      {!message.superseded && <ManusPanel build={message.manus} streaming={message.streaming} />}
       <GenerationBody message={message} label={stage?.asset.label ?? "Generated page"} />
       {!message.superseded && <ImageNotes notes={message.imageNotes} />}
       {!message.superseded && <RevisionNotes report={message.revisionReport} />}
@@ -1262,7 +1264,13 @@ function MessageRow({ message, flashed }: { message: PipelineMessage; flashed?: 
       content = <StageAdvisoryCard message={message} />;
       break;
     case "service-choice":
-      content = message.serviceScan?.plan ? <PlanSubServiceCard message={message} /> : <ServiceChoiceCard message={message} />;
+      content = message.serviceScan?.plan ? (
+        <PlanSubServiceCard message={message} />
+      ) : message.serviceScan?.secondary ? (
+        <SecondaryKeywordCard message={message} />
+      ) : (
+        <ServiceChoiceCard message={message} />
+      );
       break;
     default:
       content = <TextBubble message={message} />;

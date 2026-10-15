@@ -1090,6 +1090,27 @@ def build_stage_request(
     )
 
 
+def build_agent_brief(
+    asset_id: str,
+    answers: dict[str, str],
+    phase: str = DEFAULT_PHASE,
+    page_design: PageDesignInput | None = None,
+    voice: IndustryProfile | None = None,
+    business_brief: str = "",
+) -> tuple[str, tuple[str, ...]]:
+    """The same brief `build_stage_request` sends Claude, as `(text, screenshot_urls)`, for an agent
+    that takes a file rather than an API request (`manus_page.py`). Built from the same parts, so
+    the two builders cannot be handed different pages to build."""
+    library, tail = _prompt_parts(asset_id, answers, phase, page_design, voice, business_brief)
+    shots: tuple[str, ...] = ()
+    if page_design is not None:
+        images = page_design.generated_images_for(asset_id)
+        if images:
+            tail += _generated_images_block(images)
+        shots = page_design.screenshots_for(asset_id)
+    return library + tail, shots
+
+
 def _stream_kwargs(
     cfg: StageConfig,
     system_blocks: list[dict[str, object]] | None,

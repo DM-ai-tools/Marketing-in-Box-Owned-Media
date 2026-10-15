@@ -6,7 +6,7 @@ import {
   SUB_SERVICE_FACT,
 } from "../data/phase2Catalog";
 import type { AssetDefinition, FieldDef } from "../data/types";
-import type { PlanSubServiceCandidate } from "./pipelineApi";
+import type { KeywordProvider, PlanSubServiceCandidate } from "./pipelineApi";
 import { INDUSTRY_BUCKETS, INDUSTRY_PROFILES } from "../data/industryProfiles";
 import type { IndustryBucket } from "../data/industryProfiles";
 
@@ -429,6 +429,44 @@ export function composePlanSubServicesAnswer(
     lines.push(`- ${name} — NEW PAGE (typed by the operator; keywords not measured)`);
   }
   return lines.length > 1 ? lines.join("\n") : "";
+}
+
+/** The Pillar Page's "Secondary / Cluster Terms": suggested from the head term chosen just before
+ * it, by Ahrefs and by DataForSEO side by side (`POST /pipeline/keywords/secondary`), so the
+ * operator can compare the two and tick terms from either. Optional: nothing starts ticked, and
+ * Skip answers it. Both phases: the field is on the Pillar Page in each. */
+export const SECONDARY_KEYWORD_OPTION = {
+  assetId: "pillar_page",
+  fieldId: "secondary_cluster_terms_optional",
+  headTermFieldId: "primary_keyword_head_term",
+} as const;
+
+export const KEYWORD_PROVIDER_LABEL: Record<KeywordProvider, string> = { ahrefs: "Ahrefs", dataforseo: "DataForSEO" };
+
+/** One ticked term, with the column it was ticked in. */
+export interface PickedSecondaryTerm {
+  provider: KeywordProvider;
+  keyword: string;
+  volume: number | null;
+}
+
+/** The secondary-terms answer: where the numbers come from, then one term per line with its volume
+ * and provider (a term ticked in both columns carries both numbers), then any typed terms. "" when
+ * nothing was picked or typed. */
+export function composeSecondaryTermsAnswer(picked: PickedSecondaryTerm[], other: string, location: string): string {
+  const byTerm = new Map<string, PickedSecondaryTerm[]>();
+  for (const p of picked) byTerm.set(p.keyword, [...(byTerm.get(p.keyword) ?? []), p]);
+  const typed = other
+    .split(/[,;\n]/)
+    .map((s) => s.trim())
+    .filter((s) => s && !byTerm.has(s.toLowerCase()));
+  if (!byTerm.size && !typed.length) return "";
+  const lines = byTerm.size ? [`Monthly Google searches${location ? ` in ${location}` : ""}, as measured by the provider named.`] : [];
+  for (const [keyword, rows] of byTerm) {
+    lines.push(`- ${keyword} — ${rows.map((r) => `${formatVolume(r.volume)} (${KEYWORD_PROVIDER_LABEL[r.provider]})`).join(", ")}`);
+  }
+  for (const term of typed) lines.push(`- ${term} — typed by the operator; not measured`);
+  return lines.join("\n");
 }
 
 /** The sub-service names a `plan_sub_services` document holds, in order. Mirrors

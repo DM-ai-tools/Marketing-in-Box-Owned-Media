@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { fetchReplicaOutput } from "./pipelineApi";
+import { fetchReplicaOutput, type ManusBuildEvent } from "./pipelineApi";
 import type { PipelineMessage } from "./pipelineStore";
 
 /** CRO's assembled page — the client's own markup with the rewritten copy in it — on the card.
@@ -123,6 +123,64 @@ export function ReplicaPanel({ message, label }: { message: PipelineMessage; lab
           {error}
         </p>
       )}
+    </div>
+  );
+}
+
+const minutes = (seconds?: number) => {
+  if (!seconds || seconds < 60) return "under a minute";
+  const m = Math.round(seconds / 60);
+  return `${m} min`;
+};
+
+/** The Pillar Page being built by Manus. A build takes minutes and sends no text until it is done,
+ * so this is what tells the operator the card is working rather than stuck. Once done it stays as
+ * one line with the task link; a fallback to Claude stays as an amber note with the reason. */
+export function ManusPanel({ build, streaming }: { build?: ManusBuildEvent; streaming?: boolean }) {
+  if (!build) return null;
+  const link = build.task_url ? (
+    <a href={build.task_url} target="_blank" rel="noreferrer" className="underline">
+      Open the task in Manus
+    </a>
+  ) : null;
+
+  if (build.status === "fallback") {
+    return (
+      <div
+        data-manus-panel="fallback"
+        className="mt-3 rounded-xl border px-3 py-2 text-[0.78rem]"
+        style={{ borderColor: "var(--color-signal-amber)" }}
+      >
+        <p className="font-semibold">Manus did not build this page</p>
+        <p className="mt-1 text-[var(--fg-muted)]">{build.message}</p>
+        {link && <p className="mt-1">{link}</p>}
+      </div>
+    );
+  }
+
+  if (build.status === "done" || !streaming) {
+    const credits = typeof build.credits === "number" ? ` · ${build.credits} Manus credits` : "";
+    return (
+      <p data-manus-panel="done" className="mt-3 text-[0.76rem] text-[var(--fg-muted)]">
+        Page built by Manus{credits}. {link}
+      </p>
+    );
+  }
+
+  return (
+    <div data-manus-panel="building" role="status" className="mt-3 rounded-xl border border-[var(--border)] px-3 py-2 text-[0.78rem]">
+      <p className="flex items-center gap-2 font-semibold">
+        <span
+          aria-hidden
+          className="inline-block h-2 w-2 rounded-full motion-safe:animate-pulse"
+          style={{ background: "var(--color-signal-amber)" }}
+        />
+        Manus is building the page · {minutes(build.elapsed)}
+      </p>
+      {build.brief && <p className="mt-1 text-[var(--fg-muted)]">{build.brief}</p>}
+      <p className="mt-1 text-[var(--fg-muted)]">
+        A full page usually takes several minutes. You can leave this open. {link}
+      </p>
     </div>
   );
 }

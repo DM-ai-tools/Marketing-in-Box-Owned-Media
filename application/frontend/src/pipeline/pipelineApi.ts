@@ -250,7 +250,23 @@ export interface StreamStageOptions {
   /** A page Refine's report: the page is changed by exact edits, never retyped, and this says how
    * many landed and why any did not. Only a built pillar page's Refine sends it. */
   onRevisionEdits?: (report: RevisionEditReport) => void;
+  /** The Pillar Page being built by Manus: started, progress every poll, done, or a fallback to
+   * Claude with the reason. Only the pillar page, and only with a Manus key on the server. */
+  onManus?: (event: ManusBuildEvent) => void;
   signal?: AbortSignal;
+}
+
+/** The `manus` stream event (`app/services/manus_page.py`). `status` is `started` | `resumed` |
+ * `running` | `waiting` | `stopped` | `done` | `fallback`. */
+export interface ManusBuildEvent {
+  status: string;
+  task_url?: string;
+  /** What the agent last said it was doing. */
+  brief?: string;
+  elapsed?: number;
+  credits?: number | null;
+  /** On `fallback`: why Manus did not deliver, and that Claude is building the page instead. */
+  message?: string;
 }
 
 /** The `revision_edits` event. `rejected` rows are [start of the text to change, why it was not]. */
@@ -305,6 +321,7 @@ type SseEvent =
   | { type: "social_prepass"; skipped?: boolean; content?: string; error?: string }
   | ReplicaStreamEvent
   | { type: "image_notes"; notes: string[] }
+  | ({ type: "manus" } & ManusBuildEvent)
   | ({ type: "revision_edits" } & RevisionEditReport);
 
 /** The field `social_prepass` fills, so a continuation can hand back what the first attempt paid
@@ -397,6 +414,10 @@ async function consumeSseStream(
       }
       else if (event.type === "image_notes") {
         if (event.notes?.length) opts.onImageNotes?.(event.notes);
+      }
+      else if (event.type === "manus") {
+        const { type: _t, ...build } = event;
+        opts.onManus?.(build);
       }
       else if (event.type === "revision_edits") {
         const { type: _t, ...report } = event;
@@ -1439,6 +1460,46 @@ export async function discoverSubServices(
     }),
   });
   return unwrap<SubServiceDiscovery>(res, "Suggest sub-services");
+}
+
+/** One suggested secondary term. A missing number is null, never 0. */
+export interface SecondaryKeyword {
+  keyword: string;
+  volume: number | null;
+  difficulty: number | null;
+  cpc: number | null;
+  /** DataForSEO only: commercial / informational / navigational / transactional. */
+  intent: string | null;
+}
+
+export type KeywordProvider = "ahrefs" | "dataforseo";
+
+export interface ProviderSuggestions {
+  provider: KeywordProvider;
+  /** `ok` | `unconfigured` | `error`. */
+  status: string;
+  keywords: SecondaryKeyword[];
+  error: string;
+}
+
+/** `POST /pipeline/keywords/secondary` — both providers' suggestions for one head term. */
+export interface SecondarySuggestions {
+  head_term: string;
+  /** The country both were asked for; "" when the region named none. */
+  location: string;
+  ahrefs: ProviderSuggestions;
+  dataforseo: ProviderSuggestions;
+}
+
+/** Secondary / cluster terms for a Pillar Page head term, Ahrefs and DataForSEO side by side. Always
+ * resolves for a provider failure: each column carries its own status. */
+export async function fetchSecondaryKeywords(headTerm: string, region: string): Promise<SecondarySuggestions> {
+  const res = await fetch("/api/pipeline/keywords/secondary", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ head_term: headTerm, region }),
+  });
+  return unwrap<SecondarySuggestions>(res, "Suggest secondary keywords");
 }
 
 /** File the sub-services confirmed for the plan, so a Phase 2 run built on this one offers them. */

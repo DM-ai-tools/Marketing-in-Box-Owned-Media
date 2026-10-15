@@ -99,6 +99,7 @@ from app.services import (
     industry_voice,
     insights,
     keywords as keywords_service,
+    manus_page,
     media_storage,
     service_scan as service_scan_service,
     sub_service_discovery,
@@ -106,6 +107,7 @@ from app.services import (
     runway_image_client,
     page_replica as page_replica_service,
     page_revision as page_revision_service,
+    secondary_keywords as secondary_keywords_service,
     slide_deck as slide_deck_service,
     social_audit as social_audit_service,
     social_intel as social_intel_service,
@@ -127,6 +129,7 @@ from app.services.generation import (
     DESIGN_LANGUAGE_STAGES,
     PAGE_REPLICA_STAGES,
     PageDesignInput,
+    build_agent_brief,
     generate_continuation_stream,
     generate_page_edits,
     generate_replica_copy,
@@ -3006,6 +3009,20 @@ async def discover_sub_services_route(payload: SubServiceDiscoveryRequest) -> Su
     return SubServiceDiscoveryResponse.model_validate(found.as_dict())
 
 
+class SecondaryKeywordsRequest(BaseModel):
+    head_term: NonBlankStr
+    region: str = ""
+
+
+@router.post("/keywords/secondary")
+async def secondary_keywords_route(payload: SecondaryKeywordsRequest) -> dict[str, object]:
+    """Secondary / cluster terms for a Pillar Page head term, from Ahrefs and from DataForSEO side by
+    side. Two requests per provider, stores nothing. Always 200: a provider that failed says why in
+    its own column, so the other column still shows."""
+    result = await secondary_keywords_service.suggest(payload.head_term, payload.region)
+    return result.as_dict()
+
+
 class PlanSubServicesRequest(BaseModel):
     content: NonBlankStr
 
@@ -4647,7 +4664,28 @@ async def _generation_sse_stream(
         except Exception:  # noqa: BLE001 — the brief improves a draft; it must never block one
             logger.exception("Business brief for %s could not be built; generating without it", asset_id)
 
-        if continue_from:
+        # The Pillar Page is built by Manus when a key is set (`manus_page.py`). It gets the same
+        # brief Claude would, and hands back the same document shape. A Manus failure is reported
+        # and Claude builds the page instead, so the operator still gets one.
+        manus_document: str | None = None
+        if not continue_from and manus_page.uses_manus(asset_id):
+            brief, shots = build_agent_brief(asset_id, answers, phase, page_design, voice, business_brief)
+            try:
+                async for item in manus_page.build_page(brief, shots, title=_manus_title(asset_id, answers, client_profile)):
+                    if item["type"] == "manus_result":
+                        manus_document = item["document"]
+                        yield _sse({"type": "manus", "status": "done", "task_url": item["task_url"], "credits": item["credits"]})
+                    else:
+                        yield _sse(item)
+            except manus_page.ManusPageError as exc:
+                logger.warning("Manus page build failed for %s: %s", asset_id, exc)
+                yield _sse({"type": "manus", "status": "fallback", "message": f"{exc} Building the page with Claude instead."})
+
+        if manus_document is not None:
+            # Complete by construction: Manus delivered files, not a capped stream.
+            stop_reason[0] = "end_turn"
+            model_stream = _chunked(manus_document)
+        elif continue_from:
             model_stream = generate_continuation_stream(
                 asset_id,
                 answers,
@@ -4732,6 +4770,20 @@ async def _generation_sse_stream(
     # browser so that "what counts as cut off" is decided once. `stop_reason` rides along for the
     # transcript and for a future reason this is not the only non-`end_turn` ending worth naming.
     yield _sse(_done_event(stop_reason[0]))
+
+
+async def _chunked(document: str):
+    """A finished document as ordinary deltas, so the client builds the card exactly as it does for
+    a streamed one."""
+    for start in range(0, len(document), _EDIT_REVISION_CHUNK):
+        yield document[start : start + _EDIT_REVISION_CHUNK]
+
+
+def _manus_title(asset_id: str, answers: dict[str, str], client_profile: dict[str, str] | None) -> str:
+    """The task's name in the Manus app, so an operator who opens it knows whose page it is."""
+    client = str((client_profile or {}).get("client_name") or answers.get("client_name") or "").strip()
+    label = "Pillar Page" if asset_id == "pillar_page" else asset_id.replace("_", " ").title()
+    return f"{label} — {client}" if client else label
 
 
 def _done_event(stop_reason: str | None) -> dict:

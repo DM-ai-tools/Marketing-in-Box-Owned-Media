@@ -580,6 +580,51 @@ sections follow the content.** No intake question switches this — it is how th
 
 ---
 
+## Manus — the Pillar Page builder
+
+With a Manus key set, the Pillar Page's page is built by a Manus agent, not by one streamed Claude
+call. Manus works in its own sandbox and can open the page it is writing. Every other stage, and
+CRO, stays on Claude.
+
+- **The key.** `MANUS_API_KEY` in the backend `.env`. `manus` is read too, which is how it was first
+  added. On Railway, set `MANUS_API_KEY`, because Linux env names are case-sensitive. Sent as
+  `x-manus-api-key`, server-side only. `MANUS_PAGE_BUILDER=off` turns the builder off without
+  removing the key. `MANUS_AGENT_PROFILE` picks the profile (default `standard`).
+- **`app/services/manus_client.py` is the only module that talks to Manus** (API v2). It creates
+  tasks, reads `task.detail` and `task.listMessages`, and downloads attachments. File URLs are signed
+  and are fetched without the key. Every failure is one sentence: a rejected key (401), out of
+  credits (402/403), or rate-limited (429).
+- **`app/services/manus_page.py` builds the page.**
+  - **Same brief as Claude.** `generation.build_agent_brief` is built from the same `_prompt_parts`
+    plus the generated-image block, so the two builders cannot be given different pages to build.
+  - **The brief is a file.** `task.create` caps a request's text at about 5,000 tokens, so the
+    brief goes as `brief.md` and the screenshots go as URL file parts.
+  - **Two files come back.** `page.html` and `report.md`, where `report.md` holds `{{PAGE_HTML}}`
+    where the page goes. `compose_document` rebuilds the prompt's output shape with the page in an
+    `html` code fence, so the preview, page check, Refine and Context Store need no changes.
+  - **No questions, no website.** `interactive_mode` is off. A waiting agent is told to proceed at
+    most `_MAX_NUDGES` times, then stopped. Anything still running past `MAX_WAIT_SECONDS` (30 min)
+    is stopped.
+  - **A dropped connection never buys a second task.** `_inflight` holds the task per brief, so the
+    browser's retry resumes polling the same task.
+- **Failure falls back to Claude.** `_generation_sse_stream` sends a `manus` event with
+  `status: "fallback"` and the reason, then streams Claude as before. The page arrives as ordinary
+  `delta`s with `stop_reason: "end_turn"`, so it is never "truncated" and Continue is never offered.
+- **The card.** `manus` events (`started` / `resumed` / the task's status every poll / `done` /
+  `fallback`) are stored on `message.manus`. `ManusPanel` (`ReplicaPanel.tsx`) shows the agent's own
+  latest line, the elapsed time and the task link while it builds, one line with credits once done,
+  and an amber note on fallback.
+- **Refine is still Claude's.** "Fix with Refine" and ordinary Refines edit the page in place
+  (`page_revision.py`). Only a full re-run goes back to Manus.
+- **Credits are money.** One task per Pillar Page run, about the cost the task reports
+  (`credit_usage`, shown on the card). A tiny probe page cost 2 credits; a full pillar page costs far
+  more.
+- **Tests never reach the live API.** `tests/conftest.py` removes the key for every test, because
+  streaming a pillar page would otherwise start a real task. `tests/test_manus.py` covers the shapes
+  the live API returned, the build loop and the stream. `smoke/manus.tsx` covers the panel.
+
+---
+
 ## The Pillar Page's service picker, and building without a reference page
 
 The pillar page used to cover whatever the CRO copy covered, which is one service. Now the operator
@@ -719,8 +764,9 @@ palette.
 
 ## Ahrefs — keyword data
 
-Ahrefs Keywords Explorer (API v3) is the only keyword source. It replaced DataForSEO, and nothing
-reads DataForSEO credentials any more.
+Ahrefs Keywords Explorer (API v3) is the keyword source for the pipeline. It replaced DataForSEO
+everywhere except one card: the Pillar Page's secondary terms, where the operator compares the two
+(see "Secondary terms — Ahrefs and DataForSEO side by side" below).
 
 The key is `AHREFS_API_KEY` in the backend `.env`, sent as a bearer token, server-side only.
 With no key, `keywords.provider_name()` is `stub`. That keeps the pipeline working on fabricated
@@ -783,6 +829,45 @@ and deciding relevance, brand and intent stays in `keywords.py`.
   - `smoke/ahrefsUsage.tsx` pins it.
 - **Tests never hit the live API.** `tests/test_ahrefs_client.py` uses an `httpx.MockTransport`.
   Discovery tests patch `ahrefs_client.AhrefsClient`.
+
+### Secondary terms — Ahrefs and DataForSEO side by side
+
+The Pillar Page's `secondary_cluster_terms_optional` ("supporting terms this page should cover in
+passing") is not a text question when a head term was chosen. The walk opens a `service-choice`
+card with `serviceScan.secondary` set (`SECONDARY_KEYWORD_OPTION`, `SecondaryKeywordCard`), in both
+phases.
+
+- **One route, two providers.** `POST /pipeline/keywords/secondary` (`app/services/
+  secondary_keywords.py`) asks both providers about the head term in the same country, concurrently,
+  with two requests each. Ahrefs uses `matching-terms` and `related-terms`. DataForSEO uses
+  `keyword_suggestions` and `related_keywords` at depth 1. It never loops over keywords. It stores
+  nothing.
+- **`app/services/dataforseo_client.py` is the only module that talks to DataForSEO.** It uses HTTP
+  Basic auth from `DATAFORSEO_LOGIN` / `DATAFORSEO_PASSWORD`. The names first used,
+  `DataForTopicClusttering_LOGIN` / `_PASSWORD`, are read too.
+  - A 200 can still be a failure: the task's own `status_code` must be 20000, and 40200 means the
+    account is out of balance.
+  - `keyword_suggestions` items are flat, while `related_keywords` nests them under `keyword_data`.
+    `_dig` reads both.
+- **One filter for both columns** (`filter_suggestions`), so the comparison is of the data, not the
+  cleaning. Each rule comes from the live first run for "social media marketing agency" in Australia:
+  - it drops the head term, its plurals and single words;
+  - a term must share two content words with the head term (one for a one-word head term), because
+    with one, Ahrefs filled the column with "social", "agency" and "social club";
+  - it drops terms naming another country, because DataForSEO offered "... agency india".
+  - Highest volume first, capped at `MAX_PER_PROVIDER` (15). A missing number is None, shown as —.
+- **Each provider fails on its own.** A column says `unconfigured` or `error` with one sentence, and
+  the other column still works. A region naming no country asks neither, and both columns carry the
+  fix. The route is always a 200.
+- **The card.** Each column states its own totals: terms, combined volume and median KD. A term both
+  suggested is marked "in both". DataForSEO's columns add intent and CPC.
+- **Answering.** The field is optional, so nothing starts ticked. The operator ticks terms from
+  either column, can type others, or skips (the answer is `N/A`).
+  - The answer is `composeSecondaryTermsAnswer`'s shape: a line naming the country, then one term
+    per line with each ticking provider's volume, then the typed terms.
+  - A head term that is not a usable seed (empty, or over 80 characters) gets the plain question.
+- `tests/test_secondary_keywords.py` covers the filter against the live rows, the DataForSEO shapes
+  and the route. `smoke/secondaryKeywords.tsx` drives the walk, the card and the answer.
 
 ---
 
