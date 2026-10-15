@@ -170,6 +170,50 @@ async function main() {
   const done = usePipelineStore.getState().messages.find((m) => m.id === card!.id)!;
   ok("the card shows what was used", done.serviceScan?.status === "done" && render(done).includes("social media agency melbourne"));
 
+  // ---------- a chosen headline seeds with its keyword, never the headline ----------
+  seedAtHeadTerm();
+  const headline = "How AI SEO Services Beat Traditional Agencies In Melbourne";
+  usePipelineStore.setState({
+    messages: [
+      {
+        id: "gate-1",
+        role: "assistant",
+        kind: "headline-choice",
+        assetId: "pillar_page",
+        field: PILLAR.fields.find((f) => f.field_id === SECONDARY_KEYWORD_OPTION.headTermFieldId),
+        headlines: {
+          slot: "pillar_head_term",
+          status: "chosen",
+          chosenIds: ["c1"],
+          candidates: [{ id: "c1", headline, primary_keyword: "ai seo services" }],
+        },
+      },
+    ],
+  } as never);
+  const seedCalls = calls.length;
+  usePipelineStore.getState().submitAnswer(headline);
+  await flush();
+  ok("the suggestion's keyword is searched, not its headline", calls[seedCalls]?.head_term === "ai seo services", JSON.stringify(calls[seedCalls]));
+  const seeded = last("service-choice")!;
+  ok("the card names the term it searched", seeded.serviceScan?.secondary?.headTerm === "ai seo services");
+
+  // ---------- searching a different term ----------
+  usePipelineStore.getState().researchSecondaryKeywords(seeded.id, "seo agency melbourne");
+  await flush();
+  ok("a new term asks both providers again", calls[calls.length - 1]?.head_term === "seo agency melbourne");
+  const researched = usePipelineStore.getState().messages.find((m) => m.id === seeded.id)!;
+  ok("the card shows the new term's results", researched.serviceScan?.status === "ready" && researched.serviceScan.secondary?.headTerm === "seo agency melbourne");
+  ok("the search box is offered", render(researched).includes("Search a different term"));
+
+  // ---------- nothing found says why ----------
+  const saved = response;
+  response = { ...response, ahrefs: { ...response.ahrefs, keywords: [] }, dataforseo: { ...response.dataforseo, keywords: [] } };
+  usePipelineStore.getState().researchSecondaryKeywords(seeded.id, headline);
+  await flush();
+  const empty = render(usePipelineStore.getState().messages.find((m) => m.id === seeded.id)!);
+  ok("an empty result explains a headline is not a search term", empty.includes("data-no-terms") && empty.includes("reads like a headline"), empty.slice(0, 300));
+  response = saved;
+
   // ---------- skipping ----------
   seedAtHeadTerm();
   usePipelineStore.getState().submitAnswer("social media marketing agency");

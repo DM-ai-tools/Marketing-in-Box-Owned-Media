@@ -866,6 +866,14 @@ phases.
   - The answer is `composeSecondaryTermsAnswer`'s shape: a line naming the country, then one term
     per line with each ticking provider's volume, then the typed terms.
   - A head term that is not a usable seed (empty, or over 80 characters) gets the plain question.
+- **The seed is the chosen suggestion's `primary_keyword`, never its headline.** This has broken
+  once. The head-term gate suggests headlines, and the field's answer is the headline text. Seeded
+  with "How AI SEO Services Beat Traditional Agencies In Melbourne", both providers returned nothing
+  and the card showed two empty columns. `headTermSeed` reads the keyword off the chosen candidate.
+  The answer is used only for a head term the operator typed.
+- **"Search a different term"** (`researchSecondaryKeywords`) re-asks both providers about another
+  seed: two requests each, the same as the first search. An empty result says why, and names a
+  headline-shaped seed as the likely cause.
 - `tests/test_secondary_keywords.py` covers the filter against the live rows, the DataForSEO shapes
   and the route. `smoke/secondaryKeywords.tsx` drives the walk, the card and the answer.
 

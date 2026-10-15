@@ -625,6 +625,8 @@ interface PipelineState {
   confirmPlanSubServices: (messageId: string, names: string[], other: string) => void;
   /** Answer the Pillar Page's secondary terms with the ticked terms (from either provider) and any typed. */
   confirmSecondaryKeywords: (messageId: string, picked: PickedSecondaryTerm[], other: string) => void;
+  /** Ask both providers again about a different search term (two requests each). */
+  researchSecondaryKeywords: (messageId: string, term: string) => void;
   retryServiceScan: (messageId: string) => void;
   submitFreeform: (raw: string) => void;
   skipField: () => void;
@@ -2745,8 +2747,28 @@ function isSecondaryKeywordField(asset: AssetDefinition, field: FieldDef): boole
   return asset.asset_id === SECONDARY_KEYWORD_OPTION.assetId && field.field_id === SECONDARY_KEYWORD_OPTION.fieldId;
 }
 
-/** The head term this intake chose, as a search seed: a numbered multi-pick keeps its first line. */
-function headTermSeed(answer: unknown): string {
+/** The head term this intake chose, as a search seed.
+ *
+ * The head-term gate suggests *headlines* ("How AI SEO Services Beat Traditional Agencies In
+ * Melbourne"), and the headline is what the field's answer holds. Nobody searches a headline, so
+ * seeded with one both providers returned nothing. Each suggestion carries the keyword it was built
+ * on (`primary_keyword`), and that is the seed. The answer itself is used only when the operator
+ * typed their own head term, which is a term rather than a headline. */
+function headTermSeed(state: PipelineState, asset: AssetDefinition, answer: unknown): string {
+  const gate = [...state.messages]
+    .reverse()
+    .find(
+      (m) =>
+        m.kind === "headline-choice" &&
+        m.assetId === asset.asset_id &&
+        m.field?.field_id === SECONDARY_KEYWORD_OPTION.headTermFieldId &&
+        m.headlines?.status === "chosen",
+    )?.headlines;
+  if (gate && !gate.ownHeadline) {
+    const chosen = (gate.candidates ?? []).find((c) => (gate.chosenIds ?? []).includes(c.id));
+    const keyword = chosen?.primary_keyword?.trim();
+    if (keyword) return keyword;
+  }
   const text = typeof answer === "string" ? answer : "";
   const first = text.split("\n").map((l) => l.replace(/^\s*\d+[.)]\s*/, "").trim()).find(Boolean) ?? "";
   return first.length > 80 ? "" : first;
@@ -2761,7 +2783,7 @@ function openSecondaryKeywords(
   field: FieldDef,
   answers: Record<string, unknown>,
 ): boolean {
-  const headTerm = headTermSeed(answers[SECONDARY_KEYWORD_OPTION.headTermFieldId]);
+  const headTerm = headTermSeed(get(), asset, answers[SECONDARY_KEYWORD_OPTION.headTermFieldId]);
   if (!headTerm) return false;
   const region = typeof get().clientProfile.region === "string" ? get().clientProfile.region.trim() : "";
   const card = push(get, set, {
@@ -4345,6 +4367,17 @@ export const usePipelineStore = create<PipelineState>((set, get) => ({
     push(get, set, { role: "user", kind: "text", text: `Secondary terms: ${[...terms, ...typed].join(", ")}` });
     set({ editSeed: null });
     applyAnswerAndAdvance(get, set, intake, message.field);
+  },
+
+  researchSecondaryKeywords: (messageId, term) => {
+    const message = liveMessage(get(), messageId);
+    const scan = message?.serviceScan;
+    const seed = term.trim();
+    if (!message || !scan?.secondary || !seed || scan.status === "loading" || !isServiceScanOpen(message)) return;
+    patchMessage(get, set, messageId, {
+      serviceScan: { ...scan, status: "loading", error: undefined, secondary: { ...scan.secondary, headTerm: seed, result: null } },
+    });
+    void loadSecondaryKeywords(get, set, messageId);
   },
 
   retryServiceScan: (messageId) => {

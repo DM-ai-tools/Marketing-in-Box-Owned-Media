@@ -22,9 +22,11 @@ export function SecondaryKeywordCard({ message }: { message: PipelineMessage }) 
   const confirm = usePipelineStore((s) => s.confirmSecondaryKeywords);
   const skip = usePipelineStore((s) => s.skipServices);
   const retry = usePipelineStore((s) => s.retryServiceScan);
+  const research = usePipelineStore((s) => s.researchSecondaryKeywords);
   const still = Boolean(useReducedMotion());
   const [picked, setPicked] = useState<string[]>([]);
   const [other, setOther] = useState("");
+  const [seed, setSeed] = useState("");
 
   const scan = message.serviceScan;
   const secondary = scan?.secondary;
@@ -111,6 +113,14 @@ export function SecondaryKeywordCard({ message }: { message: PipelineMessage }) 
             Monthly Google searches{result?.location ? ` in ${result.location}` : ""}. KD is keyword difficulty, 0–100.
             {inBoth.size > 0 && ` ${inBoth.size} ${inBoth.size === 1 ? "term was" : "terms were"} suggested by both.`}
           </p>
+          {columns.ahrefs.keywords.length + columns.dataforseo.keywords.length === 0 && (
+            <p data-no-terms className="mt-1.5 text-[0.75rem] leading-relaxed text-[var(--fg-muted)]">
+              Neither provider has search data around “{secondary.headTerm}”.
+              {secondary.headTerm.split(/\s+/).length > 4
+                ? " It reads like a headline rather than something people search; try the 2–4 word term the page should rank for."
+                : " Try a broader term below."}
+            </p>
+          )}
           <div className="mt-2 grid gap-3 @[40rem]:grid-cols-2">
             {PROVIDERS.map((provider) => (
               <ProviderColumn
@@ -125,6 +135,36 @@ export function SecondaryKeywordCard({ message }: { message: PipelineMessage }) 
             ))}
           </div>
         </>
+      )}
+
+      {(scan.status === "ready" || scan.status === "error") && !superseded && (
+        <form
+          className="mt-2.5 flex flex-wrap items-center gap-2"
+          onSubmit={(e) => {
+            e.preventDefault();
+            if (!seed.trim()) return;
+            setPicked([]);
+            research(message.id, seed);
+          }}
+        >
+          <label className="text-[0.72rem] text-[var(--fg-muted)]" htmlFor={`${message.id}-seed`}>
+            Search a different term:
+          </label>
+          <input
+            id={`${message.id}-seed`}
+            value={seed}
+            onChange={(e) => setSeed(e.target.value)}
+            placeholder="e.g. ai seo services"
+            className="min-h-10 min-w-0 flex-1 rounded-full border border-[var(--border)] bg-[var(--bg-sunken)] px-3 py-1 text-[0.8rem] outline-none focus:border-[var(--border-strong)] sm:min-h-0"
+          />
+          <button
+            type="submit"
+            disabled={!seed.trim()}
+            className="min-h-10 cursor-pointer rounded-full border border-[var(--border-strong)] px-3 py-1 text-[0.78rem] font-medium disabled:cursor-not-allowed disabled:opacity-40 sm:min-h-0"
+          >
+            Search
+          </button>
+        </form>
       )}
 
       {open && (
