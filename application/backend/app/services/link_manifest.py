@@ -545,6 +545,38 @@ def _cell(value: str) -> str:
     return " ".join(value.replace("|", "\\|").split())
 
 
+#: One icon per platform, 24x24, `currentColor`, so a social link is drawn as the platform's mark
+#: rather than its name. A deployed pillar page rendered "Facebook / Twitter / Instagram" as plain
+#: text links: the Links table gave the hrefs and nothing to draw. Only the platforms the page
+#: actually links are emitted, so the prompt carries a few hundred characters, not the whole set.
+SOCIAL_ICONS: dict[str, str] = {
+    "Facebook": '<svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor" aria-hidden="true"><path d="M13.5 22v-8h2.7l.4-3.2h-3.1V8.8c0-.9.3-1.6 1.6-1.6h1.7V4.4c-.3 0-1.3-.1-2.5-.1-2.5 0-4.2 1.5-4.2 4.3v2.3H7.4V14h2.7v8z"/></svg>',
+    "Instagram": '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="5"/><circle cx="12" cy="12" r="4"/><circle cx="17.5" cy="6.5" r="1" fill="currentColor" stroke="none"/></svg>',
+    "LinkedIn": '<svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor" aria-hidden="true"><path d="M4.98 3.5a2.5 2.5 0 1 1 0 5 2.5 2.5 0 0 1 0-5zM3 9.75h4V21H3zM9.5 9.75h3.8v1.6h.1c.5-.95 1.8-1.95 3.7-1.95 4 0 4.7 2.6 4.7 6V21h-4v-4.9c0-1.2 0-2.7-1.6-2.7s-1.9 1.3-1.9 2.6V21h-4z"/></svg>',
+    "X (Twitter)": '<svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor" aria-hidden="true"><path d="M17.8 3h3.1l-6.8 7.8L22 21h-6.2l-4.9-6.4L5.3 21H2.2l7.3-8.3L2 3h6.4l4.4 5.8zm-1.1 16.2h1.7L7.4 4.7H5.6z"/></svg>',
+    "YouTube": '<svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor" aria-hidden="true"><path d="M23 7.2a3 3 0 0 0-2.1-2.1C19 4.6 12 4.6 12 4.6s-7 0-8.9.5A3 3 0 0 0 1 7.2 31 31 0 0 0 .5 12 31 31 0 0 0 1 16.8a3 3 0 0 0 2.1 2.1c1.9.5 8.9.5 8.9.5s7 0 8.9-.5a3 3 0 0 0 2.1-2.1 31 31 0 0 0 .5-4.8 31 31 0 0 0-.5-4.8zM9.8 15V9l5.8 3z"/></svg>',
+    "TikTok": '<svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor" aria-hidden="true"><path d="M16.6 3c.4 2.2 1.8 3.7 4.1 3.9v3.2c-1.5.1-2.9-.4-4.1-1.2v6.2c0 3.4-2.4 5.9-5.9 5.9S4.8 18.6 4.8 15.4c0-3.4 2.8-5.9 6.4-5.6v3.3c-1.6-.3-3 .7-3 2.3 0 1.4 1.1 2.4 2.5 2.4 1.5 0 2.6-1 2.6-2.9V3z"/></svg>',
+    "Pinterest": '<svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor" aria-hidden="true"><path d="M12 2a10 10 0 0 0-3.6 19.3c-.1-.8-.2-2.1 0-3l1.2-5s-.3-.6-.3-1.5c0-1.4.8-2.4 1.8-2.4.9 0 1.3.7 1.3 1.4 0 .9-.6 2.2-.9 3.4-.2 1 .5 1.9 1.6 1.9 1.9 0 3.3-2 3.3-4.9 0-2.5-1.8-4.3-4.4-4.3-3 0-4.8 2.3-4.8 4.6 0 .9.4 1.9.8 2.4l.1.4-.3 1.2c0 .2-.2.3-.4.2-1.4-.6-2.2-2.7-2.2-4.3 0-3.5 2.5-6.7 7.3-6.7 3.8 0 6.8 2.7 6.8 6.4 0 3.8-2.4 6.9-5.8 6.9-1.1 0-2.2-.6-2.5-1.3l-.7 2.6c-.2 1-.9 2.2-1.4 2.9A10 10 0 1 0 12 2z"/></svg>',
+}
+
+
+def _social_icon_lines(manifest: LinkManifest) -> list[str]:
+    platforms = list(dict.fromkeys(social_platform(link.href) for link in manifest.group("social")))
+    icons = [(p, SOCIAL_ICONS[p]) for p in platforms if p in SOCIAL_ICONS]
+    if not icons:
+        return []
+    out = [
+        "Draw each social link as its platform's icon, not as a word: use the SVG below inside the "
+        "`<a>`, give the `<a>` an `aria-label` naming the platform, and colour it with the page's own "
+        "palette through `currentColor`.",
+        "",
+    ]
+    for platform, svg in icons:
+        out.append(f"- {platform}: `{svg}`")
+    out.append("")
+    return out
+
+
 def links_markdown(manifest: LinkManifest | None) -> list[str]:
     """The `## Links` section of the full DESIGN.md, as lines. Empty when nothing was measured."""
     if manifest is None or not manifest.available or not manifest.links:
@@ -589,6 +621,8 @@ def links_markdown(manifest: LinkManifest | None) -> list[str]:
                 for link in links:
                     out.append(f"| {link.link_id} | {_cell(link.label)} | `{link.href}` |")
         out.append("")
+        if group == "social":
+            out += _social_icon_lines(manifest)
     if manifest.group("body"):
         out += [
             "The in-page links are offered for reuse where the new copy refers to the same page; they "

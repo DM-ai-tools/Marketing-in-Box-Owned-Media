@@ -115,6 +115,22 @@ class DesignTokenError(Exception):
 # --------------------------------------------------------------------------------------
 
 
+#: Icon fonts: they set glyphs, not words, and are never a page's typeface. A deployed pillar page
+#: set its body text in "font awesome 5 pro", which renders as boxes on any machine that has it.
+_ICON_FONT = re.compile(
+    r"font ?awesome|fontawesome|\bfa[- ]?(?:solid|brands|regular|light)\b|eicons|elementor-icons|dashicons|icomoon"
+    r"|material[- ]?(?:icons|symbols)|glyphicons|fontello|themify|ionicons|caseicon|feather|bootstrap-icons|line ?awesome"
+    r"|simple-line-icons|flaticon|\bicons?\b",
+    re.I,
+)
+
+
+def is_icon_font(family: object) -> bool:
+    """Whether a font-family stack's first family is an icon font."""
+    first = str(family or "").split(",")[0].strip().strip("'\"")
+    return bool(first) and bool(_ICON_FONT.search(first))
+
+
 def _clamp(value: float, low: float = 0.0, high: float = 255.0) -> float:
     return max(low, min(high, value))
 
@@ -1042,7 +1058,9 @@ def _build_tokens(source_url: str, sources: _Sources) -> DesignTokens:
         custom_properties={
             name: value for name, value in declared.items() if _is_useful_token(name, value)
         },
-        font_families=_collect_values(sources, "font-family", limit=8, properties=declared),
+        font_families=[
+            row for row in _collect_values(sources, "font-family", limit=12, properties=declared) if not is_icon_font(row[0])
+        ][:8],
         font_links=sources.font_links,
         radii=_collect_values(sources, "border-radius", limit=8, properties=declared),
         buttons=_collect_buttons(sources, properties=declared),

@@ -2069,7 +2069,10 @@ DESIGN_TOKENS_CONTEXT_KEY = "brand_design_tokens"
 #   3 — adds the `## Page structure` band walk (`page_structure.py`)
 #   4 — adds `## Links` (every href, `link_manifest.py`) and `## Responsive` (the CSS's own
 #       breakpoints), and stores the link manifest as data for the pillar page check
-DESIGN_CAPTURE_VERSION = 4
+#   5 — a bot-checked free read is re-read rendered (so the logo, links, images and client logos are
+#       the page's own), no bot-check logo or icon font, and social icons in `## Links`. A run
+#       captured at 4 behind a bot wall holds a robot illustration as its logo.
+DESIGN_CAPTURE_VERSION = 5
 
 # In preference order. The parent page first — a company's brand is most concretely expressed on
 # the page actually being extended, and a home page can differ from a service page's template.

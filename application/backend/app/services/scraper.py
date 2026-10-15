@@ -99,6 +99,34 @@ _CHALLENGE_HEADERS = ("sg-captcha", "cf-mitigated", "x-datadome", "x-sucuri-bloc
 _INTERSTITIAL_MAX_BYTES = 2_048
 _META_REFRESH = re.compile(r"<meta[^>]+http-equiv=[\"']?refresh", re.I)
 
+# A block page served as an ordinary 200 with ordinary headers, so neither check above sees it.
+# Measured on a deployed run: clicktrends.com.au answered the server (a data-centre address) with a
+# "we suspect you are a robot" page while serving browsers normally, and its illustration
+# (`robot-suspicion.svg`) became the client's logo. Read by content, and only on a page with little
+# visible text, because a real page mentions reCAPTCHA in its scripts and "security" in its copy.
+_BLOCK_PAGE_MAX_WORDS = 350
+_BLOCK_PAGE_ASSET = re.compile(r"robot-suspicion|sgcaptcha|captcha-delivery|/cdn-cgi/challenge-platform|imunify", re.I)
+_BLOCK_PAGE_TEXT = re.compile(
+    r"verify (?:that )?you(?:'| a)re (?:a )?human|are you (?:a )?(?:robot|human)|suspect(?:ed)? (?:that )?you"
+    r"|unusual traffic|automated (?:queries|requests|traffic)|checking (?:if the site connection is secure|your browser)"
+    r"|access (?:to this page )?(?:has been )?denied|request (?:was |has been )?blocked|enable javascript and cookies to continue"
+    r"|press (?:&amp; |and )?hold|complete the security check|bot protection",
+    re.I,
+)
+_SCRIPT_STYLE = re.compile(r"<(script|style|noscript)\b.*?</\1>", re.I | re.S)
+_TAG = re.compile(r"<[^>]+>")
+
+
+def looks_like_block_page(html: str) -> bool:
+    """Whether `html` is a bot-check or block page rather than the page that was asked for.
+
+    Public because every reader of a page needs the same answer: the free fetch here, and the
+    design capture's rendered fallback, which can be served the same wall."""
+    text = _TAG.sub(" ", _SCRIPT_STYLE.sub(" ", html))
+    if len(text.split()) > _BLOCK_PAGE_MAX_WORDS:
+        return False
+    return bool(_BLOCK_PAGE_ASSET.search(html) or _BLOCK_PAGE_TEXT.search(text))
+
 # Below this, treat the result as "we did not really get the page" — a JS-rendered shell, a consent
 # wall, or a redirect stub. Chosen against the shortest page this stage would legitimately see: a
 # thin one-service landing page still runs 200+ words, and the CRO prompt's whole premise is that
@@ -434,7 +462,12 @@ async def _fetch_html(url: str) -> tuple[str, str]:
 
             body = response.content[:_MAX_BYTES]
             # `response.text` would decode the *whole* body; decode the capped slice instead.
-            return str(response.url), body.decode(response.encoding or "utf-8", errors="replace")
+            text = body.decode(response.encoding or "utf-8", errors="replace")
+            if looks_like_block_page(text):
+                raise ScrapeError(
+                    f"{current} served a bot-check page instead of the page — it allows browsers but not servers."
+                )
+            return str(response.url), text
 
     raise ScrapeError(f"{url} redirected more than {_MAX_REDIRECTS} times.")
 

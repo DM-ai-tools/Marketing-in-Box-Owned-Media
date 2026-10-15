@@ -71,7 +71,15 @@ import re
 from dataclasses import dataclass, field
 
 from app.services import brandfetch_client, context_dev, firecrawl_client
-from app.services.design_tokens import DesignTokens, extract_design_tokens, is_neutral, tokens_to_css
+from app.services.design_tokens import (
+    DesignTokens,
+    extract_design_tokens,
+    extract_design_tokens_from_html,
+    is_icon_font,
+    is_neutral,
+    tokens_to_css,
+)
+from app.services.scraper import looks_like_block_page
 from app.services.image_briefs import ImageBrief, build_image_briefs
 from app.services.link_manifest import LinkManifest, extract_link_manifest, links_markdown
 from app.services.page_structure import PageStructure, extract_page_structure, structure_markdown
@@ -233,7 +241,7 @@ def _typography_tokens(
             entry: dict[str, object] = {}
             family = style.get("fontFamily")
             fallbacks = [str(f) for f in (style.get("fontFallbacks") or []) if f]
-            if family:
+            if family and not is_icon_font(family):
                 stack = ", ".join(dict.fromkeys([str(family), *fallbacks]))
                 entry["fontFamily"] = stack
             for source_key, token_key in (
@@ -257,15 +265,17 @@ def _typography_tokens(
 
     # The fonts endpoint measures which face sets most of the page's words, which the per-level
     # styleguide reading cannot see. When they disagree, the body face wins for body text.
-    if fonts is not None and fonts.body_face and "body-md" in scale:
-        scale["body-md"]["fontFamily"] = fonts.body_face.stack
+    # The heaviest face that is a typeface: an icon font can top the count on an icon-heavy page.
+    body_face = next((f for f in (fonts.fonts if fonts is not None else ()) if not is_icon_font(f.family)), None)
+    if body_face is not None and "body-md" in scale:
+        scale["body-md"]["fontFamily"] = body_face.stack
 
     if not scale and fallback is not None and (fallback.body_font or fallback.heading_font):
         # Third tier — only reached when neither the styleguide nor the local parse named a
         # single family. No sizes are known at this tier, only which face to use.
-        if fallback.body_font:
+        if fallback.body_font and not is_icon_font(fallback.body_font):
             scale["body-md"] = {"fontFamily": fallback.body_font}
-        if fallback.heading_font:
+        if fallback.heading_font and not is_icon_font(fallback.heading_font):
             scale["h1"] = {"fontFamily": fallback.heading_font}
 
     return scale
@@ -425,6 +435,43 @@ def _brand_gaps(
     return gaps
 
 
+async def _rendered_tokens(url: str) -> tuple[DesignTokens | None, str]:
+    """The page's design tokens from Context.dev's rendered HTML, for a page the free read could not
+    get. Returns (tokens or None, a note for the document)."""
+    try:
+        page = await context_dev.scrape_html(url)
+    except Exception as exc:  # noqa: BLE001 — a failed fallback is a note, never a failed capture
+        return None, f"The rendered page could not be read either: {exc}"
+    if not page.html.strip() or looks_like_block_page(page.html):
+        return None, "The rendered page was a bot-check page too, so the page's own logo, links and images are missing."
+    try:
+        tokens = await extract_design_tokens_from_html(page.html, page.final_url or url)
+    except Exception as exc:  # noqa: BLE001
+        return None, f"The rendered page could not be parsed: {exc}"
+    if not tokens.available:
+        return None, f"The rendered page gave no design tokens: {tokens.reason}"
+    return tokens, "The free read was blocked, so the page was read rendered via Context.dev (1 credit)."
+
+
+#: A logo URL that names a bot check rather than a brand. A fallback reader that was itself served
+#: a block page reports the block page's illustration as the logo (`robot-suspicion.svg`).
+_NOT_A_LOGO = re.compile(r"robot|captcha|challenge|suspicion|blocked|bot[-_]?check|access[-_]?denied", re.I)
+
+
+def _usable_fallback_logo(logo_url: str | None, page_url: str) -> str | None:
+    """A third-tier logo URL, or None when it cannot be the client's logo: a bot-check asset, or a
+    file on another site that is not a known brand-asset host."""
+    if not logo_url:
+        return None
+    if _NOT_A_LOGO.search(logo_url):
+        return None
+    logo_host = _host(logo_url)
+    site = _host(page_url)
+    same_site = logo_host == site or logo_host.endswith("." + site) or site.endswith("." + logo_host)
+    brand_cdn = any(logo_host.endswith(h) for h in ("brandfetch.io", "brandfetch.com"))
+    return logo_url if same_site or brand_cdn else None
+
+
 def _host(url: str) -> str:
     """A bare domain for Brandfetch, which looks up by host rather than by full URL."""
     return re.sub(r"^https?://", "", url.strip()).split("/")[0].removeprefix("www.")
@@ -450,7 +497,7 @@ async def _capture_brand_fallback(url: str, needs: set[str]) -> tuple[BrandFallb
             on_surface = fc.text_color
             heading_font = fc.heading_font
             body_font = fc.body_font
-            logo_url = fc.logo_url
+            logo_url = _usable_fallback_logo(fc.logo_url, url)
             if fc.available:
                 sources.append("firecrawl")
         except firecrawl_client.FirecrawlError as exc:
@@ -471,7 +518,7 @@ async def _capture_brand_fallback(url: str, needs: set[str]) -> tuple[BrandFallb
                 heading_font = heading_font or bf.heading_font
                 body_font = body_font or bf.body_font
             if still_needs_logo:
-                logo_url = logo_url or bf.logo_url
+                logo_url = logo_url or _usable_fallback_logo(bf.logo_url, url)
             if bf.available:
                 sources.append("brandfetch")
         except brandfetch_client.BrandfetchError as exc:
@@ -1120,6 +1167,19 @@ async def capture_page_design(
     guide = _ok(guide_result, "styleguide")
     fonts_data = _ok(fonts_result, "fonts")
     tokens = _ok(tokens_result, "css parse")
+
+    # The free read was refused (a bot wall that serves browsers but not this server). Everything the
+    # page itself supplies — its logo, links, images, client logos and section order — comes from
+    # `tokens.html`, so without a page there is none of it, and the brand fallback below used to
+    # fill the logo from whatever its own reader was served: on a deployed run, the block page's
+    # robot illustration. Read the rendered page instead (1 credit, only in this case).
+    if (tokens is None or not tokens.available) and use_context_dev:
+        rendered_tokens, rendered_note = await _rendered_tokens(url)
+        if rendered_tokens is not None:
+            tokens = rendered_tokens
+            sources.append("css parse (rendered via Context.dev)")
+        if rendered_note:
+            notes.append(rendered_note)
 
     # Not read through `_ok`: `reference_images()` returns `None` (not a result) whenever Firecrawl
     # is unconfigured, and a `ReferenceImages` with no URLs is a real answer ("this page has no

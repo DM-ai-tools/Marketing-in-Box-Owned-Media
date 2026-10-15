@@ -496,7 +496,7 @@ async def test_brandfetch_fills_what_firecrawl_left_open(monkeypatch):
         return firecrawl_client.BrandTokens(source_url=url, primary_color="#123456")  # no logo
 
     async def bf_retrieve(domain):
-        return brandfetch_client.BrandRecord(domain=domain, logo_url="https://client.com/logo.png")
+        return brandfetch_client.BrandRecord(domain=domain, logo_url="https://cdn.brandfetch.io/trafficradius.com.au/logo.png")
 
     monkeypatch.setattr(firecrawl_client, "extract_brand_tokens", fc_extract)
     monkeypatch.setattr(brandfetch_client, "retrieve_brand", bf_retrieve)
@@ -506,7 +506,7 @@ async def test_brandfetch_fills_what_firecrawl_left_open(monkeypatch):
     assert design.available
     assert "brand fallback (firecrawl+brandfetch)" in design.sources
     assert "#123456" in design.design_md
-    assert "https://client.com/logo.png" in design.design_md
+    assert "https://cdn.brandfetch.io/trafficradius.com.au/logo.png" in design.design_md
 
 
 @pytest.mark.asyncio

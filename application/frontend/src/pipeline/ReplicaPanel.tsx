@@ -140,7 +140,7 @@ export function ManusPanel({ build, streaming }: { build?: ManusBuildEvent; stre
   if (!build) return null;
   const link = build.task_url ? (
     <a href={build.task_url} target="_blank" rel="noreferrer" className="underline">
-      Open the task in Manus
+ 
     </a>
   ) : null;
 

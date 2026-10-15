@@ -56,7 +56,17 @@ MEDIA_URL_PREFIX = "/media"
 
 
 def _public_base_url() -> str:
-    return os.environ.get(PUBLIC_BASE_URL_ENV, "").strip() or _DEFAULT_PUBLIC_BASE_URL
+    """`BACKEND_PUBLIC_URL`, else the public domain Railway injects into every service with one
+    (`RAILWAY_PUBLIC_DOMAIN`, this service's own address, so nothing is guessed), else the local
+    default. The Railway step exists because a deployed run was built with `BACKEND_PUBLIC_URL`
+    unset: every image in the page pointed at `127.0.0.1:8001` and none of them loaded."""
+    explicit = os.environ.get(PUBLIC_BASE_URL_ENV, "").strip()
+    if explicit:
+        return explicit
+    railway = os.environ.get("RAILWAY_PUBLIC_DOMAIN", "").strip().strip("/")
+    if railway:
+        return railway if railway.startswith("http") else f"https://{railway}"
+    return _DEFAULT_PUBLIC_BASE_URL
 
 
 def media_url(asset_id: uuid.UUID | str) -> str:
@@ -93,7 +103,8 @@ def public_base_url_problem() -> str | None:
     fix is a setting, and inventing one would hand out links to somebody else's domain.
     """
     env = (os.environ.get("APP_ENV") or "local").strip().lower()
-    if env == "production" and not os.environ.get(PUBLIC_BASE_URL_ENV, "").strip():
+    deployed = env == "production" or bool(os.environ.get("RAILWAY_ENVIRONMENT", "").strip())
+    if deployed and _public_base_url() == _DEFAULT_PUBLIC_BASE_URL:
         return (
             f"APP_ENV=production but {PUBLIC_BASE_URL_ENV} is not set: every generated image link will "
             f"point at {_DEFAULT_PUBLIC_BASE_URL}, which is unreachable outside this container. Set "

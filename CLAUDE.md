@@ -245,6 +245,33 @@ is actually still open, tries `app/services/firecrawl_client.py` (structured ext
   is `available=True` built from whatever this tier found — still real, measured values, never an
   invented palette.
 
+### A bot-checked reference page — read it rendered, never trust what the wall served
+
+A deployed Click Trends pillar page came out with a robot illustration as its logo, its body text in
+"font awesome 5 pro", its social links as plain words, and every image dead. One cause led to most
+of it, plus a missing setting:
+- **The site served the server a block page.** It was an ordinary 200 ("we suspect you are a
+  robot"), so neither the header check nor the meta-refresh check caught it.
+  `scraper.looks_like_block_page` now reads the content, but only on a page with little visible
+  text, because real pages load reCAPTCHA. `_fetch_html` raises on it.
+- **Nothing read the page another way.** The logo, links, images, structure and client logos all
+  come from `tokens.html`. When the free read fails, `capture_page_design` now reads the rendered
+  page through `context_dev.scrape_html`, costing 1 credit and only in that case (`_rendered_tokens`),
+  and refuses that page too if it is a block page.
+- **The fallback tier's logo is checked.** `_usable_fallback_logo` drops a URL naming a bot check
+  (robot, captcha, challenge, suspicion) and any logo not on the client's site or Brandfetch's CDN.
+  Firecrawl, served the same wall, had reported the robot SVG.
+- **Icon fonts are never a typeface.** `design_tokens.is_icon_font` filters the CSS parse, the
+  styleguide levels, the body face (the heaviest non-icon face) and the fallback fonts.
+- **Social links come with their icons.** `link_manifest.SOCIAL_ICONS` adds an inline SVG for each
+  platform the page actually links, under the Social profiles table, with the instruction to draw
+  icons, not words.
+- **Image links need a public base.** `media_storage._public_base_url` falls back to Railway's own
+  `RAILWAY_PUBLIC_DOMAIN` when `BACKEND_PUBLIC_URL` is unset. `RAILWAY_ENVIRONMENT` now also
+  counts as deployed for the startup error.
+- `DESIGN_CAPTURE_VERSION` is 5, so a run captured behind the wall re-captures on its next stage.
+  `tests/test_reference_fidelity.py` pins each cause.
+
 ### The two views — which stage gets which
 
 Set in `app/services/generation.py`; `PageDesignInput.sheet_for(asset_id)` picks between them.
