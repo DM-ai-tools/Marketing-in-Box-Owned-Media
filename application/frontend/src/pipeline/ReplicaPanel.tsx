@@ -205,62 +205,6 @@ export function ImageNotes({ notes }: { notes?: string[] }) {
   );
 }
 
-/** The outcome of a Refine made of edits. The draft was edited in place, so this is the only place
- * to learn that a requested change was not made — and, on "Fix with Refine", that the layout was
- * locked: anything that needed a layout change was left alone and is listed here, never improvised. */
-export function RevisionNotes({ report }: { report?: PipelineMessage["revisionReport"] }) {
-  if (!report) return null;
-  const { applied, rejected } = report;
-  const skipped = report.skipped ?? [];
-  const lock = report.layout_locked ? " Layout locked: only copy and links were changed." : "";
-  if (!rejected.length && !skipped.length) {
-    return (
-      <p data-revision-notes className="mt-3 text-[0.76rem] text-[var(--fg-muted)]">
-        Refined in place: {applied} {applied === 1 ? "edit" : "edits"} applied; everything else is unchanged.{lock}
-      </p>
-    );
-  }
-  return (
-    <div
-      data-revision-notes
-      className="mt-3 rounded-xl border px-3 py-2 text-[0.78rem]"
-      style={{ borderColor: "var(--color-signal-amber)" }}
-    >
-      <p className="font-semibold">
-        {applied} {applied === 1 ? "edit" : "edits"} applied
-        {rejected.length > 0 && `, ${rejected.length} not applied`}
-        {skipped.length > 0 && `, ${skipped.length} left for a layout change`}
-      </p>
-      {lock && <p className="mt-0.5 text-[var(--fg-muted)]">{lock.trim()}</p>}
-      {rejected.length > 0 && (
-        <ul className="mt-1 list-disc pl-4 text-[var(--fg-muted)]">
-          {rejected.map(([find, why], i) => (
-            <li key={`r${i}`}>
-              {find && <span className="font-mono text-[0.72rem]">“{find}”</span>} {why}
-            </li>
-          ))}
-        </ul>
-      )}
-      {skipped.length > 0 && (
-        <>
-          <p className="mt-1.5 font-medium">Not changed — these need the layout changed:</p>
-          <ul className="mt-0.5 list-disc pl-4 text-[var(--fg-muted)]">
-            {skipped.map(([finding, why], i) => (
-              <li key={`s${i}`}>
-                {finding}
-                {why ? ` — ${why}` : ""}
-              </li>
-            ))}
-          </ul>
-          <p className="mt-1 text-[var(--fg-faint)]">
-            To make one, use Refine and ask for that change in your own words, or re-run the stage.
-          </p>
-        </>
-      )}
-    </div>
-  );
-}
-
 function statusLine(status: string, template?: { available: boolean; reason?: string | null }): string {
   if (status === "template") return template?.available ? "Template captured" : `No template: ${template?.reason ?? "unavailable"}`;
   if (status === "assembling") return "Assembling…";

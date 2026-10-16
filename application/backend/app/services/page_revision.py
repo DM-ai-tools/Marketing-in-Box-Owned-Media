@@ -34,6 +34,7 @@ as before (`build_revision_prompt`); rewriting prose is what that request is for
 
 from __future__ import annotations
 
+import html
 import json
 import logging
 import re
@@ -307,6 +308,28 @@ def parse_skipped(raw: str) -> list[tuple[str, str]]:
     return out
 
 
+_ENTITY_FORMS: dict[str, str] = {
+    "&": r"&(?:amp;)?",
+    '"': r'(?:"|&quot;|&#34;|“|”|&ldquo;|&rdquo;)',
+    "“": r'(?:"|&quot;|“|&ldquo;)',
+    "”": r'(?:"|&quot;|”|&rdquo;)',
+    "'": r"(?:'|&#39;|&#039;|&apos;|’|‘|&rsquo;|&lsquo;)",
+    "’": r"(?:'|&#39;|&#039;|’|&rsquo;)",
+    "‘": r"(?:'|&#39;|&#039;|‘|&lsquo;)",
+    "—": r"(?:—|&mdash;|&#8212;)",
+    "–": r"(?:–|&ndash;|&#8211;)",
+    "<": r"(?:<|&lt;)",
+    ">": r"(?:>|&gt;)",
+}
+
+
+def _entity_tolerant(word: str) -> str:
+    """`word` as a pattern in which each character HTML can write as an entity matches both forms.
+    An entity already in `word` ("&amp;") is decoded first, so it matches the bare character too."""
+    plain = html.unescape(word)
+    return "".join(_ENTITY_FORMS.get(ch, re.escape(ch)) for ch in plain)
+
+
 def _locate(text: str, find: str) -> tuple[int, int] | str:
     """The one span `find` occupies in `text`, or why there is not exactly one.
 
@@ -324,7 +347,10 @@ def _locate(text: str, find: str) -> tuple[int, int] | str:
     if not words:
         return "is empty"
     # `\s*`, not `\s+`: a model often adds a line break between two tags the draft wrote touching.
-    pattern = re.compile(r"\s*".join(re.escape(word) for word in words))
+    # Each character that HTML may write as an entity matches either form: a finding quotes the page
+    # as it reads ("Trade & Distribution"), the draft holds it as written ("Trade &amp;
+    # Distribution"), and without this the fix was rejected as "not in the draft".
+    pattern = re.compile(r"\s*".join(_entity_tolerant(word) for word in words))
     matches = list(pattern.finditer(text))
     if len(matches) == 1:
         return matches[0].span()

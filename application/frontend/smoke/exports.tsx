@@ -22,7 +22,7 @@ import { AssetReader } from "../src/pipeline/AssetReader";
 import { GenerationStream } from "../src/pipeline/GenerationStream";
 import { fetchSlideDeck, streamGenerateStage, streamRefineStage, type ReplicaStreamEvent, type RevisionEditReport, type SlideDecksResponse } from "../src/pipeline/pipelineApi";
 import { nextReplicaState, usePipelineStore, type PipelineMessage } from "../src/pipeline/pipelineStore";
-import { ImageNotes, ReplicaPanel, RevisionNotes } from "../src/pipeline/ReplicaPanel";
+import { ImageNotes, ReplicaPanel } from "../src/pipeline/ReplicaPanel";
 import { useUiStore } from "../src/store/uiStore";
 
 let pass = 0;
@@ -249,26 +249,11 @@ await (async () => {
   ok("refine: sends the copy the page was built from", refineBody.source_copy === "THE CRO COPY");
   ok("refine: the edit report reaches the handler", reports.length === 1 && reports[0].applied === 2 && reports[0].rejected.length === 1);
   ok("refine: the edited page still arrives as the draft", revised === "The page, edited in place.");
-  const partial = renderToStaticMarkup(<RevisionNotes report={reports[0]} />);
-  ok("refine: an edit that did not land is named", partial.includes("2 edits applied, 1 not applied") && partial.includes("Old proof"));
-  const clean = renderToStaticMarkup(<RevisionNotes report={{ applied: 3, rejected: [], unreadable: false }} />);
-  ok("refine: a clean refine says the rest is unchanged", clean.includes("3 edits applied") && clean.includes("everything else is unchanged"));
-  const locked = renderToStaticMarkup(
-    <RevisionNotes
-      report={{
-        applied: 4,
-        rejected: [[".logo{width:160px}", "Not applied: it would change the page's layout (a section, image, icon, logo, class, style or the CSS)."]],
-        skipped: [["Fixed width 1200px on .container", "needs a CSS change"]],
-        unreadable: false,
-        layout_locked: true,
-      }}
-    />,
-  );
-  ok("fix with refine: says the layout was locked", locked.includes("Layout locked: only copy and links were changed."));
-  ok("fix with refine: names the edit refused for touching layout", locked.includes("would change the page") && locked.includes(".logo{width:160px}"));
-  ok("fix with refine: lists what it left for a layout change", locked.includes("1 left for a layout change") && locked.includes("Fixed width 1200px"));
   seed([gen({ id: "rf", assetId: "pillar_page", text: "A page.", revisionReport: reports[0] })]);
-  ok("refine: the report is on the card", renderToStaticMarkup(<GenerationStream />).includes("not applied"));
+  // The edit report is not shown on the card: operators read it as an error list for problems the
+  // card already reports elsewhere (image links, layout), and asked for it to be removed.
+  const refinedCard = renderToStaticMarkup(<GenerationStream />);
+  ok("refine: the edit report is not shown on the card", !refinedCard.includes("not applied") && !refinedCard.includes("data-revision-notes"));
 })();
 
 console.log(`exports: ${pass} passed, ${fails.length} failed`);

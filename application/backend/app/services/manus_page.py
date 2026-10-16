@@ -44,6 +44,13 @@ logger = logging.getLogger(__name__)
 #: The stages Manus builds. The pillar page is the one stage whose deliverable is a whole page.
 MANUS_PAGE_STAGES: frozenset[str] = frozenset({"pillar_page"})
 
+#: Every pillar page task is created in this Manus project, and only this one. Fixed by the
+#: product owner, not configurable: an env override would let a deployment file client pages under
+#: some other project. Checked live with `project.detail`: it exists on the account's key, has no
+#: project instruction, and its default connectors and skills apply to the task.
+MANUS_PROJECT_NAME = "MIAB - Landing Page"
+MANUS_PROJECT_ID = "mXepyiMV6XxnDz3oTcQ3kr"
+
 PAGE_FILE = "page.html"
 REPORT_FILE = "report.md"
 BRIEF_FILE = "brief.md"
@@ -209,7 +216,9 @@ async def build_page(
             yield _progress("resumed", task, brief="Reconnected to the build already running")
         else:
             try:
-                created = await client.create_task(build_content(brief, screenshot_urls), title=title)
+                created = await client.create_task(
+                    build_content(brief, screenshot_urls), title=title, project_id=MANUS_PROJECT_ID
+                )
             except ManusError as exc:
                 raise ManusPageError(str(exc)) from exc
             task = _Inflight(created.task_id, created.task_url, time.monotonic())

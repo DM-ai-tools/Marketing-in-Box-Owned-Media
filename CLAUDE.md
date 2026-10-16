@@ -182,7 +182,8 @@ asked for layout changes (a width, a sub-menu rule, a colour, an image source); 
 exactly where it said, and the CSS moved the logo and icons and swapped pictures between sections.
 An edit can land in the right place and still do the wrong thing, so the rule is on the outcome:
 - **Edits only.** The model returns `find`/`replace` JSON; `apply_edits` places each exactly once,
-  whitespace-tolerant. A missing or ambiguous `find` is reported and skipped, never guessed. One edit
+  whitespace- and entity-tolerant (a quoted `&`, `'` or `—` matches `&amp;`, `&rsquo;`, `&mdash;`
+  in the page; without it, fixes were rejected as "not in the draft"). A missing or ambiguous `find` is reported and skipped, never guessed. One edit
   is capped at `MAX_EDIT_SHARE` of the draft, and all edits together at `MAX_TOTAL_SHARE`. An
   unreadable reply returns the draft unchanged with a note, and never falls back to a rewrite.
 - **The layout lock (every "Fix with Refine", any asset).** `layout_fingerprint` is the skeleton:
@@ -198,8 +199,10 @@ An edit can land in the right place and still do the wrong thing, so the rule is
 - An ordinary Refine of prose is still a full revision (`build_revision_prompt`).
 - The reviser gets the page's own copy (the card's `improved_page_content` as `source_copy`, else the
   run's CRO rewrite) for design-language stages, and DESIGN.md for any draft holding a page.
-- The stream sends `revision_edits` (applied, rejected, skipped, layout_locked), shown on the new card
-  by `RevisionNotes`, then the edited document as ordinary deltas.
+- The stream sends `revision_edits` (applied, rejected, skipped, layout_locked), then the edited
+  document as ordinary deltas. The report is kept on the message (`revisionReport`) but **not shown
+  on the card**: operators read the list of refused edits as errors, and asked for it removed.
+  `smoke/exports.tsx` pins that the card does not render it.
 
 `tests/test_page_revision.py` pins it, including a CSS, class, image, icon, logo, section-move and
 heading-level edit each being refused under the lock.
@@ -621,6 +624,12 @@ CRO, stays on Claude.
   tasks, reads `task.detail` and `task.listMessages`, and downloads attachments. File URLs are signed
   and are fetched without the key. Every failure is one sentence: a rejected key (401), out of
   credits (402/403), or rate-limited (429).
+- **One Manus project, always.** Every pillar page task is created in **MIAB - Landing Page**
+  (`mXepyiMV6XxnDz3oTcQ3kr`), as `project_id` on `task.create` (`manus_page.MANUS_PROJECT_ID`).
+  - It is a constant, not an env setting, so no deployment can file client pages under another
+    project.
+  - The project has no instruction, but its default connectors and skills apply to the task.
+  - `test_every_pillar_page_task_is_created_in_the_miab_landing_page_project` pins it.
 - **`app/services/manus_page.py` builds the page.**
   - **Same brief as Claude.** `generation.build_agent_brief` is built from the same `_prompt_parts`
     plus the generated-image block, so the two builders cannot be given different pages to build.

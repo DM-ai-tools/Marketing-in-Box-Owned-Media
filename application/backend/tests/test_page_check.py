@@ -161,6 +161,24 @@ def test_a_child_scoped_menu_rule_with_no_tabindex_is_clean(manifest) -> None:
     assert not [i for i in _issues(raw, manifest) if "menu" in i.why or "tabindex" in i.why]
 
 
+def test_a_list_rule_outside_the_menu_is_not_a_sub_menu_problem(manifest) -> None:
+    # A real Click Trends pillar page: `.toc ul` and `.footer-column ul` were reported as must-fix
+    # "every sub-menu shows permanently", and "Fix with Refine" then tried to rewrite the CSS.
+    toc = '<div class="toc"><ul><li><a href="#a">A</a></li></ul></div>'
+    footer = '<div class="footer-column"><ul><li><a href="/x/">X</a></li></ul></div>'
+    css = (
+        _DROPDOWN_CSS.format(top="nav.main-nav > ul")
+        + ".toc ul{display:flex;flex-wrap:wrap}.footer-column ul{display:grid}.scope-card ul{display:grid}"
+    )
+    raw = _page(manifest, body_extra=_DROPDOWN.format(tab="") + toc + footer, css=css)
+    assert not [i for i in _issues(raw, manifest) if "shows permanently" in i.why]
+
+
+def test_a_rule_through_the_menus_own_ancestors_is_still_caught(manifest) -> None:
+    raw = _page(manifest, body_extra=_DROPDOWN.format(tab=""), css=_DROPDOWN_CSS.format(top=".main-nav li ul"))
+    assert [i for i in _issues(raw, manifest) if "shows permanently" in i.why]
+
+
 def test_without_a_manifest_the_link_rules_do_not_pretend_to_pass(manifest) -> None:
     issues, used = page_check.check_page(_page(manifest), None, _DESIGN)
     assert "the reference page's links" not in used

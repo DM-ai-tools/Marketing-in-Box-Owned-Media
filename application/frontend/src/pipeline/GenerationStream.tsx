@@ -39,7 +39,7 @@ import { PlanSubServiceCard } from "./PlanSubServiceCard";
 import { SecondaryKeywordCard } from "./SecondaryKeywordCard";
 import { IndustryGuessOptions, StageAdvisoryCard } from "./IndustryCards";
 import { AssetCheckPanel } from "./AssetCheckPanel";
-import { ImageNotes, ManusPanel, ReplicaPanel, RevisionNotes } from "./ReplicaPanel";
+import { ImageNotes, ManusPanel, ReplicaPanel } from "./ReplicaPanel";
 import { NEW_PAGE_OPTIONS, PHASE_META, stageAt, stagesFor, totalStagesFor } from "./pipelineData";
 import { PipelineInputBar } from "./PipelineInputBar";
 import {
@@ -802,7 +802,6 @@ function GenerationCard({ message }: { message: PipelineMessage }) {
       {!message.superseded && <ManusPanel build={message.manus} streaming={message.streaming} />}
       <GenerationBody message={message} label={stage?.asset.label ?? "Generated page"} />
       {!message.superseded && <ImageNotes notes={message.imageNotes} />}
-      {!message.superseded && <RevisionNotes report={message.revisionReport} />}
       {!message.superseded && <ReplicaPanel message={message} label={stage?.asset.label ?? "Generated page"} />}
       {/* Above Approve, never instead of it: the check advises, the operator decides. */}
       {!message.streaming && !message.superseded && message.check && checkAppliesTo(message.phase, message.assetId) && (

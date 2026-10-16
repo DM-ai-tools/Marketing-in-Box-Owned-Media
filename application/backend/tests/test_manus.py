@@ -98,12 +98,15 @@ def _transport(calls: list[httpx.Request], *, status_code: int = 200, create_bod
 async def test_create_sends_the_key_header_and_no_questions() -> None:
     calls: list[httpx.Request] = []
     client = ManusClient("k", transport=_transport(calls))
-    task = await client.create_task([manus_client.text_part("hi")], title="Pillar Page — Acme")
+    task = await client.create_task([manus_client.text_part("hi")], title="Pillar Page — Acme", project_id="p1")
+    await client.create_task([manus_client.text_part("hi")])
     await client.aclose()
     assert task.task_id == "t1"
     body = json.loads(calls[0].content)
     assert calls[0].headers["x-manus-api-key"] == "k"
     assert body["interactive_mode"] is False and body["title"] == "Pillar Page — Acme"
+    assert body["project_id"] == "p1"
+    assert "project_id" not in json.loads(calls[1].content), "no project is sent unless one is named"
 
 
 @pytest.mark.asyncio
@@ -159,12 +162,14 @@ class FakeManus:
         self.files = files if files is not None else {"page.html": PAGE, "report.md": REPORT}
         self.error = error
         self.created = 0
+        self.project_ids: list[str | None] = []
         self.sent: list[str] = []
         self.stopped = False
         FakeManus.instances.append(self)
 
-    async def create_task(self, content: list[dict[str, Any]], **_: Any) -> manus_client.CreatedTask:
+    async def create_task(self, content: list[dict[str, Any]], **kwargs: Any) -> manus_client.CreatedTask:
         self.created += 1
+        self.project_ids.append(kwargs.get("project_id"))
         return manus_client.CreatedTask("t1", "https://manus.im/app/t1")
 
     async def detail(self, task_id: str) -> TaskDetail:
@@ -212,6 +217,14 @@ async def test_a_finished_task_becomes_the_stage_document() -> None:
     assert result["type"] == "manus_result" and result["credits"] == 10
     assert "```html\n<!doctype html>" in result["document"] and "PART 4" in result["document"]
     assert not manus_page._inflight
+
+
+@pytest.mark.asyncio
+async def test_every_pillar_page_task_is_created_in_the_miab_landing_page_project() -> None:
+    fake = FakeManus(["stopped"])
+    await _run(fake)
+    assert fake.project_ids == ["mXepyiMV6XxnDz3oTcQ3kr"]
+    assert (manus_page.MANUS_PROJECT_NAME, manus_page.MANUS_PROJECT_ID) == ("MIAB - Landing Page", "mXepyiMV6XxnDz3oTcQ3kr")
 
 
 @pytest.mark.asyncio

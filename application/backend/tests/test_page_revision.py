@@ -283,3 +283,21 @@ def test_a_business_fix_on_a_page_is_locked_end_to_end(monkeypatch: pytest.Monke
     assert report["skipped"] == [["Fixed width", "needs a CSS change"]]
     revised = "".join(e["text"] for e in events if e["type"] == "delta")
     assert ".logo{width:160px}" in revised and "non-bank lenders" in revised
+
+
+_FILLER = "".join(f"<p>Section {i} copy that stays exactly as it is.</p>" for i in range(60))
+
+
+def test_a_quote_with_a_plain_ampersand_finds_the_entity_in_the_page() -> None:
+    # A real "Fix with Refine": the finding quoted the heading as it reads, the page holds the
+    # entity, and the fix was rejected as "the text to change is not in the draft".
+    page = "<section><h3>Trade &amp; Distribution Business — Melbourne, VIC</h3><p>Copy.</p></section>" + _FILLER
+    revised, report = R.apply_edits(page, [R.Edit("<h3>Trade & Distribution Business — Melbourne, VIC</h3>", "<h3>Trade &amp; Distribution</h3>")])
+    assert report.applied == 1 and not report.rejected
+    assert "<h3>Trade &amp; Distribution</h3>" in revised
+
+
+def test_curly_and_straight_quotes_match_either_way() -> None:
+    page = "<p>We&rsquo;re based in Melbourne.</p>" + _FILLER
+    revised, report = R.apply_edits(page, [R.Edit("<p>We're based in Melbourne.</p>", "<p>Melbourne-based.</p>")])
+    assert report.applied == 1 and revised == "<p>Melbourne-based.</p>" + _FILLER

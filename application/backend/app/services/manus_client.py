@@ -218,6 +218,7 @@ class ManusClient:
         title: str = "",
         profile: str | None = None,
         hide_in_task_list: bool = False,
+        project_id: str | None = None,
     ) -> CreatedTask:
         payload: dict[str, Any] = {
             "message": {"content": content},
@@ -225,6 +226,9 @@ class ManusClient:
             "interactive_mode": False,
             "hide_in_task_list": hide_in_task_list,
         }
+        if project_id:
+            # Files the task under that Manus project and applies its instruction and defaults.
+            payload["project_id"] = project_id
         if title:
             payload["title"] = title[:120]
         body = await self._json("task.create", await self._http.post("task.create", json=payload))

@@ -404,6 +404,34 @@ def _sub_menu_always_open(css: str, sub_menus: list[Node]) -> list[tuple[str, st
     does not — (0,1,2) beats (0,1,0) — and the page renders with every dropdown showing.
     """
     menu_classes = {cls for menu in sub_menus for cls in menu.classes}
+    # What a selector's ancestor part can name on the way to a sub-menu. A rule only threatens the
+    # sub-menus when every compound before its last one matches something above one of them:
+    # `.toc ul` and `.footer-column ul` were reported as must-fix on a real pillar page, though
+    # neither can reach the header's dropdowns, and "Fix with Refine" then tried to rewrite the CSS.
+    ancestry: list[set[str]] = []
+    for menu in sub_menus:
+        names: set[str] = set()
+        node = menu.parent
+        while node is not None:
+            if node.tag:
+                names.add(node.tag)
+            names.update(f".{c}" for c in node.classes)
+            if node.attrs.get("id"):
+                names.add(f"#{node.attrs['id']}")
+            node = node.parent
+        ancestry.append(names)
+
+    def reaches_a_sub_menu(selector: str) -> bool:
+        head = [c for c in re.split(r"[\s>+~]+", selector)[:-1] if c]
+        if not head:
+            return True
+        for names in ancestry:
+            if all(
+                any(part in names for part in re.findall(r"[.#]?[A-Za-z_][\w-]*", compound) if part) for compound in head
+            ):
+                return True
+        return False
+
     show_all: list[tuple[int, str, tuple[int, int, int]]] = []
     hide: list[tuple[int, tuple[int, int, int]]] = []
     for order, (selectors, declarations) in enumerate(_RULE_BODY.findall(css)):
@@ -413,7 +441,12 @@ def _sub_menu_always_open(css: str, sub_menus: list[Node]) -> list[tuple[str, st
         for selector in (re.sub(r"\s*([>+~])\s*", r"\1", " ".join(s.split())) for s in selectors.split(",")):
             if not selector or selector.startswith("@"):
                 continue
-            if displays[-1] != "none" and _LIST_TAIL.search(selector) and not _OPEN_STATE.search(selector):
+            if (
+                displays[-1] != "none"
+                and _LIST_TAIL.search(selector)
+                and not _OPEN_STATE.search(selector)
+                and reaches_a_sub_menu(selector)
+            ):
                 show_all.append((order, selector, _specificity(selector)))
             elif displays[-1] == "none" and not _OPEN_STATE.search(selector):
                 last = re.split(r"[\s>+~]+", selector)[-1]
