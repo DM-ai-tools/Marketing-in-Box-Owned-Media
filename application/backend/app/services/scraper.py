@@ -512,7 +512,10 @@ async def fetch_asset(
 
             try:
                 response = await client.get(current, headers=headers(_USER_AGENT))
-                if response.status_code in _BOT_WALL_STATUSES:
+                # SiteGround answers the honest agent with a 200/202 challenge rather than a wall
+                # status, so the challenge header earns the browser retry too.
+                challenged = any(h in {k.lower() for k in response.headers} for h in _CHALLENGE_HEADERS)
+                if response.status_code in _BOT_WALL_STATUSES or challenged:
                     response = await client.get(current, headers=headers(_BROWSER_USER_AGENT))
             except httpx.TimeoutException as exc:
                 raise ScrapeError(f"{current} did not respond within {int(_TIMEOUT_SECONDS)} seconds.") from exc

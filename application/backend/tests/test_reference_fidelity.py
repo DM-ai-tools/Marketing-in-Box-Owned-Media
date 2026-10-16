@@ -8,7 +8,10 @@ Each test is one cause of a deployed Click Trends pillar page that came out wron
   client logos and section order the page supplies were all missing;
 - the body text was set in an icon font ("font awesome 5 pro");
 - social links were plain words because the brief had no icons to draw;
-- every image pointed at 127.0.0.1 because `BACKEND_PUBLIC_URL` was unset on Railway.
+- every image pointed at 127.0.0.1 because `BACKEND_PUBLIC_URL` was unset on Railway;
+- the logo was the WordPress theme's demo mark ("Aimo", `themes/aimo/assets/img/logo.png`, left in
+  the hidden mobile-header slot with `alt="Click Trends"`), while the real one — an upload inside
+  `div.pxl-logo` whose alt text says "preview" — was never even a candidate.
 """
 from __future__ import annotations
 
@@ -28,7 +31,12 @@ ROBOT_PAGE = """<!doctype html><html><head><title>Security check</title></head><
 REAL_PAGE = (
     "<!doctype html><html><head><title>AI-Powered SEO Services in Melbourne | Click Trends</title>"
     '<script src="https://www.google.com/recaptcha/api.js"></script></head><body>'
-    '<header><a href="/"><img src="/wp-content/themes/aimo/assets/img/logo.png" alt="Click Trends"></a>'
+    '<header><div class="pxl-logo"> <a href="https://clicktrends.com.au/"> <img width="856" height="376" '
+    'src="https://clicktrends.com.au/wp-content/uploads/2025/05/image-1-2.png" class="attachment-full" '
+    'alt="Mobile-friendly Magento store preview"> </a></div>'
+    '<div class="pxl-logo-mobile pxl-hide-xl"><a class="pxl-logo--dark" href="https://clicktrends.com.au/" '
+    'title="Click Trends" rel="home"><img src="https://clicktrends.com.au/wp-content/themes/aimo/assets/img/logo.png" '
+    'alt="Click Trends"></a></div>'
     '<nav><a href="/about-us/">About Us</a><a href="/seo/">SEO</a></nav></header><main><h1>Sick Of SEO</h1>'
     + "<p>" + " ".join(["Real copy about search engine optimisation for Melbourne businesses."] * 60) + "</p>"
     + "</main><footer>"
@@ -64,7 +72,8 @@ def test_a_real_page_that_loads_recaptcha_is_not_a_block_page() -> None:
     ("logo", "kept"),
     [
         ("https://d1rozh26tys225.cloudfront.net/robot-suspicion.svg", False),
-        ("https://clicktrends.com.au/wp-content/themes/aimo/assets/img/logo.png", True),
+        ("https://clicktrends.com.au/wp-content/themes/aimo/assets/img/logo.png", False),
+        ("https://clicktrends.com.au/wp-content/uploads/2025/05/image-1-2.png", True),
         ("https://www.clicktrends.com.au/logo.svg", True),
         ("https://cdn.brandfetch.io/clicktrends.com.au/logo.png", True),
         ("https://some-other-site.com/logo.png", False),
@@ -73,6 +82,50 @@ def test_a_real_page_that_loads_recaptcha_is_not_a_block_page() -> None:
 )
 def test_a_fallback_logo_must_be_the_clients(logo: str, kept: bool) -> None:
     assert (design_md._usable_fallback_logo(logo, URL) == logo) is kept
+
+
+# ---------- the page's own logo, never the theme's ----------
+
+REAL_LOGO = "https://clicktrends.com.au/wp-content/uploads/2025/05/image-1-2.png"
+
+
+def test_the_header_logo_is_the_upload_not_the_themes_demo_mark() -> None:
+    from app.services.design_tokens import _image_candidates
+
+    candidates = _image_candidates(REAL_PAGE, URL)
+    assert candidates and candidates[0].url == REAL_LOGO
+    assert not any("/themes/" in c.url for c in candidates)
+
+
+def test_the_logo_placement_names_the_upload_too() -> None:
+    from app.services.page_structure import extract_page_structure
+
+    placement = extract_page_structure(REAL_PAGE, URL).logo_placement
+    assert REAL_LOGO in placement and "aimo" not in placement
+
+
+@pytest.mark.asyncio
+async def test_a_bot_walled_logo_check_keeps_the_file(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.services import design_tokens
+    from app.services.scraper import ScrapeError
+
+    async def challenged(url, **_k):
+        raise ScrapeError(f"{url} challenged the request instead of serving the file.")
+
+    monkeypatch.setattr(design_tokens, "fetch_asset", challenged)
+    logo = await design_tokens.find_logo(REAL_PAGE, URL)
+    assert logo is not None and logo.url == REAL_LOGO and not logo.verified
+    sheet = " ".join(design_md._logo_lines(DesignTokens(source_url=URL, available=True, logo=logo)))
+    assert "bot protection refused" in sheet
+
+
+def test_a_rate_limited_capture_is_re_read() -> None:
+    from app.routers.pipeline import DESIGN_CAPTURE_VERSION, _reuse_stored_design
+
+    stored = {"source_url": URL, "capture_version": DESIGN_CAPTURE_VERSION, "notes": []}
+    assert _reuse_stored_design(stored, URL)[0]
+    stored["notes"] = ["A screenshot failed: Context.dev is rate-limiting this key; the retries were used up."]
+    assert not _reuse_stored_design(stored, URL)[0]
 
 
 # ---------- type ----------

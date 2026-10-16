@@ -272,7 +272,21 @@ of it, plus a missing setting:
 - **Image links need a public base.** `media_storage._public_base_url` falls back to Railway's own
   `RAILWAY_PUBLIC_DOMAIN` when `BACKEND_PUBLIC_URL` is unset. `RAILWAY_ENVIRONMENT` now also
   counts as deployed for the startup error.
-- `DESIGN_CAPTURE_VERSION` is 5, so a run captured behind the wall re-captures on its next stage.
+- **A theme's demo mark is never the logo.** Click Trends runs the "Aimo" WordPress theme, and its
+  demo `wp-content/themes/aimo/assets/img/logo.png` sits in the hidden mobile-header slot with
+  `alt="Click Trends"`. It won every logo check, and the pillar page read "Aimo".
+  `design_tokens.is_theme_bundled_asset` (`/wp-content/themes|plugins/`) now rejects such a file in
+  the finder, in `page_structure._logo_placement` and in `_usable_fallback_logo`.
+  - An `<img>` also counts as the logo when its wrapper's class says so or it is the home link's
+    only child. The real mark (`div.pxl-logo`) has `alt="…store preview"`.
+  - The `review` anti-hint no longer matches "preview".
+- **A bot wall does not unmake a logo.** `fetch_asset` retries a challenge header (SiteGround
+  answers 200/202) with the browser agent. A still-challenged logo is kept as `verified=False`, URL
+  only, after any candidate that could be fetched.
+- **A rate-limited capture is re-read** on the next stage (`_TRANSIENT_CAPTURE_FAILURE` in
+  `_reuse_stored_design`), rather than serving a sheet with no styleguide or screenshots for the
+  life of the run.
+- `DESIGN_CAPTURE_VERSION` is 6, so a run holding the theme's mark re-captures on its next stage.
   `tests/test_reference_fidelity.py` pins each cause.
 
 ### The two views — which stage gets which

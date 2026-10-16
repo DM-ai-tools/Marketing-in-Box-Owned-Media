@@ -2072,7 +2072,15 @@ DESIGN_TOKENS_CONTEXT_KEY = "brand_design_tokens"
 #   5 — a bot-checked free read is re-read rendered (so the logo, links, images and client logos are
 #       the page's own), no bot-check logo or icon font, and social icons in `## Links`. A run
 #       captured at 4 behind a bot wall holds a robot illustration as its logo.
-DESIGN_CAPTURE_VERSION = 5
+#   6 — never a theme's bundled demo mark (`/wp-content/themes/…`) as the logo, an image counts as
+#       the logo when its wrapper or home link says so, and a bot-walled logo check keeps the file.
+#       A Click Trends run captured at 5 holds the "Aimo" theme's demo logo.
+DESIGN_CAPTURE_VERSION = 6
+
+# A capture whose Context.dev calls were rate-limited is missing its styleguide and screenshots for
+# a reason that passes in seconds. Served for the life of the run, it left every later stage building
+# without them, so the next stage re-reads instead (`context_dev._fail`'s wording).
+_TRANSIENT_CAPTURE_FAILURE = "is rate-limiting this key"
 
 # In preference order. The parent page first — a company's brand is most concretely expressed on
 # the page actually being extended, and a home page can differ from a service page's template.
@@ -2193,6 +2201,8 @@ def _reuse_stored_design(value: dict, url: str | None) -> tuple[bool, str]:
             f"the stored sheet is a v{stored_version} capture and the current format is "
             f"v{DESIGN_CAPTURE_VERSION}"
         )
+    if any(_TRANSIENT_CAPTURE_FAILURE in str(note) for note in value.get("notes") or ()):
+        return False, "the stored capture was rate-limited by Context.dev and is missing parts"
     return True, ""
 
 

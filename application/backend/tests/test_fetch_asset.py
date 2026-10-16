@@ -87,3 +87,21 @@ async def test_the_design_reader_uses_it_for_stylesheets(monkeypatch):
     texts, _notes = await design_tokens._fetch_stylesheets(["https://site.example/a.css"], "https://site.example/")
     assert seen == ["https://site.example/a.css"]
     assert texts == [":root{--brand:#e8590c}"]
+
+
+@pytest.mark.asyncio
+async def test_a_challenged_asset_is_retried_with_the_browser_agent(monkeypatch):
+    # SiteGround challenges the honest agent with an ordinary 200/202, not a wall status, so the
+    # challenge header alone has to earn the retry. Without it every Click Trends logo check failed.
+    agents: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        agents.append(request.headers["user-agent"])
+        if len(agents) == 1:
+            return httpx.Response(202, text="<meta http-equiv=refresh>", headers={"SG-Captcha": "challenge"})
+        return httpx.Response(200, content=b"\x89PNG", headers={"content-type": "image/png"})
+
+    _install(monkeypatch, handler)
+    logo = await scraper.fetch_asset("https://site.example/logo.png", accept="image/*")
+    assert agents == [scraper._USER_AGENT, scraper._BROWSER_USER_AGENT]
+    assert logo.content == b"\x89PNG"

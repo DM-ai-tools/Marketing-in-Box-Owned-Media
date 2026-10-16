@@ -602,10 +602,31 @@ _LOGO_HINT = re.compile(r"\blogo\b|\bbrand(?:mark|ing)?\b|\bwordmark\b|site-?tit
 # in its own markup just as loudly as the real one does.
 _LOGO_ANTI_HINT = re.compile(
     r"sprite|placeholder|avatar|payment|badge|award|flag|"
-    r"partner|client|customer|testimonial|review|press|featured|"
+    # `(?<!p)review`: a review badge, not the word "preview" — Click Trends' real header logo has
+    # `alt="Mobile-friendly Magento store preview"`, and the substring threw it out.
+    r"partner|client|customer|testimonial|(?<!p)review|press|featured|"
     r"trusted|integration|sponsor|showcase|carousel|slider|as[-\s]seen",
     re.I,
 )
+
+# A file the site's *theme or plugin* ships is the theme vendor's, not the client's. Click Trends runs
+# the "Aimo" WordPress theme, whose demo mark `themes/aimo/assets/img/logo.png` still sits in the
+# unused mobile-header slot with `alt="Click Trends"` — header, named, on the client's own domain,
+# so it outranked everything and a Click Trends pillar page shipped reading "Aimo". A client's own
+# logo is uploaded (`/wp-content/uploads/`), never written into the theme folder.
+_THEME_BUNDLED = re.compile(r"/wp-content/(?:themes|plugins)/", re.I)
+
+
+def is_theme_bundled_asset(url: str | None) -> bool:
+    """True when `url` is a file a WordPress theme or plugin ships — never the client's own mark."""
+    return bool(url) and bool(_THEME_BUNDLED.search(url))
+
+
+# An `<img>` labelled only with junk (`alt="Mobile-friendly Magento store preview"`) is still the
+# logo when what wraps it says so. Page builders put the signal on the wrapper: `div.pxl-logo`,
+# `a.custom-logo-link`, `div.site-logo`. Read back this far before the tag.
+_WRAPPER_LOOKBACK = 400
+_OPEN_TAG = re.compile(r"<(div|a|span|figure|p|h1)\b[^>]*>", re.I)
 
 # Data URIs are embedded so a generated single-file page needs no external asset. Kept small on
 # purpose: base64 costs ~1.33 bytes per byte and lands in the prompt of every HTML stage, so a
@@ -640,6 +661,10 @@ class Logo:
     # Inline SVG markup, when the logo was an inline <svg> rather than a file. Best case: it is
     # already self-contained, scalable, and recolourable.
     svg_markup: str | None = None
+    # False when the site's bot wall refused the check. The file is still the page's own logo
+    # reference — a visitor's browser loads it — so it is kept, but only after any candidate that
+    # could actually be fetched.
+    verified: bool = True
 
 
 def _attrs(tag: str) -> dict[str, str]:
@@ -713,13 +738,31 @@ def _image_candidates(html: str, base_url: str) -> list[Logo]:
     header_html = first_header.group(0) if first_header else ""
     excluded = _excluded_spans(html)
     candidates: list[tuple[int, int, Logo]] = []
+    home = urljoin(base_url, "/").rstrip("/")
 
-    def consider(tag: str, in_header: bool, position: int) -> None:
+    def wrapped_as_logo(context: str) -> bool:
+        """Whether the tags just before an image say it is the logo: a wrapper whose class or id
+        names one, or a link to the site's home page directly around it."""
+        opens = list(_OPEN_TAG.finditer(context))
+        for match in opens[-3:]:
+            attrs = _attrs(match.group(0))
+            label = f"{attrs.get('class', '')} {attrs.get('id', '')}"
+            if _LOGO_HINT.search(label) and not _LOGO_ANTI_HINT.search(label):
+                return True
+        if opens and opens[-1].group(1).lower() == "a" and not context[opens[-1].end():].strip():
+            href = _attrs(opens[-1].group(0)).get("href", "")
+            if href and urljoin(base_url, href).rstrip("/") == home:
+                return True
+        return False
+
+    def consider(tag: str, in_header: bool, position: int, context: str = "") -> None:
         attrs = _attrs(tag)
         haystack = " ".join(
             attrs.get(key, "") for key in ("class", "id", "alt", "src", "title", "data-src")
         )
         if _LOGO_ANTI_HINT.search(haystack):
+            return
+        if is_theme_bundled_asset(attrs.get("src") or attrs.get("data-src") or attrs.get("srcset")):
             return
         # A logo inside a customer/press/partner block belongs to somebody else, however
         # innocent its own markup looks.
@@ -734,7 +777,7 @@ def _image_candidates(html: str, base_url: str) -> list[Logo]:
             if not src.startswith("data:"):
                 return
 
-        named = bool(_LOGO_HINT.search(haystack))
+        named = bool(_LOGO_HINT.search(haystack)) or wrapped_as_logo(context)
         # Header + named is the strong case. Named alone is next (footer logos are still logos).
         # Header alone is weak but better than nothing on a site whose markup says nothing.
         score = 0 if (in_header and named) else 1 if named else 3 if in_header else 9
@@ -756,11 +799,15 @@ def _image_candidates(html: str, base_url: str) -> list[Logo]:
             )
         )
 
+    header_at = first_header.start() if first_header else 0
     for match in _IMG_TAG.finditer(header_html):
-        consider(match.group(0), in_header=True, position=match.start())
+        at = header_at + match.start()
+        consider(match.group(0), in_header=True, position=at,
+                 context=html[max(0, at - _WRAPPER_LOOKBACK):at])
     for match in _IMG_TAG.finditer(html):
         if match.group(0) not in header_html:
-            consider(match.group(0), in_header=False, position=match.start())
+            consider(match.group(0), in_header=False, position=match.start(),
+                     context=html[max(0, match.start() - _WRAPPER_LOOKBACK):match.start()])
 
     # Inline SVG in the branding block: already self-contained and recolourable, so it outranks a
     # raster file when it is genuinely the mark.
@@ -775,7 +822,15 @@ def _image_candidates(html: str, base_url: str) -> list[Logo]:
         )
 
     candidates.sort(key=lambda row: (row[0], row[1]))
-    return [logo for _score, _position, logo in candidates]
+    # A sticky header repeats the same mark; one try per file, so a copy cannot use up `find_logo`'s budget.
+    seen: set[str] = set()
+    unique: list[Logo] = []
+    for _score, _position, logo in candidates:
+        key = logo.svg_markup or logo.url
+        if key not in seen:
+            seen.add(key)
+            unique.append(logo)
+    return unique
 
 
 def _icon_candidates(html: str, base_url: str) -> list[Logo]:
@@ -791,7 +846,7 @@ def _icon_candidates(html: str, base_url: str) -> list[Logo]:
         if "icon" not in rel:
             continue
         href = attrs.get("href")
-        if not href:
+        if not href or is_theme_bundled_asset(href):
             continue
         sizes = attrs.get("sizes", "")
         try:
@@ -827,6 +882,9 @@ async def _measure_logo(logo: Logo, base_url: str) -> Logo:
         payload = fetched.content
     except Exception as exc:  # noqa: BLE001 — an unreachable logo is simply not a logo
         logger.info("Could not fetch logo %s (%s)", logo.url, exc)
+        if isinstance(exc, ScrapeError) and re.search(r"challenged|blocked an automated", str(exc)):
+            # A bot wall is not evidence the file is missing; a 404 is.
+            return replace(logo, byte_size=None, mime_type=None, verified=False)
         return replace(logo, byte_size=None, mime_type=None, url="")
 
     mime = fetched.content_type
@@ -851,8 +909,12 @@ async def find_logo(html: str, base_url: str) -> Logo | None:
     one returned is one that actually exists and actually is an image.
     """
     candidates = _image_candidates(html, base_url) + _icon_candidates(html, base_url)
+    unverified: Logo | None = None
     for candidate in candidates[:6]:
         measured = await _measure_logo(candidate, base_url)
+        if not measured.verified:
+            unverified = unverified or measured
+            continue
         if measured.url or measured.svg_markup:
             logger.info(
                 "Logo found via %s: %s (%s, %s bytes, embedded=%s)",
@@ -863,7 +925,9 @@ async def find_logo(html: str, base_url: str) -> Logo | None:
                 bool(measured.data_uri),
             )
             return measured
-    return None
+    if unverified is not None:
+        logger.info("Logo kept unverified (the site blocked the check): %s", unverified.url[:90])
+    return unverified
 
 
 @dataclass

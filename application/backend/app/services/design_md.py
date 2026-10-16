@@ -77,6 +77,7 @@ from app.services.design_tokens import (
     extract_design_tokens_from_html,
     is_icon_font,
     is_neutral,
+    is_theme_bundled_asset,
     tokens_to_css,
 )
 from app.services.scraper import looks_like_block_page
@@ -463,7 +464,8 @@ def _usable_fallback_logo(logo_url: str | None, page_url: str) -> str | None:
     file on another site that is not a known brand-asset host."""
     if not logo_url:
         return None
-    if _NOT_A_LOGO.search(logo_url):
+    if _NOT_A_LOGO.search(logo_url) or is_theme_bundled_asset(logo_url):
+        # A theme's demo mark is on the client's own host and is still not the client's logo.
         return None
     logo_host = _host(logo_url)
     site = _host(page_url)
@@ -775,6 +777,12 @@ def _logo_lines(tokens: DesignTokens | None, fallback: "BrandFallback | None" = 
             "```html",
             f'<img src="{logo.data_uri}" alt="{alt}">',
             "```",
+        ]
+    elif not logo.verified:
+        out += [
+            "",
+            "This is the file the page itself shows; the site's bot protection refused our own "
+            "check of it, so it could not be embedded. Use the URL above.",
         ]
     else:
         out += [

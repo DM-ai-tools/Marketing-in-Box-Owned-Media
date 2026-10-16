@@ -54,6 +54,7 @@ import re
 from dataclasses import dataclass, field
 from urllib.parse import urljoin, urlparse
 
+from app.services.design_tokens import is_theme_bundled_asset
 from app.services.html_dom import Document, Node, parse_html, render
 
 logger = logging.getLogger(__name__)
@@ -825,16 +826,30 @@ def _logo_placement(document: Document, base_url: str) -> str:
     header = document.body.find("header")
     scope = header if header is not None else document.body
 
+    def wrapper_says_logo(node: Node) -> bool:
+        holder = node.parent
+        for _ in range(3):
+            if holder is None:
+                return False
+            label = f"{holder.attr('class')} {holder.attr('id')}".lower()
+            if "logo" in label or "brand" in label:
+                return True
+            holder = holder.parent
+        return False
+
+    # A theme's bundled demo mark is never the client's (`design_tokens.is_theme_bundled_asset`).
+    images = [
+        node for node in scope.descendants()
+        if node.tag in {"img", "svg"} and not is_theme_bundled_asset(node.attr("src"))
+    ]
     candidate: Node | None = None
-    for node in scope.descendants():
-        if node.tag not in {"img", "svg"}:
-            continue
+    for node in images:
         haystack = f"{node.attr('alt')} {node.attr('src')} {node.attr('class')} {node.attr('id')}".lower()
-        if "logo" in haystack or "brand" in haystack:
+        if "logo" in haystack or "brand" in haystack or wrapper_says_logo(node):
             candidate = node
             break
-    if candidate is None:
-        candidate = scope.find("img", "svg")
+    if candidate is None and images:
+        candidate = images[0]
     if candidate is None:
         return ""
 
