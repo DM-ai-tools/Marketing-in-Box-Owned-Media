@@ -496,6 +496,8 @@ export const GATED_COMPETITOR_MAIN_ASSET_IDS = new Set<string>([
   "content_marketing_strategy",
   "social_content_strategy_audit",
   "book",
+  // The market's funnels for this service, read before the funnel is designed (its Step 2).
+  "funnel",
 ]);
 
 /** Competitor research that can only run *during* intake, because what it searches for is an intake
@@ -641,6 +643,7 @@ export const PHASE2_GATED_COMPETITOR_MAIN_ASSET_IDS = new Set<string>([
   "lead_magnet",
   "blog",
   "content_marketing_strategy",
+  "funnel",
 ]);
 
 /** Answers a Phase 2 stage gives itself, so the walk never asks the question.

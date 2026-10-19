@@ -31,9 +31,10 @@ server default, and are not part of this seed's scope.
 
 A note on the row count
 -----------------------
-25 rows: 3 gated foundation stages, 12 generation stages, 10 competitor-analysis stages.
+26 rows: 3 gated foundation stages, 12 generation stages, 11 competitor-analysis stages
+(`competitor_analysis_funnel` was added after the merge, for the funnel's Step 2).
 `seo_pillar_page` was merged into `pillar_page` (see that row's comment below), which is why this
-is 25 and not the 26 an older revision of this list held.
+was 25 rather than 26 until the funnel's competitor stage was added.
 """
 
 from __future__ import annotations
@@ -80,7 +81,8 @@ DAG_ROWS: list[dict] = [
     },
     {"asset_id": "competitor_analysis_offers", "depends_on": [], "is_gated": False, "model_tier": "sonnet"},
     {"asset_id": "offers", "depends_on": ["icp", "cro", "competitor_analysis_offers"], "is_gated": False, "model_tier": "sonnet"},
-    {"asset_id": "funnel", "depends_on": ["icp", "cro", "pillar_page"], "is_gated": False, "model_tier": "sonnet"},
+    {"asset_id": "competitor_analysis_funnel", "depends_on": [], "is_gated": False, "model_tier": "sonnet"},
+    {"asset_id": "funnel", "depends_on": ["icp", "cro", "pillar_page", "competitor_analysis_funnel"], "is_gated": False, "model_tier": "sonnet"},
     {"asset_id": "funnel_hub_media", "depends_on": ["icp", "cro", "pillar_page"], "is_gated": False, "model_tier": "sonnet"},
     {"asset_id": "competitor_analysis_lead_magnet", "depends_on": [], "is_gated": False, "model_tier": "sonnet"},
     {

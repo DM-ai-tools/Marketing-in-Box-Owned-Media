@@ -61,6 +61,7 @@ def test_notes_survive_the_object_contract():
         ("competitor_analysis_webinars", "webinar_page_url"),
         ("competitor_analysis_book", "book_page_url"),
         ("competitor_analysis_podcast", "podcast_page_url"),
+        ("competitor_analysis_funnel", "funnel_entry_url"),
     ],
 )
 def test_each_stage_s_own_url_key_is_found(asset_id, url_key):
@@ -76,6 +77,7 @@ def test_each_stage_s_own_url_key_is_found(asset_id, url_key):
         ("lead_magnet_type", "Gated ebook"),  # 03_Lead_Magnet.md
         ("content_focus", "Local SEO"),  # 04_Blog.md
         ("topical_focus", "Agency pricing"),  # 10_Podcast.md
+        ("funnel_type", "Free audit → strategy call"),  # 11_Funnel.md
         ("category", "Something else"),  # the shared name, for any future stage
     ],
 )

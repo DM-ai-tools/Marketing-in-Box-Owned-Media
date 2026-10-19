@@ -1353,7 +1353,7 @@ fails a test rather than landing on an operator.
 
 ### Competitor research
 
-Four of the eight stages research competitors and **all of it is gated** — reviewed on its own card
+Five of the stages research competitors (CRO, Lead Magnet, Blog, Content Marketing, Funnel) and **all of it is gated** — reviewed on its own card
 before the stage it feeds, never folded invisibly into a generation call
 (`PREPASS_BY_MAIN_ASSET_BY_PHASE["phase2"]` is empty and stays empty). `{SERVICE}` resolves from the
 run-level `sub_service` fact rather than from any stage's intake, which is the whole point of the
@@ -1480,6 +1480,26 @@ of paragraphs in analysis, strategy, findings and notes, and for less preamble a
   and Refine keeps a draft's format.
 - One block, not an edit per prompt file, for the voice block's reason. `OUTPUT_STYLE` is in
   `lib/promptEcho.ts`'s marker list. `tests/test_output_style.py` pins all of this.
+
+## Funnel — compared against the market's real funnels
+
+`Funnel_Prompt.md`'s Step 2 maps competitors' funnel types, lead magnets and value ladders, and
+Step 3A ties the funnel's differentiation to the gaps. The funnel used to be the one stage with a
+competitor step and no competitor stage, so every funnel printed "STEP 2 SKIPPED".
+
+- **`competitor_analysis_funnel`** (`Competitor Analysis/11_Funnel.md`, and `11_Funnel_phase2.md`)
+  reads each competitor's own pages and traces the path: the entry page (`funnel_entry_url`), the
+  funnel type, entry offer first (`funnel_type`, the card's pill), what the gate asks for, the next
+  step and any stated follow-up. A step behind a form or payment is named as unverified, never
+  filled in. Its `notes` say which funnel types dominate and which appear nowhere.
+- **Gated before the funnel's intake, in both phases.** It is in `GATED_COMPETITOR_MAIN_ASSET_IDS`
+  (backend and `pipelineData.ts`) and in the Phase 2 set.
+- **It searches the run's service in Phase 1 too.** The other Phase 1 searches cover the whole
+  market. A funnel sells one service, so `runCompetitorStep` sends `target_service`
+  (`SERVICE_SCOPED_COMPETITOR_IDS`). In Phase 2 that is the sub-service, as for every search.
+- **It reaches the prompt as `competitor_funnel_analysis`** (`funnel.json`, the catalog's `ctx`).
+  Step 2 still writes its one-line skip when the operator supplies none.
+- `tests/test_funnel_competitors.py` pins the wiring.
 
 ## Funnel Hub & Media — a selected set, not all eighteen
 
@@ -1877,7 +1897,7 @@ read from the same `schemas/drafts/*.json` so the two cannot disagree.
 - **A key outside `seedable_keys()` is a 422 that lists the valid keys.** Not caution about write
   volume: a mistyped key is accepted silently by the database, and the operator's evidence that they
   had supplied the dependency would be the stage carrying on asking for it.
-- **The competitor prepasses are never dependencies.** All ten search the web from inside their own
+- **The competitor prepasses are never dependencies.** All eleven search the web from inside their own
   stage, so `prepass_fields` is reported apart from `dependencies`.
   `lead_magnet.competitor_lead_magnet_list` is `required` and nothing upstream writes it — counted
   as a dependency it would report that stage as permanently unstartable and send an operator looking

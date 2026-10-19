@@ -39,12 +39,15 @@ B) ICP Profile
      objections, and the specific language/phrases they use
    — This ICP must drive every copy decision in the funnel
 
-C) Competitor Intelligence — ONLY IF SUPPLIED
-   — A competitor analysis is not an input to this stage. If one appears in the inputs above, use
-     it: extract what funnel types competitors are running, what lead magnets exist in the market,
-     which funnel types are absent or underused (gaps to exploit), and how competitors position
-     their conversion offers, and use that to justify the funnel differentiation strategy.
-   — If none is supplied, say so in one line and move on. Do NOT infer a competitive landscape from
+C) Competitor Intelligence — from the Competitor Funnel Analysis input
+   — The INPUTS carry a Competitor Funnel Analysis: a researched, operator-approved listing of
+     competitors, each with the page their funnel starts on, its funnel type (entry offer → next
+     step), what the gate asks for and any stated follow-up. Use it: extract what funnel types
+     competitors are running, what lead magnets exist in the market, which funnel types are absent
+     or underused (gaps to exploit), and how competitors position their conversion offers, and use
+     that to justify the funnel differentiation strategy. Cite competitors by name and domain.
+   — Use only what the listing states. A step it marks as unverified stays unverified.
+   — If that input is blank, say so in one line and move on. Do NOT infer a competitive landscape from
      general knowledge of the industry: named competitors, funnel-type distributions and lead-magnet
      inventories invented here would read as research and get acted on as research.
 
@@ -64,7 +67,7 @@ E) Client Website (browse if needed)
 
 STEP 2 — COMPETITOR FUNNEL ANALYSIS (conditional)
 
-Run this step only if a competitor analysis was supplied in the inputs. If none was, write
+Run this step from the Competitor Funnel Analysis input. Only if that input is blank, write
 `STEP 2 SKIPPED — no competitor analysis supplied for this stage` and go straight to Step 3; the
 funnel is then designed from the ICP, the pillar page and the conversion goal, which is enough to
 build it. Fabricating this section is not: every downstream part would inherit invented facts.

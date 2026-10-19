@@ -1,10 +1,11 @@
-"""Competitor-analysis prepass stages — the 10 `competitor_analysis_*` assets.
+"""Competitor-analysis prepass stages — the 11 `competitor_analysis_*` assets.
 
 These are the auxiliary stages that must run *before* their paired main asset, so the main
 asset's prompt receives a real competitor benchmark instead of a placeholder. Per
 `schemas/drafts/DAG_SOURCE_MAP.md` and `scripts/seed_asset_definitions.py`, 10 of the 15 main
-Phase-1 assets declare a `competitor_analysis_*` stage in their `depends_on` edges; the other
-5 (icp, funnel, funnel_hub_media, sms_sequence, plan_of_action) have none. `pillar_page` is one of
+Phase-1 assets declare a `competitor_analysis_*` stage in their `depends_on` edges, and `funnel`
+makes 11 (`competitor_analysis_funnel`, added so its Step 2 compares real competitor funnels); the
+other 4 (icp, funnel_hub_media, sms_sequence, plan_of_action) have none. `pillar_page` is one of
 the 10 since the former `seo_pillar_page` variant stage was merged into it.
 
 Two things make these stages structurally different from the 15 main ones in
@@ -319,12 +320,25 @@ COMPETITOR_CONFIGS: dict[str, CompetitorConfig] = {
         "competitor_analysis_podcast",
         _sources((), ("episode_topic_working_title",), ()),
     ),
+    # The funnel stage's Step 2 compares funnel types, entry offers and follow-up against the market.
+    # It used to have no competitor stage, so every funnel printed "STEP 2 SKIPPED". Reviewed before
+    # the funnel's intake, like Offers: the URL, niche and region are in the run-level profile, and
+    # `{SERVICE}` is the run's own service (the UI sends `target_service`), since a funnel is built
+    # for one service and the market's funnels for it are what the comparison needs.
+    "competitor_analysis_funnel": CompetitorConfig(
+        "competitor_analysis_funnel",
+        "funnel",
+        "11_Funnel.md",
+        "competitor_analysis_funnel.json",
+        "competitor_funnel_analysis",
+        _sources((), (), ()) | {"service": ("target_service_if_different_from_pillar_page",)},
+    ),
 }
 
 # --------------------------------------------------------------------------------------
 # Phase 2
 #
-# Three of the seven Phase-2 stages research competitors: Lead Magnet, Blog and Content Marketing.
+# Phase-2 stages that research competitors: CRO, Lead Magnet, Blog, Content Marketing and Funnel.
 # Their prompt files live in `Competitor Analysis/../Phase2/competitors_phase2/` and are the Phase-1
 # files re-pointed at a sub-service — `03_Lead_Magnet_phase2.md` is byte-identical to Phase 1's, and
 # the other two differ only in wording ("service" -> "sub-service"). The JSON output contract is the
@@ -336,7 +350,7 @@ COMPETITOR_CONFIGS: dict[str, CompetitorConfig] = {
 # search returns competitors doing *Google Ads* lead magnets rather than competitors doing marketing
 # lead magnets. It reaches `resolve_inputs` through the run-level client profile's `sub_service`.
 #
-# All three are gated: each one is reviewed before the stage it feeds runs, because a sub-service
+# All of them are gated: each one is reviewed before the stage it feeds runs, because a sub-service
 # competitor set is exactly the thing an operator needs to read before choosing a blog topic or
 # committing to a content cluster. None of them runs as an invisible prepass.
 # --------------------------------------------------------------------------------------
@@ -404,6 +418,15 @@ PHASE2_COMPETITOR_CONFIGS: dict[str, CompetitorConfig] = {
         "competitor_list",
         _phase2_sources(("client_website_url",), ("industry_niche",), ("region_country",)),
     ),
+    # The market's funnels for this sub-service, for the funnel stage's Step 2.
+    "competitor_analysis_funnel": CompetitorConfig(
+        "competitor_analysis_funnel",
+        "funnel",
+        f"{_PHASE2_PROMPT_SUBDIR}/11_Funnel_phase2.md",
+        "competitor_analysis_funnel.json",
+        "competitor_funnel_analysis",
+        _phase2_sources((), (), ()),
+    ),
 }
 
 CONFIGS_BY_PHASE: dict[str, dict[str, CompetitorConfig]] = {
@@ -440,6 +463,7 @@ GATED_COMPETITOR_MAIN_ASSET_IDS: frozenset[str] = frozenset(
         "content_marketing_strategy",
         "social_content_strategy_audit",
         "book",
+        "funnel",
         # Reviewed mid-intake, because what their search looks for is an intake answer — the pillar
         # page's head term, the blog's topic, the webinar's topic, the episode's topic. The UI asks
         # permission when the walk reaches the competitor field (`COMPETITOR_CONSENT_FIELDS` in the
@@ -470,7 +494,7 @@ GATED_COMPETITOR_BY_MAIN_ASSET: dict[str, CompetitorConfig] = {
 
 # Every Phase-2 competitor stage is gated (see the Phase 2 comment above), so Phase 2 has no
 # invisible prepass at all: the map the router consults to decide "does this generation call need to
-# run a search first?" is empty, and the gated map holds all three.
+# run a search first?" is empty, and the gated map holds all of them.
 PREPASS_BY_MAIN_ASSET_BY_PHASE: dict[str, dict[str, CompetitorConfig]] = {
     "phase1": PREPASS_BY_MAIN_ASSET,
     "phase2": {},
@@ -658,7 +682,7 @@ def parse_analysis(asset_id: str, raw_output: str) -> ParsedAnalysis:
         category = next(
             (
                 _clean_text(entry[key])
-                for key in ("lead_magnet_type", "content_focus", "topical_focus", "category")
+                for key in ("lead_magnet_type", "funnel_type", "content_focus", "topical_focus", "category")
                 if entry.get(key)
             ),
             None,

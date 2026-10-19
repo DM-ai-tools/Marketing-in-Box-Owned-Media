@@ -33,7 +33,7 @@ does not get its own asset_id / schema file.
 
 **Count reconciliation:** 15 main asset_ids × their source files, minus the CRO Framework reference doc
 (not a stage) = 15 stage schemas from the main prompt set (16 JSON files, since `offers` has v1 and v2).
-Plus 10 competitor-analysis stages = **25 total stage schemas across 26 JSON files** in this directory.
+Plus 11 competitor-analysis stages (`competitor_analysis_funnel` added for the funnel's Step 2) = **26 total stage schemas** in this directory.
 Of the 15 main assets, **10 have a paired competitor_analysis_<asset> stage** (cro, pillar_page, offers,
 lead_magnet, blog, content_marketing_strategy, social_content_strategy_audit, webinar, book, podcast);
 5 do not (icp, funnel, funnel_hub_media, sms_sequence, plan_of_action).

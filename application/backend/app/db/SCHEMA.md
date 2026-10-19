@@ -318,6 +318,8 @@ competitor-analysis. `competitor_analysis_book` was since confirmed and added (2
 prompt file as the design stage, so the two are now one stage whose prompt
 (`Master_Prompt_Universal_Page_Design_v1.md` v2.0) carries the SEO + competitor-benchmark pass
 itself. `pillar_page` consequently gained a hard `competitor_analysis_seo_pillar_page` edge.
+`competitor_analysis_funnel` was then added (26 rows = 3 gated + 12 generation + 11
+competitor-analysis), so the funnel's Step 2 compares real competitor funnels; `funnel` depends on it.
 Re-running the seed script does **not** delete the retired `seo_pillar_page` row from a database
 that already has it, and that is deliberate: pre-merge `run_stages` / `context_entries` /
 `approval_audit_log` rows still FK to that `asset_id`.

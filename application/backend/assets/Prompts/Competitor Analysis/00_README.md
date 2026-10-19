@@ -1,6 +1,6 @@
 # Competitor Analysis Prompt Library
 
-10 standalone competitor-analysis prompts, one per asset type, generalized to work for
+11 standalone competitor-analysis prompts, one per asset type, generalized to work for
 any industry (not just digital marketing agencies).
 
 ## Files
@@ -14,6 +14,7 @@ any industry (not just digital marketing agencies).
 8. 08_Webinars.md
 9. 09_Book.md
 10. 10_Podcast.md
+11. 11_Funnel.md — each competitor's lead-generation funnel (entry offer → capture → next step), for the funnel stage's Step 2
 
 ## Placeholders to fill in before each run
 - {TARGET_URL} — the company/page you're benchmarking against (required)
@@ -23,7 +24,7 @@ any industry (not just digital marketing agencies).
   no restriction)
 - {LOCATION} — city/region/state to prioritise (optional; defaults to Australia-wide)
 
-## Shared design principles across all 10 prompts
+## Shared design principles across all 11 prompts
 - Every prompt asks for UP TO 10 competitors, not exactly 10 — if fewer genuine, verified
   matches exist, the prompt explicitly instructs returning fewer rather than padding the
   list with weak matches.

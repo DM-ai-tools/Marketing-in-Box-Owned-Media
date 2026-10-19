@@ -1,0 +1,68 @@
+{
+  "asset_id": "competitor_analysis_funnel",
+  "version": 1,
+  "source_prompt_file": "application/backend/assets/Prompts/Competitor Analysis/11_Funnel.md",
+  "paired_main_asset_id": "funnel",
+  "fields": [
+    {
+      "field_id": "target_url",
+      "label": "Target URL",
+      "kind": "text",
+      "required": true,
+      "source": "user_input",
+      "raw_explanation": "{TARGET_URL} — the company/page you're benchmarking against (required)."
+    },
+    {
+      "field_id": "service",
+      "label": "Service",
+      "kind": "text",
+      "required": false,
+      "source": "user_input",
+      "fallback_instruction": "Inferred from {TARGET_URL} if not specified. Only include companies that sell this service and run an identifiable conversion path for it (an entry offer, a capture page or form, and a visible next step); a contact-form-only site is still a competitor but is ranked lower and labelled as such.",
+      "raw_explanation": "{SERVICE} — the target's core service/product."
+    },
+    {
+      "field_id": "niche",
+      "label": "Niche",
+      "kind": "text",
+      "required": false,
+      "source": "user_input",
+      "fallback_instruction": "Leave open if not specified.",
+      "raw_explanation": "{NICHE} — leave open if not specified."
+    },
+    {
+      "field_id": "location",
+      "label": "Location",
+      "kind": "text",
+      "required": false,
+      "source": "user_input",
+      "default": "Australia-wide",
+      "fallback_instruction": "Defaults to Australia-wide if not specified, boosting local leaders if provided.",
+      "raw_explanation": "{LOCATION}, or Australia-wide if not specified, boosting local leaders if provided."
+    },
+    {
+      "field_id": "competitor_type",
+      "label": "Competitor Type",
+      "kind": "enum_choice",
+      "required": false,
+      "source": "user_input",
+      "choices": [
+        "niche_specialist",
+        "full_stack_niche"
+      ],
+      "fallback_instruction": "If missing or empty, include both types.",
+      "raw_explanation": "\"niche_specialist\" = a company specialised in the target's core service/industry. \"full_stack_niche\" = a full-service company in the same industry prominently offering the target service."
+    },
+    {
+      "field_id": "excluded_competitors",
+      "label": "Excluded Competitors",
+      "kind": "text",
+      "required": false,
+      "source": "auto_from_context",
+      "fallback_instruction": "Auto-populated from this same competitor-analysis stage's own prior output(s) for this client (system-managed dedup), per REVIEW_NEEDED_V2.md item 7 resolution -- the user does not manually retype domains. If no prior run exists for this client/stage, treated as an empty list rather than prompting the user.",
+      "raw_explanation": "excluded_competitors: [list any domains already sourced in prior runs]",
+      "context_key": "competitor_analysis_funnel",
+      "fallback": "treat_as_empty_if_missing"
+    }
+  ]
+}

@@ -3402,6 +3402,9 @@ function recordFailure(set: (partial: Partial<PipelineState>) => void, err: unkn
   return err instanceof Error ? err.message : String(err);
 }
 
+/** Competitor searches that run on the run's own service in both phases. */
+const SERVICE_SCOPED_COMPETITOR_IDS = new Set(["competitor_analysis_funnel"]);
+
 async function runCompetitorStep(
   get: () => PipelineState,
   set: (partial: Partial<PipelineState>) => void,
@@ -3418,7 +3421,11 @@ async function runCompetitorStep(
       // run is for, and it is the entire difference between this search and the Phase 1 one: without
       // it the backend has nothing to put in `{SERVICE}` and returns the client's whole-market
       // competitors instead of the ones competing on this sub-service.
-      service: profile[SUB_SERVICE_FACT],
+      // A funnel is built for one service, so its search is scoped to the run's service in Phase 1
+      // too (`target_service`, from CRO); the other Phase 1 searches keep their whole-market scope.
+      service: SERVICE_SCOPED_COMPETITOR_IDS.has(competitor.assetId)
+        ? serviceScanFocus(get()) || undefined
+        : profile[SUB_SERVICE_FACT],
     };
 
   const message = push(get, set, {

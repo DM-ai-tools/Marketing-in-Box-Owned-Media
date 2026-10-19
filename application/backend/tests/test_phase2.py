@@ -207,7 +207,7 @@ def test_phase1_configs_carry_no_delta():
 
 
 def test_phase2_has_no_invisible_competitor_prepass():
-    """All three Phase 2 competitor stages are reviewed before the stage they feed, so folding one
+    """Every Phase 2 competitor stage is reviewed before the stage they feed, so folding one
     into a generation call as well would run — and bill — the same search twice."""
     assert PREPASS_BY_MAIN_ASSET_BY_PHASE["phase2"] == {}
     assert set(GATED_COMPETITOR_BY_MAIN_ASSET_BY_PHASE["phase2"]) == {
@@ -215,6 +215,7 @@ def test_phase2_has_no_invisible_competitor_prepass():
         "lead_magnet",
         "blog",
         "content_marketing_strategy",
+        "funnel",
     }
 
 

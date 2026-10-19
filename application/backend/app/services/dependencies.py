@@ -83,6 +83,7 @@ PREPASS: dict[str, str] = {
     "webinar": "competitor_analysis_webinars",
     "book": "competitor_analysis_book",
     "podcast": "competitor_analysis_podcast",
+    "funnel": "competitor_analysis_funnel",
 }
 
 #: The placeholder three schemas use for "there is no upstream key for this — always ask".

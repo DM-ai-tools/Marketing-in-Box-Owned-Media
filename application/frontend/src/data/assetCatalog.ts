@@ -637,6 +637,9 @@ export const ASSET_CATALOG: AssetDefinition[] = [
     description: "End-to-end funnel structure built on the established ICP, pillar page copy, and design system.",
     live: false,
     writesContextKeys: ["funnel_stages"],
+    // Reviewed before the intake (`GATED_COMPETITOR_MAIN_ASSET_IDS`), so Step 2 of `Funnel_Prompt.md`
+    // compares the market's real funnels instead of printing "STEP 2 SKIPPED".
+    pairedCompetitorAssetId: "competitor_analysis_funnel",
     fields: [
       txt("funnel_type", "Funnel Type", {
         helpText: "The funnel's shape — what actually happens between the click and the conversion.",
@@ -666,6 +669,7 @@ export const ASSET_CATALOG: AssetDefinition[] = [
       ctx("cro_rewritten_copy", "Pillar Page Content (from CRO)", "cro_rewritten_copy"),
       ctx("cro_locked_sections", "Locked Sections (from CRO)", "cro_locked_sections"),
       ctx("design_tokens", "Design Tokens", "design_tokens"),
+      ctx("competitor_funnel_analysis", "Competitor Funnel Analysis", "competitor_analysis_funnel", { required: false }),
       // Step 1E of `Funnel_Prompt.md` browses the client's site to fill gaps in the context it was
       // given, so the prompt renders this input in both phases. Without it here the operator was
       // never asked and the line arrived as "(not specified)" every run — while the URL itself was
@@ -1370,6 +1374,7 @@ export const ASSET_CATALOG: AssetDefinition[] = [
   competitorAsset("competitor_analysis_webinars", "Competitor Analysis — Webinars", "webinar", "webinar programmes"),
   competitorAsset("competitor_analysis_book", "Competitor Analysis — Book", "book", "published books"),
   competitorAsset("competitor_analysis_podcast", "Competitor Analysis — Podcast", "podcast", "podcasts"),
+  competitorAsset("competitor_analysis_funnel", "Competitor Analysis — Funnel", "funnel", "lead-generation funnels"),
 ];
 
 export const ASSET_BY_ID: Record<string, AssetDefinition> = Object.fromEntries(
