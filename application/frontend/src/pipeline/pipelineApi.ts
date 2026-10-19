@@ -992,6 +992,24 @@ export async function fetchReplicaOutput(runId: string): Promise<ReplicaReport &
   return unwrap(res, "Assembled page");
 }
 
+export interface StandaloneHtml {
+  html: string;
+  inlined: number;
+  bytes: number;
+  failed: { url: string; reason: string }[];
+}
+
+/** The page with every image written into it as a `data:` URI, so a downloaded file renders on a
+ * device that cannot reach the image URLs. Free; stores nothing. */
+export async function makeStandaloneHtml(html: string): Promise<StandaloneHtml> {
+  const res = await fetch(`/api/pipeline/html/standalone`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ html }),
+  });
+  return unwrap(res, "Embedding images");
+}
+
 export interface SlideDeckSummary {
   index: number;
   title: string;

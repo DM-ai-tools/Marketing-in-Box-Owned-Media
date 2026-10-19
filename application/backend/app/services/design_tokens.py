@@ -665,6 +665,10 @@ class Logo:
     # reference — a visitor's browser loads it — so it is kept, but only after any candidate that
     # could actually be fetched.
     verified: bool = True
+    # The file's bytes, when the check fetched them. Not for the document: `design_md` re-hosts them
+    # at this backend's own `/media/{id}` (`hosted_logo`), because a client's host may refuse to
+    # serve its logo to any other site.
+    content: bytes | None = field(default=None, repr=False, compare=False)
 
 
 def _attrs(tag: str) -> dict[str, str]:
@@ -899,7 +903,7 @@ async def _measure_logo(logo: Logo, base_url: str) -> Logo:
     if len(payload) <= _MAX_LOGO_EMBED_BYTES:
         data_uri = f"data:{mime};base64,{base64.b64encode(payload).decode()}"
 
-    return replace(logo, mime_type=mime, byte_size=len(payload), data_uri=data_uri)
+    return replace(logo, mime_type=mime, byte_size=len(payload), data_uri=data_uri, content=payload)
 
 
 async def find_logo(html: str, base_url: str) -> Logo | None:

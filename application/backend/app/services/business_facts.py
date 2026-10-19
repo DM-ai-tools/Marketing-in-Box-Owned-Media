@@ -293,6 +293,14 @@ async def load_business_facts(
                 for item in (design.get(key) or [])
                 if isinstance(item, dict) and item.get("url")
             ]
+            hosted_logo = design.get("hosted_logo")
+            if isinstance(hosted_logo, dict) and hosted_logo.get("url"):
+                facts.generated_image_urls.append(current_media_url(str(hosted_logo["url"])))
+            facts.generated_image_urls += [
+                current_media_url(str(item["url"]))
+                for item in (design.get("hosted_images") or [])
+                if isinstance(item, dict) and item.get("url")
+            ]
         if facts.links is None or not facts.links.available:
             facts.missing.append("the reference page's links (re-run the stage to capture them)")
 

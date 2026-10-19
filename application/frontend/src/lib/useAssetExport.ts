@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { buildAssetExport, downloadExport, shareExport } from "./exportAsset";
+import { buildAssetExport, downloadExport, shareExport, type AssetExport } from "./exportAsset";
+import { embedImages, embedImagesInDocument, embeddedLabel } from "./embedImages";
 import { splitHtmlBlocks } from "./htmlBlocks";
 import { usePipelineStore } from "../pipeline/pipelineStore";
 
@@ -53,18 +54,30 @@ function resolve(value: string | (() => string) | undefined): string | undefined
   return typeof value === "function" ? value() : value;
 }
 
+/** An `.html` export with its images written in (see `embedImages`); any other file as it is. */
+async function withImages(exported: AssetExport): Promise<{ exported: AssetExport; label: string }> {
+  if (exported.mime !== "text/html") return { exported, label: "Downloaded" };
+  const result = await embedImages(exported.content);
+  return { exported: { ...exported, content: result.html }, label: embeddedLabel(result) };
+}
+
 export function useAssetExport({ text, label, stageNumber, preamble, assetId, appendix }: AssetExportTarget) {
   const [downloadFlash, flashDownload] = useFlash();
   const [shareFlash, flashShare] = useFlash();
   const [reportFlash, flashReport] = useFlash();
 
   const download = useCallback(() => {
-    downloadExport(buildAssetExport({ text, label, stageNumber, preamble: resolve(preamble), assetId, appendix: resolve(appendix) }));
-    flashDownload("Downloaded");
+    const exported = buildAssetExport({ text, label, stageNumber, preamble: resolve(preamble), assetId, appendix: resolve(appendix) });
+    if (exported.mime === "text/html") flashDownload("Preparing…");
+    void withImages(exported).then(({ exported: file, label: done }) => {
+      downloadExport(file);
+      flashDownload(done);
+    });
   }, [text, label, stageNumber, preamble, assetId, appendix, flashDownload]);
 
   const share = useCallback(() => {
-    void shareExport(buildAssetExport({ text, label, stageNumber, preamble: resolve(preamble), assetId, appendix: resolve(appendix) }), label)
+    void withImages(buildAssetExport({ text, label, stageNumber, preamble: resolve(preamble), assetId, appendix: resolve(appendix) }))
+      .then(({ exported }) => shareExport(exported, label))
       .then((outcome) => {
         if (outcome === "shared") flashShare("Shared");
         else if (outcome === "copied") flashShare("Copied");
@@ -77,21 +90,23 @@ export function useAssetExport({ text, label, stageNumber, preamble, assetId, ap
   // load. The client's name is read at click time, like the preamble.
   const downloadReport = useCallback(() => {
     flashReport("Preparing…");
-    void import("./assetReportHtml")
-      .then(({ buildAssetReportExport }) =>
-        buildAssetReportExport({
-          text,
+    let done = "Downloaded";
+    void Promise.all([import("./assetReportHtml"), embedImagesInDocument(text)])
+      .then(([{ buildAssetReportExport }, embedded]) => {
+        done = embeddedLabel(embedded);
+        return buildAssetReportExport({
+          text: embedded.text,
           label,
           stageNumber,
           preamble: resolve(preamble),
           appendix: resolve(appendix),
           assetId,
           client: usePipelineStore.getState().clientProfile.client_name || undefined,
-        }),
-      )
+        });
+      })
       .then((exported) => {
         downloadExport(exported);
-        flashReport("Downloaded");
+        flashReport(done);
       })
       .catch(() => flashReport("Couldn't build"));
   }, [text, label, stageNumber, preamble, assetId, appendix, flashReport]);

@@ -286,8 +286,56 @@ of it, plus a missing setting:
 - **A rate-limited capture is re-read** on the next stage (`_TRANSIENT_CAPTURE_FAILURE` in
   `_reuse_stored_design`), rather than serving a sheet with no styleguide or screenshots for the
   life of the run.
-- `DESIGN_CAPTURE_VERSION` is 6, so a run holding the theme's mark re-captures on its next stage.
-  `tests/test_reference_fidelity.py` pins each cause.
+- `tests/test_reference_fidelity.py` pins each cause.
+
+### The logo is hosted here, never hotlinked
+
+A Click Trends pillar page then shipped with no logo at all, though `find_logo` had the right file.
+SiteGround serves `image-1-2.png` to a visitor on clicktrends.com.au and refuses it to the same
+browser on any other site, so the preview, the HTML report and the deployed page showed a broken
+image. Any client's host can start doing this, so the page never depends on it:
+- **The bytes are copied once per capture** (`design_md._logo_file`), cheapest first: the file the
+  logo check already fetched (`Logo.content`, free), a fallback reader's file, Brandfetch's brand
+  record, then Context.dev's `retrieve_brand` (10 credits, only when nothing else had the bytes).
+- **The router stores them** in `media_assets` (`media_storage.save_image`) through the `host_logo`
+  callback, and keeps `hosted_logo` on `brand_design_tokens`. The page check counts it as one of
+  the run's own images.
+- **The document offers only that URL.** The Logo section gives one `<img>` with no data URI, and
+  every other mention of the client's logo file (the structure walk, the image list) is rewritten
+  to it. The original is named only by host, as provenance.
+- **Alt text.** A theme slot's alt ("Mobile-friendly Magento store preview") is not copied onto the
+  logo unless it says "logo" (`_logo_alt`).
+- **`POST /pipeline/design` stores nothing**, so it hosts nothing and links the client's file.
+- **`GET /media/{id}` sends a sandboxing CSP and `nosniff`**, because a copied logo can be SVG.
+- A sheet captured on the loopback is rewritten to the public host when read
+  (`media_storage.current_media_urls_in`).
+- **Every other image the sheet offers is copied too** (`_host_offered_images`): any client-site
+  `<img src>` in DESIGN.md (the client-logo strip, the logo's placement), up to
+  `_MAX_COPIED_IMAGES`, free reads only. One that cannot be read keeps its URL, and the notes say so.
+  Stored as `hosted_images` on `brand_design_tokens`; the page check accepts them.
+- `DESIGN_CAPTURE_VERSION` is 7, so a run holding a hotlinked logo re-captures on its next stage.
+  `tests/test_hosted_logo.py` pins all of it.
+
+### A downloaded page carries its images
+
+Hosting fixes the page where it is served. A *shared file* still broke: a page built on a local run
+names `127.0.0.1:8001/media/…`, which on anyone else's machine is their own. So every HTML download
+goes through `POST /pipeline/html/standalone` (`app/services/standalone_html.py`), which writes each
+image into the file as a `data:` URI.
+- **Which downloads.** The card's Download and Share of an HTML-only asset, the HTML report (its
+  embedded pages), the preview's Download, and the assembled replica. `lib/embedImages.ts` does it.
+- **`/media/{id}` comes from the database by id, whatever host the URL names.** Anything else is a
+  free `fetch_asset` read, with the image's own origin as the referer. Never a paid reader.
+- **Images only.** `img`/`source` src, srcset (collapsed to its largest candidate, and dropped from
+  an `<img>` whose src was inlined), `data-src`, video posters, SVG `<image>`, icon links and CSS
+  `url()` in `<style>` and `style=""`. Links, `og:image` and stylesheets keep their URLs (a loopback
+  media URL is moved to the public host).
+- **Never withheld.** An unreadable image keeps its URL and is listed in `failed`. With the backend
+  unreachable the page downloads as it is. The button then reads "Downloaded (images linked)".
+- **This is the export, never the prompt.** The model is still handed short URLs (see the logo
+  rule). The data URIs are written by code, after the model is done.
+- A page of five generated images comes to about 11 MB.
+- `tests/test_standalone_html.py` and `smoke/embedImages.tsx` pin it.
 
 ### The two views — which stage gets which
 
@@ -704,6 +752,12 @@ pillar page covers them all. Same asset and field in both phases: `SERVICE_SCAN_
   it is nested under (`_menu_parent`). One Haiku call sorts them. `_parse_reply` drops any item
   whose URL is not one of the page's links, so a service the site does not link to cannot appear.
   Without the nesting, the model guessed the grouping and listed menu headings as sub-services.
+- **A bot-walled scan page is read rendered, once.** SiteGround's sg-captcha decides per IP, so
+  clicktrends.com.au served Railway and walled off a local machine, and the picker came back empty.
+  - `_read_rendered` falls back to `context_dev.scrape_html` (1 credit), as `design_md._rendered_tokens`
+    does.
+  - Only on `_BOT_WALLED` wording. A 404 or a bad URL spends nothing.
+  - A rendered block page is still a failure, and the card's notes say which reader answered.
 - **Headings mean different things per phase.** In Phase 1 a menu heading with its own page is a
   top-level service ("Business & Commercial" is ARG Finance's Commercial Loans page). In Phase 2 it
   is only a `parent`.

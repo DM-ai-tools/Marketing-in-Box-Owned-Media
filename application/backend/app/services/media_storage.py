@@ -95,6 +95,17 @@ def current_media_url(url: str) -> str:
     return media_url(match.group(1)) if match else url
 
 
+_LOOPBACK_MEDIA_URL_IN_TEXT = re.compile(
+    r"https?://(?:127\.0\.0\.1|localhost):8001" + re.escape(MEDIA_URL_PREFIX) + r"/([0-9a-fA-F-]{32,36})"
+)
+
+
+def current_media_urls_in(text: str) -> str:
+    """`current_media_url` over every media URL in a document — the stored DESIGN.md names the
+    hosted logo, and a sheet captured with no public base names it on the loopback."""
+    return _LOOPBACK_MEDIA_URL_IN_TEXT.sub(lambda m: media_url(m.group(1)), text) if text else text
+
+
 def public_base_url_problem() -> str | None:
     """Why generated image links would be unreachable on this deployment, or None.
 
@@ -122,6 +133,18 @@ def warn_if_public_base_url_missing() -> bool:
     return problem is not None
 
 
+def save_image(session: AsyncSession, data: bytes, *, content_type: str) -> str:
+    """Stage any image's bytes and return the absolute URL they will be served at. Not committed.
+
+    Also used for the client's logo (`design_md._logo_file`): a client's host may refuse to serve
+    its own logo to any other site, so the page links this copy rather than theirs."""
+    asset_id = uuid.uuid4()
+    session.add(MediaAsset(id=asset_id, data=data, content_type=content_type))
+    url = media_url(asset_id)
+    logger.info("Staged image bytes=%s type=%s url=%s", len(data), content_type, url)
+    return url
+
+
 def save_generated_image(session: AsyncSession, data: bytes, *, output_format: str) -> str:
     """Stage a `MediaAsset` row on `session` and return the absolute URL it will be served at.
 
@@ -131,8 +154,4 @@ def save_generated_image(session: AsyncSession, data: bytes, *, output_format: s
     assigned here, client-side, rather than left to a post-flush default: the URL has to be known
     immediately, before any flush happens.
     """
-    asset_id = uuid.uuid4()
-    session.add(MediaAsset(id=asset_id, data=data, content_type=f"image/{output_format.lstrip('.')}"))
-    url = media_url(asset_id)
-    logger.info("Staged generated image bytes=%s url=%s", len(data), url)
-    return url
+    return save_image(session, data, content_type=f"image/{output_format.lstrip('.')}")

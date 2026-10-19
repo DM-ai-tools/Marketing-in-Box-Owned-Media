@@ -37,7 +37,7 @@ import time
 from dataclasses import asdict, dataclass, field
 from urllib.parse import urldefrag, urljoin, urlparse
 
-from app.services import scraper
+from app.services import context_dev, scraper
 from app.services.claude_client import get_client
 from app.services.generation import HAIKU, OnUsage
 from app.services.html_dom import Node, parse_html
@@ -283,21 +283,57 @@ async def _ask(prompt: str, on_usage: OnUsage | None) -> str:
     return next((b.text for b in response.content if b.type == "text"), "")
 
 
+# `scraper._fetch_html`'s wording for a bot wall, as opposed to a missing page or a bad URL. Only a
+# wall earns the paid read: SiteGround's sg-captcha decides per IP, so the same page that serves
+# Railway can challenge a local machine (or, another day, Railway), and the picker then had nothing.
+_BOT_WALLED = re.compile(r"challenged the request|blocked an automated read|served a bot-check page")
+
+
+async def _read_rendered(url: str, blocked: scraper.ScrapeError) -> tuple[str, str, str]:
+    """The page through Context.dev's rendered read (1 credit), for a page the free read was walled
+    off from — the same fallback `design_md._rendered_tokens` uses. One read per scan, never a loop.
+    Returns `(final url, html, note)`; raises `ServiceScanError` naming both failures."""
+    if not context_dev.is_configured():
+        raise ServiceScanError(f"Could not read {url}: {blocked}")
+    try:
+        page = await context_dev.scrape_html(scraper.normalize_url(url))
+    except Exception as exc:  # noqa: BLE001 — any fallback failure is the same outcome for the operator
+        raise ServiceScanError(
+            f"Could not read {url}: {blocked} The rendered read through Context.dev failed too: {exc}"
+        ) from exc
+    if not page.html.strip() or scraper.looks_like_block_page(page.html):
+        raise ServiceScanError(
+            f"Could not read {url}: {blocked} Context.dev's rendered read was served a bot-check page too."
+        )
+    logger.info("Service scan for %s read rendered via Context.dev after: %s", url, blocked)
+    return (
+        page.final_url or page.url or url,
+        page.html,
+        "The site blocked the free read, so the page was read rendered via Context.dev (1 credit).",
+    )
+
+
 async def scan_services(url: str, *, phase: str = "phase1", focus: str = "", on_usage: OnUsage | None = None) -> ServiceScan:
     """The services (Phase 1) or sub-services (Phase 2) the site at `url` links to.
 
     Raises `ServiceScanError` when the page cannot be read at all. A page that reads but lists no
     services returns an empty scan with a note: the operator can still type them.
     """
+    read_note = ""
     try:
         final_url, html = await scraper._fetch_html(scraper.normalize_url(url))
     except scraper.ScrapeError as exc:
-        raise ServiceScanError(f"Could not read {url}: {exc}") from exc
+        if not _BOT_WALLED.search(str(exc)):
+            raise ServiceScanError(f"Could not read {url}: {exc}") from exc
+        final_url, html, read_note = await _read_rendered(url, exc)
 
     scan = ServiceScan(source_url=final_url)
+    if read_note:
+        scan.notes.append(read_note)
     candidates = extract_link_candidates(html, final_url)
     if not candidates:
-        scan.notes.append(
+        scan.notes.insert(
+            0,
             "The page has no readable links to this site's own pages. It may build its menu with "
             "JavaScript after loading, so type the services instead."
         )
@@ -314,7 +350,7 @@ async def scan_services(url: str, *, phase: str = "phase1", focus: str = "", on_
         logger.info("Service scan for %s dropped %d item(s) whose URL the site does not link to", url, dropped)
     if not services:
         kind = "sub-services" if phase == "phase2" else "services"
-        scan.notes.append(f"No {kind} were found among this page's links, so type them instead.")
+        scan.notes.insert(0, f"No {kind} were found among this page's links, so type them instead.")
     return scan
 
 

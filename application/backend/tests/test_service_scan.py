@@ -142,6 +142,67 @@ async def test_a_page_with_no_links_is_a_note_not_a_failure(monkeypatch: pytest.
     assert scan.services == [] and "JavaScript" in scan.notes[0]
 
 
+WALLED = scraper.ScrapeError(
+    "https://clicktrends.com.au/seo/ challenged the request instead of serving the page "
+    "(sg-captcha bot protection) — it allows browsers but not servers."
+)
+
+
+def _walled_fetch(error: scraper.ScrapeError):
+    async def fetch(_url: str) -> tuple[str, str]:
+        raise error
+
+    return fetch
+
+
+@pytest.mark.asyncio
+async def test_a_bot_walled_page_is_read_rendered_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    # SiteGround challenges per IP, so the same page can serve Railway and wall off a local machine.
+    reads: list[str] = []
+
+    async def rendered(url: str, **_k: Any) -> S.context_dev.HTMLPage:
+        reads.append(url)
+        return S.context_dev.HTMLPage(url=url, final_url="https://www.example.com.au/", title="x", html=SITE)
+
+    async def ask(_prompt: str, _on_usage: Any) -> str:
+        return json.dumps({"services": [{"name": "Asset Finance", "url": "https://www.example.com.au/asset-finance", "parent": ""}]})
+
+    monkeypatch.setattr(scraper, "_fetch_html", _walled_fetch(WALLED))
+    monkeypatch.setattr(S.context_dev, "is_configured", lambda: True)
+    monkeypatch.setattr(S.context_dev, "scrape_html", rendered)
+    monkeypatch.setattr(S, "_ask", ask)
+
+    scan = await S.scan_services("example.com.au")
+    assert len(reads) == 1
+    assert [s.name for s in scan.services] == ["Asset Finance"]
+    assert any("Context.dev (1 credit)" in note for note in scan.notes)
+
+
+@pytest.mark.asyncio
+async def test_only_a_bot_wall_spends_the_paid_read(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def never(*_a: Any, **_k: Any) -> None:
+        raise AssertionError("a missing page must not cost a credit")
+
+    monkeypatch.setattr(scraper, "_fetch_html", _walled_fetch(scraper.ScrapeError("https://x.com.au/ returned HTTP 404.")))
+    monkeypatch.setattr(S.context_dev, "is_configured", lambda: True)
+    monkeypatch.setattr(S.context_dev, "scrape_html", never)
+    with pytest.raises(S.ServiceScanError, match="404"):
+        await S.scan_services("x.com.au")
+
+
+@pytest.mark.asyncio
+async def test_a_rendered_block_page_is_still_a_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def rendered(url: str, **_k: Any) -> S.context_dev.HTMLPage:
+        html = "<html><body><h1>We suspect you are a robot</h1><p>Please confirm you are human.</p></body></html>"
+        return S.context_dev.HTMLPage(url=url, final_url=url, title="Security check", html=html)
+
+    monkeypatch.setattr(scraper, "_fetch_html", _walled_fetch(WALLED))
+    monkeypatch.setattr(S.context_dev, "is_configured", lambda: True)
+    monkeypatch.setattr(S.context_dev, "scrape_html", rendered)
+    with pytest.raises(S.ServiceScanError, match="bot-check page too"):
+        await S.scan_services("clicktrends.com.au/seo/")
+
+
 # --------------------------------------------------------------------------------------
 # The selection
 # --------------------------------------------------------------------------------------

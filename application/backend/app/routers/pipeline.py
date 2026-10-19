@@ -69,6 +69,7 @@ from app.db.models import (
     Competitor,
     CompetitorAnalysis,
     ContextEntry,
+    MediaAsset,
     Run,
     RunStage,
     StageStatus,
@@ -109,6 +110,7 @@ from app.services import (
     page_revision as page_revision_service,
     secondary_keywords as secondary_keywords_service,
     slide_deck as slide_deck_service,
+    standalone_html as standalone_html_service,
     social_audit as social_audit_service,
     social_intel as social_intel_service,
     sociavault_client,
@@ -2075,7 +2077,11 @@ DESIGN_TOKENS_CONTEXT_KEY = "brand_design_tokens"
 #   6 — never a theme's bundled demo mark (`/wp-content/themes/…`) as the logo, an image counts as
 #       the logo when its wrapper or home link says so, and a bot-walled logo check keeps the file.
 #       A Click Trends run captured at 5 holds the "Aimo" theme's demo logo.
-DESIGN_CAPTURE_VERSION = 6
+#   7 — the logo is copied to `media_assets` and the Logo section offers only that URL. At 6 it
+#       linked the client's own file, which Click Trends' host refuses to serve to any other site,
+#       so every page built from it showed a broken logo. Every other client-site image the sheet
+#       offers (the client-logo strip) is copied the same way.
+DESIGN_CAPTURE_VERSION = 7
 
 # A capture whose Context.dev calls were rate-limited is missing its styleguide and screenshots for
 # a reason that passes in seconds. Served for the life of the run, it left every later stage building
@@ -2441,8 +2447,8 @@ def _page_design_input(value: dict) -> PageDesignInput | None:
     if not (design_md or theme_brief or legacy):
         return None
     return PageDesignInput(
-        design_md=design_md or legacy,
-        theme_brief=theme_brief or legacy,
+        design_md=media_storage.current_media_urls_in(design_md or legacy),
+        theme_brief=media_storage.current_media_urls_in(theme_brief or legacy),
         screenshot_urls=tuple(value.get("model_screenshot_urls") or ()),
         generated_images=_all_generated_images(value),
     )
@@ -2500,8 +2506,18 @@ async def resolve_page_design(
     if not url:
         return None
 
+    async def host_image(data: bytes, mime_type: str) -> str | None:
+        # Committed on its own: an orphaned logo row (if the sheet's write below failed) costs a few
+        # kilobytes, while a sheet pointing at a row that never landed is a broken logo again.
+        if run_uuid is None:
+            return None
+        async with session_factory() as session:
+            hosted = media_storage.save_image(session, data, content_type=mime_type)
+            await session.commit()
+        return hosted
+
     design = await design_md_service.capture_page_design(
-        url, subject_context=_image_subject_context(answers, profile)
+        url, subject_context=_image_subject_context(answers, profile), host_image=host_image
     )
 
     stored_value: dict | None = None
@@ -2538,6 +2554,9 @@ async def resolve_page_design(
             # As data as well as in the sheet: the pillar page check compares a generated page's
             # hrefs against these, and re-parsing them out of the Markdown table would be fragile.
             "links": design.links.to_dict() if design.links is not None else None,
+            # The page check accepts this as one of the run's own images.
+            "hosted_logo": design.hosted_logo.to_dict() if design.hosted_logo is not None else None,
+            "hosted_images": [{"origin_url": k, "url": v} for k, v in design.hosted_images.items()],
             "image_briefs": [
                 {
                     "role": b.role,
@@ -3240,6 +3259,46 @@ async def _deck_brand(run_id: str | None) -> slide_deck_service.DeckBrand:
     value, _on_run = stored
     return slide_deck_service.brand_from_design_md(
         value.get("design_md") or value.get("theme_brief") or value.get("content") or ""
+    )
+
+
+class StandaloneHtmlRequest(BaseModel):
+    html: str = Field(..., min_length=1, max_length=5_000_000)
+
+
+class StandaloneImageFailure(BaseModel):
+    url: str
+    reason: str
+
+
+class StandaloneHtmlResponse(BaseModel):
+    html: str
+    inlined: int
+    bytes: int
+    failed: list[StandaloneImageFailure]
+
+
+async def _load_media(asset_id: uuid.UUID) -> tuple[bytes, str] | None:
+    session_factory = get_sessionmaker()
+    async with session_factory() as session:
+        asset = await session.get(MediaAsset, asset_id)
+    return (asset.data, asset.content_type) if asset is not None else None
+
+
+@router.post("/html/standalone", response_model=StandaloneHtmlResponse)
+async def standalone_html(payload: StandaloneHtmlRequest) -> StandaloneHtmlResponse:
+    """The page with every image written into it, for a download that renders on any device.
+
+    Free: `/media/{id}` images come from the database and anything else is a free read. Stores
+    nothing. An image that cannot be read keeps its URL and is listed in `failed`; the file is
+    always returned. See `app/services/standalone_html.py`.
+    """
+    result = await standalone_html_service.make_standalone(payload.html, _load_media)
+    return StandaloneHtmlResponse(
+        html=result.html,
+        inlined=result.inlined,
+        bytes=result.total_bytes,
+        failed=[StandaloneImageFailure(url=url[:500], reason=reason) for url, reason in result.failed],
     )
 
 

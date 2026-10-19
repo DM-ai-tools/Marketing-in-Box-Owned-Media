@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { embedImages } from "../lib/embedImages";
 import { fetchReplicaOutput, type ManusBuildEvent } from "./pipelineApi";
 import type { PipelineMessage } from "./pipelineStore";
 
@@ -28,6 +29,7 @@ export function ReplicaPanel({ message, label }: { message: PipelineMessage; lab
     setBusy(true);
     setError(null);
     void fetchReplicaOutput(replica.runId)
+      .then(({ html }) => embedImages(html))
       .then(({ html }) => {
         const url = URL.createObjectURL(new Blob([html], { type: "text/html;charset=utf-8" }));
         const link = document.createElement("a");

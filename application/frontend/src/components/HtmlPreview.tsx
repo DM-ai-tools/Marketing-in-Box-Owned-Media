@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
+import { embedImages } from "../lib/embedImages";
 import { toPreviewDocument } from "../lib/htmlBlocks";
 
 /** Live preview of a generated page (Pillar Page's "PART 3 — FULL DESIGNED PAGE" and friends).
@@ -183,14 +184,17 @@ function usePreviewActions(html: string, label: string) {
   }, [html]);
 
   const download = useCallback(() => {
-    const blob = new Blob([html], { type: "text/html" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `${label.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "page"}.html`;
-    a.click();
-    // Revoking in the same tick can cancel the download before the browser has read the blob.
-    setTimeout(() => URL.revokeObjectURL(url), 10_000);
+    // Images written in first, so the file renders on a device that cannot reach their URLs.
+    void embedImages(html).then((embedded) => {
+      const blob = new Blob([embedded.html], { type: "text/html" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${label.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "page"}.html`;
+      a.click();
+      // Revoking in the same tick can cancel the download before the browser has read the blob.
+      setTimeout(() => URL.revokeObjectURL(url), 10_000);
+    });
   }, [html, label]);
 
   return { copy, download, copied };

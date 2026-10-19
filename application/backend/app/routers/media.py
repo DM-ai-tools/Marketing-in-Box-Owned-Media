@@ -37,4 +37,14 @@ async def serve_media(asset_id: str) -> Response:
     if asset is None:
         raise HTTPException(status_code=404, detail="No media found for this id.")
 
-    return Response(content=asset.data, media_type=asset.content_type)
+    # A copied logo can be SVG, which a browser runs script in when opened directly. These headers
+    # keep it an image on this origin; the bytes never change for an id, so it caches forever.
+    return Response(
+        content=asset.data,
+        media_type=asset.content_type,
+        headers={
+            "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; img-src data:; sandbox",
+            "X-Content-Type-Options": "nosniff",
+            "Cache-Control": "public, max-age=31536000, immutable",
+        },
+    )

@@ -77,6 +77,9 @@ superseded, interrupted, failed, refining — without a browser or a new depende
   `plan_sub_services` text filed on the run have the same line shape. It also checks that a skip
   tells the plan to infer them, and that a Phase 2 run built on that run lists the planned
   sub-services first.
+- `embedImages.tsx` — HTML downloads carry their images. A page is sent to
+  `POST /pipeline/html/standalone` and the embedded page is what downloads. A report has only its
+  HTML page block replaced. An unreachable backend still downloads the page, labelled "images linked".
 
 ## What they do not cover
 

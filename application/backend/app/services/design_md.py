@@ -68,6 +68,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 
 from app.services import brandfetch_client, context_dev, firecrawl_client
@@ -80,7 +81,7 @@ from app.services.design_tokens import (
     is_theme_bundled_asset,
     tokens_to_css,
 )
-from app.services.scraper import looks_like_block_page
+from app.services.scraper import ScrapeError, fetch_asset, looks_like_block_page
 from app.services.image_briefs import ImageBrief, build_image_briefs
 from app.services.link_manifest import LinkManifest, extract_link_manifest, links_markdown
 from app.services.page_structure import PageStructure, extract_page_structure, structure_markdown
@@ -546,6 +547,182 @@ async def _capture_brand_fallback(url: str, needs: set[str]) -> tuple[BrandFallb
 
 
 # ----------------------------------------------------------------------------------------------
+# The logo, hosted here
+# ----------------------------------------------------------------------------------------------
+#
+# The generated page used to reference the logo at the client's own URL, and on Click Trends it
+# never loaded: SiteGround serves `image-1-2.png` to a visitor on clicktrends.com.au and refuses
+# it to the same browser on any other site (bot check / hotlink protection), so the preview, the
+# HTML report and the deployed page all showed a broken image where the brand should be. Any
+# client's host can start doing that at any time, so the page never depends on it: the logo's
+# bytes are copied once per capture into `media_assets` and the document offers only that copy.
+
+
+@dataclass(frozen=True)
+class LogoFile:
+    """The logo's bytes and where they came from, ready to be hosted."""
+
+    data: bytes = field(repr=False)
+    mime_type: str
+    #: The URL the bytes were read from: the page's own file, or a brand-index CDN copy.
+    origin_url: str
+    #: Who supplied it — "the page itself", "brandfetch", "context.dev brand record", "firecrawl".
+    via: str
+
+
+@dataclass(frozen=True)
+class HostedLogo:
+    """The logo as served by this backend. `url` is what the document hands the model."""
+
+    url: str
+    origin_url: str
+    via: str
+    mime_type: str
+
+    def to_dict(self) -> dict[str, str]:
+        return {"url": self.url, "origin_url": self.origin_url, "via": self.via, "mime_type": self.mime_type}
+
+
+#: Stores the bytes and returns the absolute URL they are served at, or None. Supplied by the
+#: caller, because only the router has a database session; the preview route passes none.
+ImageHost = Callable[[bytes, str], Awaitable["str | None"]]
+
+_IMAGE_ACCEPT = "image/avif,image/webp,image/svg+xml,image/png,image/*;q=0.8"
+_MAX_HOSTED_LOGO_BYTES = 400_000
+
+
+#: Past these, an image the document offers keeps its original URL. Bounds the free reads one capture
+#: makes (a logo strip can run to dozens of marks) and the rows it writes.
+_MAX_COPIED_IMAGES = 24
+_MAX_COPIED_IMAGE_BYTES = 5_000_000
+
+
+async def _read_image_file(
+    url: str, via: str, referer: str | None = None, max_bytes: int = _MAX_HOSTED_LOGO_BYTES
+) -> LogoFile | None:
+    """One candidate's bytes, or None when it is not a usable image."""
+    if not url or url.startswith("data:") or _NOT_A_LOGO.search(url):
+        return None
+    try:
+        fetched = await fetch_asset(url, accept=_IMAGE_ACCEPT, referer=referer, max_bytes=max_bytes)
+    except ScrapeError as exc:
+        logger.info("Image copy: could not read %s (%s)", url[:90], exc)
+        return None
+    mime = (fetched.content_type or "").split(";")[0].strip().lower()
+    if not mime.startswith("image/") or not fetched.content:
+        logger.info("Image copy: %s is %r, not an image", url[:90], mime)
+        return None
+    return LogoFile(data=fetched.content, mime_type=mime, origin_url=url, via=via)
+
+
+#: An image the document hands the model as a tag to copy. Media URLs are already ours.
+_OFFERED_IMG = re.compile(r"""<img\s+src="(https?://[^"\s]+)\"""")
+
+
+async def _host_offered_images(
+    documents: tuple[str, ...], page_url: str, host_image: ImageHost
+) -> tuple[dict[str, str], list[str]]:
+    """Copy every client-site image the documents offer (the logo strip, the logo's placement) to
+    this backend, for the same reason as the logo: the client's host may refuse them to any other
+    site. Free reads only — never a paid reader per image. Returns {original: hosted}."""
+    offered: list[str] = []
+    for document in documents:
+        for found in _OFFERED_IMG.finditer(document):
+            src = found.group(1)
+            if "/media/" not in src and src not in offered:
+                offered.append(src)
+    notes: list[str] = []
+    if len(offered) > _MAX_COPIED_IMAGES:
+        notes.append(
+            f"{len(offered)} images are offered; the first {_MAX_COPIED_IMAGES} were copied and the "
+            "rest link the client's own files."
+        )
+    batch = offered[:_MAX_COPIED_IMAGES]
+    files = await asyncio.gather(
+        *(_read_image_file(src, "the page itself", referer=page_url, max_bytes=_MAX_COPIED_IMAGE_BYTES) for src in batch)
+    )
+    hosted: dict[str, str] = {}
+    failed = 0
+    for src, file in zip(batch, files):
+        if file is None:
+            failed += 1
+            continue
+        try:
+            url = await host_image(file.data, file.mime_type)
+        except Exception as exc:  # noqa: BLE001 — an image that cannot be stored is linked instead
+            logger.warning("Could not host %s: %s", src[:90], exc)
+            url = None
+        if url:
+            hosted[src] = url
+        else:
+            failed += 1
+    if failed:
+        notes.append(
+            f"{failed} of the page's images could not be copied, so the page links the client's own "
+            "files for those, which may not load off their site."
+        )
+    return hosted, notes
+
+
+def _replace_urls(document: str, hosted: dict[str, str]) -> str:
+    for original, copy in hosted.items():
+        document = document.replace(original, copy)
+    return document
+
+
+async def _logo_file(
+    url: str, tokens: DesignTokens | None, fallback: BrandFallback | None
+) -> tuple[LogoFile | None, list[str]]:
+    """The logo's bytes, from the cheapest reader that has them.
+
+    1. The page's own file, which the logo check already fetched (free).
+    2. The file a fallback reader named (Firecrawl / Brandfetch, already paid for).
+    3. Brandfetch's brand record for the domain, when the page's file was walled off.
+    4. Context.dev's brand record (10 credits), only when nothing above had the bytes.
+
+    An inline-SVG logo needs none of this: it is already in the document, self-contained.
+    """
+    notes: list[str] = []
+    logo = tokens.logo if tokens is not None and tokens.available else None
+    if logo is not None and logo.svg_markup:
+        return None, notes
+    if logo is not None and logo.content and logo.mime_type:
+        return LogoFile(data=logo.content, mime_type=logo.mime_type, origin_url=logo.url, via="the page itself"), notes
+
+    if fallback is not None and fallback.logo_url:
+        found = await _read_image_file(fallback.logo_url, fallback.source)
+        if found is not None:
+            return found, notes
+
+    if brandfetch_client.is_configured():
+        try:
+            record = await brandfetch_client.retrieve_brand(_host(url))
+            found = await _read_image_file(_usable_fallback_logo(record.logo_url, url) or "", "brandfetch")
+            if found is not None:
+                return found, notes
+        except brandfetch_client.BrandfetchError as exc:
+            notes.append(f"Brandfetch had no logo file for {_host(url)}: {exc}")
+
+    if context_dev.is_configured():
+        try:
+            record = await context_dev.retrieve_brand(_host(url))
+            ranked = sorted(record.logos, key=lambda pair: 0 if pair[0] == "logo" else 1)
+            for _kind, logo_url in ranked:
+                found = await _read_image_file(logo_url, "context.dev brand record")
+                if found is not None:
+                    return found, notes
+        except context_dev.ContextDevError as exc:
+            notes.append(f"Context.dev had no logo file for {_host(url)}: {exc}")
+
+    if logo is not None and logo.url:
+        notes.append(
+            "The logo file could not be copied (the client's site refused the read and no brand "
+            "index had it), so the page links the client's own file, which may not load off their site."
+        )
+    return None, notes
+
+
+# ----------------------------------------------------------------------------------------------
 # The document
 # ----------------------------------------------------------------------------------------------
 
@@ -578,6 +755,10 @@ class PageDesign:
     sources: tuple[str, ...] = ()
     notes: list[str] = field(default_factory=list)
     image_briefs: tuple[ImageBrief, ...] = ()
+    #: The logo copied to this backend, when the caller supplied somewhere to put it.
+    hosted_logo: HostedLogo | None = None
+    #: Every other page image the document offers, copied the same way: {original URL: hosted URL}.
+    hosted_images: dict[str, str] = field(default_factory=dict)
 
     @property
     def model_screenshots(self) -> tuple[context_dev.Screenshot, ...]:
@@ -686,7 +867,44 @@ def _webfont_lines(
     return out
 
 
-def _logo_lines(tokens: DesignTokens | None, fallback: "BrandFallback | None" = None) -> list[str]:
+def _hosted_logo_lines(hosted: HostedLogo, alt: str, logo_source: str | None) -> list[str]:
+    """The Logo section when the file is served by this backend: one URL, nothing else to choose.
+
+    The client's own URL is named only as provenance, outside any snippet, and the data URI is not
+    offered: with a working short URL in hand it is only a ~16,000-character way to go wrong."""
+    found = f"Found as {logo_source}; " if logo_source else ""
+    return [
+        "| Field | Value |",
+        "|---|---|",
+        f"| Use this URL | `{hosted.url}` |",
+        f"| Type | {hosted.mime_type} |",
+        f"| Copied from | {_host(hosted.origin_url) or 'inline'} (via {hosted.via}) |",
+        "",
+        f"{found}copied to this backend because a client's own host may refuse to serve its logo to "
+        "any other site (bot protection, hotlink blocking). Use this exact tag, verbatim — never a "
+        "URL on the client's own site, which can render as a broken image once the page is anywhere else:",
+        "",
+        "```html",
+        f'<img src="{hosted.url}" alt="{alt}">',
+        "```",
+        "",
+    ]
+
+
+def _logo_alt(alt_text: str | None) -> str:
+    """The page's own alt text when it describes a logo; otherwise a plain one. A theme slot can carry
+    any alt (Click Trends' mark was "Mobile-friendly Magento store preview"), and copying that onto
+    the logo is wrong for screen readers and for the page check alike."""
+    if alt_text and re.search(r"\blogo\b", alt_text, re.I) and len(alt_text) <= 80:
+        return alt_text
+    return "Company logo"
+
+
+def _logo_lines(
+    tokens: DesignTokens | None,
+    fallback: "BrandFallback | None" = None,
+    hosted: HostedLogo | None = None,
+) -> list[str]:
     """The client's own logo, in every form that can be pasted into generated HTML.
 
     Only the local CSS parse finds this — `/web/styleguide` has no logo field — which is the main
@@ -707,6 +925,15 @@ def _logo_lines(tokens: DesignTokens | None, fallback: "BrandFallback | None" = 
     offered second, for when a self-contained file matters more than a short one.
     """
     if tokens is None or not tokens.available or tokens.logo is None:
+        if hosted is not None:
+            return [
+                "## Logo — use THIS, do not recreate it",
+                "",
+                "Use the client's real mark exactly as given below. Do NOT redraw it as an SVG of "
+                "your own, do NOT set the company name as styled text, and do NOT substitute an "
+                "icon. Preserve its aspect ratio: set one dimension and leave the other `auto`.",
+                "",
+            ] + _hosted_logo_lines(hosted, "Company logo", None)
         if fallback is not None and fallback.logo_url:
             return [
                 "## Logo — use THIS, do not recreate it",
@@ -747,7 +974,9 @@ def _logo_lines(tokens: DesignTokens | None, fallback: "BrandFallback | None" = 
         ]
         return out + [""]
 
-    alt = logo.alt_text or "Company logo"
+    alt = _logo_alt(logo.alt_text)
+    if hosted is not None:
+        return out + _hosted_logo_lines(hosted, alt, logo.source)
     out += ["| Field | Value |", "|---|---|", f"| Found as | {logo.source} |", f"| URL | `{logo.url}` |"]
     if logo.mime_type:
         out.append(f"| Type | {logo.mime_type} |")
@@ -852,6 +1081,7 @@ def build_design_md(
     links: LinkManifest | None = None,
     theme_only: bool = False,
     fallback: BrandFallback | None = None,
+    hosted_logo: HostedLogo | None = None,
 ) -> str:
     """Render the DESIGN.md. Pure — every argument is already-measured data, so this is the part
     covered by tests without a network.
@@ -1011,7 +1241,7 @@ def build_design_md(
                 out.append("")
 
     out += _site_token_lines(tokens)
-    out += _logo_lines(tokens, fallback)
+    out += _logo_lines(tokens, fallback, hosted_logo)
 
     if not theme_only and screenshots:
         out += ["## Reference screenshots", ""]
@@ -1041,7 +1271,16 @@ def build_design_md(
         )
     out.append("")
 
-    return "\n".join(out)
+    document = "\n".join(out)
+    if hosted_logo is not None:
+        # The structure walk and the image list name the logo file too; one URL for it everywhere,
+        # so the original is never offered as an alternative. The page's own file is replaced even
+        # when the copy came from a brand index: it is the same mark, and it is the URL that breaks.
+        page_logo = tokens.logo.url if tokens is not None and tokens.logo is not None else ""
+        for original in {hosted_logo.origin_url, page_logo}:
+            if original.startswith("http") and original != source_url:
+                document = document.replace(original, hosted_logo.url)
+    return document
 
 
 #: Used when the page's CSS declares no width breakpoints — the common phone / tablet / desktop
@@ -1109,7 +1348,7 @@ def _site_name(url: str) -> str:
 
 
 async def capture_page_design(
-    url: str, *, with_screenshots: bool = True, subject_context: str = ""
+    url: str, *, with_screenshots: bool = True, subject_context: str = "", host_image: ImageHost | None = None
 ) -> PageDesign:
     """Read one page every way this backend can, and return its DESIGN.md.
 
@@ -1132,6 +1371,10 @@ async def capture_page_design(
     image in the client's actual subject matter instead of inventing one. `subject_context` (a short
     description of the service this run is for, from the stage's own intake) is passed straight
     through to the same function for the same reason.
+
+    `host_image`, when given, stores the logo's bytes and returns the URL this backend serves them
+    at; the document then offers only that URL (see `_logo_file`). The preview route passes none,
+    since it stores nothing, and its document links the client's own file.
     """
     use_context_dev = context_dev.is_configured()
     use_firecrawl_images = firecrawl_client.is_configured()
@@ -1289,6 +1532,23 @@ async def capture_page_design(
             image_briefs=(),
         )
 
+    hosted_logo: HostedLogo | None = None
+    if host_image is not None:
+        logo_file, logo_notes = await _logo_file(url, tokens, fallback)
+        notes.extend(logo_notes)
+        if logo_file is not None:
+            try:
+                hosted_url = await host_image(logo_file.data, logo_file.mime_type)
+            except Exception as exc:  # noqa: BLE001 — a logo that cannot be stored is linked instead
+                logger.warning("Could not host the logo for %r: %s", url, exc)
+                notes.append(f"The logo could not be stored, so the page links the client's own file: {exc}")
+                hosted_url = None
+            if hosted_url:
+                hosted_logo = HostedLogo(
+                    url=hosted_url, origin_url=logo_file.origin_url, via=logo_file.via, mime_type=logo_file.mime_type
+                )
+                sources.append(f"logo hosted ({logo_file.via})")
+
     design_md = build_design_md(
         url,
         guide,
@@ -1298,6 +1558,7 @@ async def capture_page_design(
         structure=structure,
         links=links,
         fallback=fallback,
+        hosted_logo=hosted_logo,
     )
     # Specs only — role, ratio, prompt. What actually reaches the model is real hosted URLs,
     # generated server-side once real ones exist (`image_briefs.generate_all`, wired from
@@ -1309,7 +1570,17 @@ async def capture_page_design(
         subject_context=subject_context,
         reference_image_urls=reference_images.all_urls if reference_images is not None else (),
     )
-    theme_brief = build_design_md(url, guide, fonts_data, tokens, theme_only=True, fallback=fallback)
+    theme_brief = build_design_md(
+        url, guide, fonts_data, tokens, theme_only=True, fallback=fallback, hosted_logo=hosted_logo
+    )
+    hosted_images: dict[str, str] = {}
+    if host_image is not None:
+        hosted_images, image_notes = await _host_offered_images((design_md, theme_brief), url, host_image)
+        notes.extend(image_notes)
+        if hosted_images:
+            design_md = _replace_urls(design_md, hosted_images)
+            theme_brief = _replace_urls(theme_brief, hosted_images)
+            sources.append(f"{len(hosted_images)} page image(s) hosted")
 
     logger.info(
         "Captured page design url=%r sources=%s shots=%s model_safe_shots=%s bands=%s chars=%s",
@@ -1331,4 +1602,6 @@ async def capture_page_design(
         sources=tuple(sources),
         notes=notes,
         image_briefs=image_briefs,
+        hosted_logo=hosted_logo,
+        hosted_images=hosted_images,
     )
