@@ -1,3 +1,4 @@
+import { FunnelBuildMenuItem } from "./FunnelBuildMenuItem";
 import { PlanMapDownload } from "./PlanMapDownload";
 import { SlideDeckMenuItem } from "./SlideDeckMenuItem";
 
@@ -28,5 +29,7 @@ export function AssetFileDownloads({
 }) {
   if (assetId === "plan_of_action") return <PlanMapDownload text={text} label={label} variant={variant} onDone={onDone} />;
   if (assetId === "webinar") return <SlideDeckMenuItem text={text} runId={runId} variant={variant} onDone={onDone} />;
+  // The deployable funnel reads both documents off the run, so either card can open it.
+  if (assetId === "funnel" || assetId === "funnel_hub_media") return <FunnelBuildMenuItem variant={variant} onDone={onDone} />;
   return null;
 }

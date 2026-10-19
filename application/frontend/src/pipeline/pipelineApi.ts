@@ -992,6 +992,164 @@ export async function fetchReplicaOutput(runId: string): Promise<ReplicaReport &
   return unwrap(res, "Assembled page");
 }
 
+// ------------------------------------------------------------------------------------------------
+// The deployable funnel — `app/routers/funnel_build.py`
+// ------------------------------------------------------------------------------------------------
+
+export interface FunnelBuildPlan {
+  title: string;
+  files: { key: string; title: string; url_path: string; file_path: string; screens: number }[];
+  emails: { key: string; title: string; subject: string }[];
+}
+
+export interface FunnelBuildReady {
+  funnel: boolean;
+  hub: boolean;
+  buildable: boolean;
+  plan: FunnelBuildPlan | null;
+  built: boolean;
+  built_at: string | null;
+}
+
+export interface FunnelPageIssue {
+  severity: "error" | "warn" | "info";
+  quote: string;
+  why: string;
+  fix: string;
+}
+
+/** One built page or email, without its HTML (`GET …/funnel-build` carries that). */
+export interface FunnelBuiltItem {
+  key: string;
+  kind: "page" | "email";
+  title: string;
+  file_path: string;
+  url_path: string;
+  subject: string;
+  notes: string;
+  score: number | null;
+  verdict: string;
+  issues: FunnelPageIssue[];
+  error: string;
+  /** Every change requested on this file, and how many edits each placed. */
+  revisions?: { note: string; applied: number }[];
+  html?: string;
+}
+
+export type FunnelBuildEvent =
+  | { type: "plan"; plan: FunnelBuildPlan; hub: boolean }
+  | { type: "inputs"; forms: { action: string; page_url: string }[]; notes: string[]; branded: boolean }
+  | { type: "item_start"; key: string; kind: "page" | "email" }
+  | { type: "item_done"; item: FunnelBuiltItem }
+  | { type: "done"; version: number; items: FunnelBuiltItem[]; engine?: FunnelBuildEngine }
+  | { type: "error"; message: string }
+  /** The Manus task building the pages: its status every poll, then "done" or "fallback". */
+  | FunnelManusEvent;
+
+export interface FunnelManusEvent {
+  type: "manus";
+  status: string;
+  task_url?: string;
+  elapsed?: number;
+  brief?: string;
+  credits?: number | null;
+  /** On "fallback": why Manus could not build the pages, so Claude did. */
+  reason?: string;
+}
+
+/** Which builder made the pages. */
+export interface FunnelBuildEngine {
+  pages: "manus" | "claude";
+  task_url?: string;
+  credits?: number | null;
+  manus_fallback?: string;
+}
+
+export async function fetchFunnelBuildReady(runId: string): Promise<FunnelBuildReady> {
+  const res = await fetch(`/api/pipeline/runs/${runId}/funnel-build/ready`);
+  return unwrap(res, "Funnel build check");
+}
+
+export async function fetchFunnelBuild(runId: string): Promise<{ items: FunnelBuiltItem[]; built_at: string }> {
+  const res = await fetch(`/api/pipeline/runs/${runId}/funnel-build`);
+  return unwrap(res, "Deployable funnel");
+}
+
+interface FunnelBuildBody {
+  client_profile: Record<string, string>;
+  phase: string;
+  chat_session_id: string | null;
+  include_emails?: boolean;
+  /** Build only these pages / emails and merge them into the stored build (a rebuild). */
+  only?: string[];
+}
+
+/** Build every page and email, reporting each as it finishes. Resolves once the build is stored. */
+export async function streamFunnelBuild(
+  runId: string,
+  body: FunnelBuildBody,
+  onEvent: (event: FunnelBuildEvent) => void,
+  signal?: AbortSignal,
+): Promise<void> {
+  const res = await fetch(`/api/pipeline/runs/${runId}/funnel-build/stream`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+    signal,
+  });
+  if (!res.ok || !res.body) {
+    await unwrap(res, "Funnel build");
+    return;
+  }
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    let sep: number;
+    while ((sep = buffer.indexOf("\n\n")) !== -1) {
+      const raw = buffer.slice(0, sep);
+      buffer = buffer.slice(sep + 2);
+      const line = raw.split("\n").find((l) => l.startsWith("data:"));
+      if (!line) continue; // a keepalive comment
+      try {
+        onEvent(JSON.parse(line.slice(5).trim()) as FunnelBuildEvent);
+      } catch {
+        // A malformed event is skipped; the final `done` carries every result again.
+      }
+    }
+  }
+}
+
+export interface FunnelRevisionResult {
+  item: FunnelBuiltItem;
+  /** How many of the edits landed. 0 means the file is exactly as it was. */
+  applied: number;
+  not_applied: { excerpt: string; why: string }[];
+  /** The reply held no readable edit list, so nothing was changed. */
+  unreadable: boolean;
+}
+
+/** Apply a requested change to one built page or email, as exact edits — nothing else changes. */
+export async function reviseFunnelItem(
+  runId: string,
+  key: string,
+  body: FunnelBuildBody & { note: string },
+): Promise<FunnelRevisionResult> {
+  const res = await fetch(`/api/pipeline/runs/${runId}/funnel-build/items/${encodeURIComponent(key)}/revise`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  return unwrap(res, "Requested change");
+}
+
+export function funnelBuildZipUrl(runId: string): string {
+  return `/api/pipeline/runs/${runId}/funnel-build/zip`;
+}
+
 export interface StandaloneHtml {
   html: string;
   inlined: number;

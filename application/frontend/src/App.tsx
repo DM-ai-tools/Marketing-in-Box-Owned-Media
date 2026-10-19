@@ -5,6 +5,7 @@ import { ChatDeleteDialog } from "./pipeline/ChatDeleteDialog";
 import { GenerationDeleteDialog } from "./pipeline/GenerationDeleteDialog";
 import { ChatHistorySidebar } from "./pipeline/ChatHistorySidebar";
 import { ProviderNoticeToast } from "./pipeline/ProviderNoticeToast";
+import { TimedToast } from "./pipeline/TimedToast";
 import { AhrefsActivity } from "./pipeline/AhrefsActivity";
 import { FaultDialog } from "./pipeline/FaultDialog";
 import { GenerationStream } from "./pipeline/GenerationStream";
@@ -121,6 +122,7 @@ function App() {
       <GenerationDeleteDialog />
       {/* Raised from the pipeline store when Ahrefs keyword data could not be fetched. */}
       <ProviderNoticeToast />
+      <TimedToast />
       {/* Ahrefs at work: an animated chip while keyword data is fetched, and what it measured. */}
       <AhrefsActivity />
 

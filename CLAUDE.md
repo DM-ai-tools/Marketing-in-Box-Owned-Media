@@ -675,8 +675,9 @@ sections follow the content.** No intake question switches this — it is how th
 ## Manus — the Pillar Page builder
 
 With a Manus key set, the Pillar Page's page is built by a Manus agent, not by one streamed Claude
-call. Manus works in its own sandbox and can open the page it is writing. Every other stage, and
-CRO, stays on Claude.
+call. Manus works in its own sandbox and can open the page it is writing. The deployable funnel's
+pages are built by Manus too (see "The deployable funnel" below), through the same task loop
+(`manus_page.run_task`). Every other stage, and CRO, stays on Claude.
 
 - **The key.** `MANUS_API_KEY` in the backend `.env`. `manus` is read too, which is how it was first
   added. On Railway, set `MANUS_API_KEY`, because Linux env names are case-sensitive. Sent as
@@ -1498,8 +1499,102 @@ competitor step and no competitor stage, so every funnel printed "STEP 2 SKIPPED
   market. A funnel sells one service, so `runCompetitorStep` sends `target_service`
   (`SERVICE_SCOPED_COMPETITOR_IDS`). In Phase 2 that is the sub-service, as for every search.
 - **It reaches the prompt as `competitor_funnel_analysis`** (`funnel.json`, the catalog's `ctx`).
-  Step 2 still writes its one-line skip when the operator supplies none.
-- `tests/test_funnel_competitors.py` pins the wiring.
+  Step 2 still writes its one-line skip only if that input is blank.
+- **It never asks the operator for a pasted list.** This has broken once. A Re-run went straight to
+  the intake (`beginMainIntake`), assuming the search had been approved before. For runs whose funnel
+  predated the search it had not, so the intake asked for the list. `rerunStage` now goes through
+  `enterStageWithStoredPrepass`: a listing stored on the run is loaded and reused (no second charge);
+  with none, the search runs. If the walk still reaches the input empty, `FUNNEL_CONSENT` offers the
+  research card on the run's service (`topicFallsBackToRunService`), in both phases.
+- `tests/test_funnel_competitors.py` pins the wiring; `smoke/funnelCompetitors.tsx` the three
+  entries above.
+
+## The deployable funnel — Funnel + Funnel Hub & Media, built as files
+
+Once Funnel and Funnel Hub & Media are both approved in a leg, a `funnel-build` card offers to build
+the funnel as publishable files (`maybeOfferFunnelBuild`, from `saveStage`). It is not a numbered
+stage: the sequence, the plan's stage list and everything keyed to them are unchanged. "Build
+deployable funnel" on either card's menu (`FunnelBuildMenuItem`) offers it again, and opens a stored
+build instead of rebuilding.
+
+| Step | Where | What |
+| --- | --- | --- |
+| Plan | `funnel_plan.parse_funnel_document` | One HTML file per URL the Funnel names (`/a/b/` → `a/b/index.html`), several screens in one file where the funnel runs them at one URL, and the emails. Parsed, never summarised. |
+| Forms | `reference_forms.read_forms` | The client's working forms on the reference page and its primary CTA's page: action, method, hidden inputs, field names. Free read; a bot-walled page is read rendered via Context.dev (1 credit, at most 3). |
+| Build | `manus_funnel.build_pages`, `funnel_build.build_all` | Pages: one Manus task for all of them, from the live reference page (below). Emails: one Sonnet call each, alongside. Claude builds the pages too when Manus is unconfigured, off or fails. |
+| Check | `funnel_build.check_built_page` | The pillar page's deploy check, on every page. |
+| Bundle | `GET …/funnel-build/zip` | Every page at its funnel path with images written in (`standalone_html`), the emails, a README. |
+
+- **Manus builds the pages as the client's site, not in its design language** (`manus_funnel.py`).
+  Claude handed DESIGN.md gets the palette and type right, invents its own layout and adds no motion.
+  The deployable funnel must look and move like the reference page, so Manus works from it directly.
+  - **Measured in a browser.** It opens the reference URL in its sandbox browser, screenshots it at
+    1440px and 390px, and reads computed styles, header behaviour, component states and every
+    animation: transitions, keyframes, scroll reveals, library settings such as AOS, GSAP or
+    Elementor.
+  - **Reproduced exactly.** It rebuilds all of that in vanilla CSS/JS (`Funnel_Manus_Fidelity.md`,
+    which overrides the page rules' Rule 2). Content stays visible without JS, and
+    `prefers-reduced-motion` is honoured.
+  - **One task, every page,** so the pages share one reading of the reference. The brief travels as
+    `brief.md`, with every stored screenshot as URL parts, the full-page one included: Manus is not
+    bound by the model API's 8000px limit.
+  - **Files come back by name.** `<key>.html` per page and `build-notes.md` with `## <key>` sections
+    (a shared "Design measured" list goes on each). A page not delivered is an error on its row.
+  - **It shares the Pillar Page's loop.** `manus_page.run_task` handles the MIAB project, nudges,
+    `MAX_WAIT_SECONDS` (45 min here) and resume-on-reconnect by run and brief. A dropped stream
+    never buys a second task.
+  - **Fallback.** Manus failing sends a `manus` event with `status: "fallback"` and the reason, and
+    Claude builds the pages. `MANUS_FUNNEL_BUILDER=off` turns Manus off. The stored build records
+    `engine`.
+  - **Rebuild** of one page is the same stream with `only: [key]` (a Manus task for that page),
+    merged into the stored build. **Request changes** stays Claude's exact edits: fast, and only
+    what was asked.
+- **The same design inputs either way:** the full DESIGN.md, `PAGE_BUILD_STANDARDS.md`, the run's
+  hosted images and the reference screenshots. The design sheet is read at the URL it was captured
+  from, so a build never re-captures a different page.
+- **Copy is the approved copy.** The prompts carry it verbatim and treat the copywriter's notes
+  (CRO Trigger, Style note) as build instructions. A `[PLACEHOLDER]` is left out and listed in the
+  page's build notes, as on the Pillar Page.
+- **Forms post to the client's real form.** Its action, method and every hidden input (Contact Form
+  7 refuses a post without `_wpcf7*`), its field names where the funnel asks the same thing. A funnel
+  question it has no field for is listed under "Form mapping". With no form, the step links to the
+  client's CTA; no endpoint is invented.
+- **Funnel pages link each other relatively** (`FunnelFile.href_to`), so the bundle deploys at the
+  client's root with the funnel's own URLs.
+- **Hub routing.** Funnel Hub & Media (its prose, HTML stripped, `HUB_CHARS`) supplies the converging
+  main offer for the booking page and the cascade for the thank-you page. Never a new offer.
+- **This run's documents only** (`_entry_text_on_run`): a Phase 2 run builds its own sub-service
+  funnel, never the parent's.
+- **The forward walk waits on the card.** When an approval offers the build (not on a re-run's
+  return), `saveStage` stops there instead of starting the next stage, so the next stage is not
+  started underneath the card. `funnelBuildAwaitsOperator` makes an open card the operator's turn for
+  `selectNeedsResume`.
+- **Save puts it in Deliverables and moves on.** `saveFunnelBuild` marks the card `saved`, which the
+  Deliverables grid lists as a "Deployable funnel" tile: it opens the card in the transcript, offers
+  the zip, and counts toward the tab. "Not now" also moves on.
+  - **Where to.** `continueAfterFunnelBuild` goes to the next stage still to build
+    (`nextUnexecutedIndex`). If a stage is already under way, it resurfaces that stage's pending card
+    instead.
+  - **Nothing left.** It finishes the phase and shows a 3-second notice (`showToast` / `TimedToast`)
+    that there are no more assets to run.
+- **One file failing never fails the build.** It is reported on its row, with Rebuild.
+- **"Request changes" on each row edits that file only** (`POST …/funnel-build/items/{key}/revise`,
+  `funnel_build.revise_item`). It uses the Pillar Page's Refine mechanism (`page_revision`): the model
+  returns find/replace edits against the built HTML, `apply_edits` places them, and every byte no
+  edit names stays as built. Not layout-locked, because the operator may ask for a layout change.
+  - **Inputs.** The edit prompt gets the file's approved funnel copy and DESIGN.md (the theme brief
+    for an email). `_check_inputs` reads them from the stored design: no form read, no capture, one
+    model call.
+  - **Results.** Nothing applied stores nothing. An unreadable reply changes nothing and says so;
+    it never falls back to a rebuild. A changed page is re-checked.
+  - **History and wording.** Each note is kept on the file (`revisions`). The row reports what
+    landed and, when nothing did, why. "Rebuild" is the other tool: a new page from the copy.
+- **A loopback run image is not a check finding** here: the zip embeds it (`_LOOPBACK_IMAGE`).
+- Stored under `funnel_build` on the run, a new version per build. The card carries summaries; a
+  preview fetches the stored HTML, so what is previewed is what the zip holds.
+- Three real Funnel shapes are pinned in `tests/test_funnel_build.py`: one page per URL, screens
+  marked "same tool instance", and a page with no URL line whose header says "same URL as entry".
+  `smoke/funnelBuild.tsx` drives the offer, the build, the card and the menu entry.
 
 ## Funnel Hub & Media — a selected set, not all eighteen
 

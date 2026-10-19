@@ -510,10 +510,25 @@ export const GATED_COMPETITOR_MAIN_ASSET_IDS = new Set<string>([
  * rather than being handed either an unasked-for search or a paste-it-yourself question.
  *
  * `topicFieldId` must sit earlier in the asset's field list than the competitor field itself. */
-export const COMPETITOR_CONSENT_FIELDS: Record<
-  string,
-  { competitorAssetId: string; topicFieldId: string; subject: string }
-> = {
+export type CompetitorConsentConfig = {
+  competitorAssetId: string;
+  topicFieldId: string;
+  subject: string;
+  /** Search on the run's own service (Phase 1) or sub-service (Phase 2) when `topicFieldId` is blank.
+   * For a field whose topic question is optional and usually left blank. */
+  topicFallsBackToRunService?: boolean;
+};
+
+/** The Funnel's safety net. Its search normally runs before its intake (it is gated); this offers it
+ * again if the walk ever reaches the input with no listing, rather than asking for a pasted list. */
+const FUNNEL_CONSENT: CompetitorConsentConfig = {
+  competitorAssetId: "competitor_analysis_funnel",
+  topicFieldId: "target_service_if_different_from_pillar_page",
+  subject: "funnels",
+  topicFallsBackToRunService: true,
+};
+
+export const COMPETITOR_CONSENT_FIELDS: Record<string, CompetitorConsentConfig> = {
   competitor_analysis_pillar_page: {
     competitorAssetId: "competitor_analysis_seo_pillar_page",
     topicFieldId: "primary_keyword_head_term",
@@ -534,6 +549,7 @@ export const COMPETITOR_CONSENT_FIELDS: Record<
     topicFieldId: "episode_topic_working_title",
     subject: "podcasts",
   },
+  competitor_funnel_analysis: FUNNEL_CONSENT,
 };
 
 /** Every main asset whose competitor analysis the UI drives explicitly, by either route above.
@@ -721,14 +737,11 @@ export const GATED_COMPETITOR_IDS_BY_PHASE: Record<PipelinePhase, ReadonlySet<st
   phase2: PHASE2_GATED_COMPETITOR_MAIN_ASSET_IDS,
 };
 
-/** Phase 2 has no mid-intake competitor consent step: its Pillar Page has no competitor input at
- * all, and its Blog researches before intake rather than during it. */
-export const COMPETITOR_CONSENT_FIELDS_BY_PHASE: Record<
-  PipelinePhase,
-  Record<string, { competitorAssetId: string; topicFieldId: string; subject: string }>
-> = {
+/** Phase 2's only mid-intake consent is the Funnel's safety net: its Pillar Page has no competitor
+ * input at all, and its Blog researches before intake rather than during it. */
+export const COMPETITOR_CONSENT_FIELDS_BY_PHASE: Record<PipelinePhase, Record<string, CompetitorConsentConfig>> = {
   phase1: COMPETITOR_CONSENT_FIELDS,
-  phase2: {},
+  phase2: { competitor_funnel_analysis: FUNNEL_CONSENT },
 };
 
 /** The industry of the audience a Phase 2 run sells its sub-service to — its own fact, not Phase 1's.

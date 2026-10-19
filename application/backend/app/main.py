@@ -41,7 +41,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from app.logging_config import configure_logging
-from app.routers import anthropic, auth, chat_sessions, intel, media, pipeline, usage
+from app.routers import anthropic, auth, chat_sessions, funnel_build, intel, media, pipeline, usage
 
 configure_logging()
 logger = logging.getLogger(__name__)
@@ -179,6 +179,8 @@ async def log_requests(request: Request, call_next):
 app.include_router(auth.router, prefix="/auth", tags=["auth"])
 app.include_router(anthropic.router, prefix="/test/anthropic", tags=["anthropic-test"])
 app.include_router(pipeline.router, prefix="/pipeline", tags=["pipeline"])
+# The deployable funnel: its own module, same `/pipeline/runs/{run_id}/…` space.
+app.include_router(funnel_build.router, prefix="/pipeline", tags=["funnel-build"])
 app.include_router(chat_sessions.router, prefix="/chat-sessions", tags=["chat-sessions"])
 app.include_router(usage.router, prefix="/usage", tags=["usage"])
 # Market intelligence over Context.dev (brand records, web search). Every call in there goes

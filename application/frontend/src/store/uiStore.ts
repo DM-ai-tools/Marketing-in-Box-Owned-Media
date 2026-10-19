@@ -94,6 +94,10 @@ interface UiState {
    * without volumes, so it is a notice, not a blocking dialog. Not persisted. */
   providerNotice: { title: string; detail: string } | null;
   notifyProvider: (notice: { title: string; detail: string }) => void;
+  /** A short notice that dismisses itself (`TimedToast` at the root). `id` lets a newer notice outlive
+   * the timer of the one it replaced. Not persisted. */
+  toast: { id: number; text: string } | null;
+  showToast: (text: string, ms?: number) => void;
   dismissProviderNotice: () => void;
   /** Ahrefs at work, for `AhrefsActivity` at the root: `working` while a keyword call is in flight,
    * `done` with what it measured once it lands. `id` lets a finish ignore a newer start, so two
@@ -204,6 +208,12 @@ export const useUiStore = create<UiState>((set) => ({
     set((s) => (s.ahrefsActivity?.id === id ? { ahrefsActivity: { id, phase: "done", ...done } } : {})),
   clearAhrefsActivity: (id) => set((s) => (id === undefined || s.ahrefsActivity?.id === id ? { ahrefsActivity: null } : {})),
   notifyProvider: (providerNotice) => set({ providerNotice }),
+  toast: null,
+  showToast: (text, ms = 3000) => {
+    const id = Date.now() + Math.random();
+    set({ toast: { id, text } });
+    setTimeout(() => set((s) => (s.toast?.id === id ? { toast: null } : {})), ms);
+  },
   dismissProviderNotice: () => set({ providerNotice: null }),
   askDeleteGeneration: (pendingGenerationDelete) => set({ pendingGenerationDelete }),
   cancelDeleteGeneration: () => set({ pendingGenerationDelete: null }),

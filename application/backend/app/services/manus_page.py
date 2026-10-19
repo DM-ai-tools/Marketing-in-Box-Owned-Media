@@ -32,7 +32,7 @@ import logging
 import os
 import re
 import time
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -193,18 +193,30 @@ def _progress(status: str, task: _Inflight, **extra: Any) -> dict[str, Any]:
     }
 
 
-async def build_page(
-    brief: str,
-    screenshot_urls: tuple[str, ...] = (),
+#: What a finished task is turned into: given the client and the task's events, the result fields
+#: (merged into `{"type": "manus_result", ...}`). Raises `ManusPageError` when nothing usable came back.
+Finisher = Callable[[ManusClient, list[manus_client.TaskEvent]], Awaitable[dict[str, Any]]]
+
+
+async def run_task(
+    content: list[dict[str, Any]],
+    key: str,
+    finish: Finisher,
     *,
     title: str = "",
+    noun: str = "the page",
     client_factory: Callable[[], ManusClient] = ManusClient,
     poll_seconds: float = POLL_SECONDS,
     max_wait_seconds: float = MAX_WAIT_SECONDS,
+    nudge: str = "",
 ) -> AsyncIterator[dict[str, Any]]:
-    """Run the build. Yields `{"type": "manus", ...}` progress events, then exactly one
-    `{"type": "manus_result", "document": str, ...}`. Raises `ManusPageError` on failure."""
-    key = _brief_key(brief, screenshot_urls)
+    """Create (or resume, by `key`) one Manus task in the MIAB project and see it through.
+
+    Yields `{"type": "manus", ...}` progress events, then exactly one `{"type": "manus_result", ...}`
+    carrying `finish`'s fields, the task link and the credits. Raises `ManusPageError` on failure.
+    Shared by the Pillar Page (`build_page`) and the deployable funnel (`manus_funnel`), so both get
+    the same nudging, timeout, and resume-on-reconnect rules.
+    """
     try:
         client = client_factory()
     except ManusError as exc:
@@ -216,14 +228,12 @@ async def build_page(
             yield _progress("resumed", task, brief="Reconnected to the build already running")
         else:
             try:
-                created = await client.create_task(
-                    build_content(brief, screenshot_urls), title=title, project_id=MANUS_PROJECT_ID
-                )
+                created = await client.create_task(content, title=title, project_id=MANUS_PROJECT_ID)
             except ManusError as exc:
                 raise ManusPageError(str(exc)) from exc
             task = _Inflight(created.task_id, created.task_url, time.monotonic())
             _inflight[key] = task
-            logger.info("Manus page task created task_id=%s", task.task_id)
+            logger.info("Manus task created task_id=%s for %s", task.task_id, noun)
             yield _progress("started", task, brief="Manus is reading the brief")
 
         nudges = 0
@@ -234,7 +244,7 @@ async def build_page(
                 await client.stop(task.task_id)
                 _inflight.pop(key, None)
                 raise ManusPageError(
-                    f"Manus had not finished the page after {int(max_wait_seconds // 60)} minutes, so the task was stopped."
+                    f"Manus had not finished {noun} after {int(max_wait_seconds // 60)} minutes, so the task was stopped."
                 )
             try:
                 detail = await client.detail(task.task_id)
@@ -251,40 +261,62 @@ async def build_page(
             if detail.status == "error":
                 _inflight.pop(key, None)
                 reason = _last_error(events) or "the task ended with an error"
-                raise ManusPageError(f"Manus could not build the page: {reason}")
+                raise ManusPageError(f"Manus could not build {noun}: {reason}")
             if detail.status == "waiting":
                 if nudges >= _MAX_NUDGES:
                     await client.stop(task.task_id)
                     _inflight.pop(key, None)
                     raise ManusPageError("Manus kept stopping to ask for input, so the build was stopped.")
                 nudges += 1
-                await client.send_message(task.task_id, _NUDGE)
+                await client.send_message(task.task_id, nudge or _NUDGE)
                 continue
             if detail.status != "stopped" or detail.background:
                 continue
 
-            page, report, last_text = _delivered(events)
-            if page is None and report is None:
-                _inflight.pop(key, None)
-                said = f' Its last message: "{last_text[:200]}"' if last_text else ""
-                raise ManusPageError(f"Manus stopped without attaching the page.{said}")
             try:
-                html = (await client.download(page)).decode("utf-8", errors="replace") if page else None
-                report_text = (await client.download(report)).decode("utf-8", errors="replace") if report else None
+                result = await finish(client, events)
             except ManusError as exc:
                 _inflight.pop(key, None)
                 raise ManusPageError(str(exc)) from exc
-            document = compose_document(report_text, html)
+            except ManusPageError:
+                _inflight.pop(key, None)
+                raise
             _inflight.pop(key, None)
-            logger.info(
-                "Manus page task done task_id=%s chars=%s credits=%s", task.task_id, len(document), detail.credit_usage
-            )
-            yield {
-                "type": "manus_result",
-                "document": document,
-                "task_url": task.task_url,
-                "credits": detail.credit_usage,
-            }
+            logger.info("Manus task done task_id=%s credits=%s", task.task_id, detail.credit_usage)
+            yield {"type": "manus_result", **result, "task_url": task.task_url, "credits": detail.credit_usage}
             return
     finally:
         await client.aclose()
+
+
+async def _finish_page(client: ManusClient, events: list[manus_client.TaskEvent]) -> dict[str, Any]:
+    page, report, last_text = _delivered(events)
+    if page is None and report is None:
+        said = f' Its last message: "{last_text[:200]}"' if last_text else ""
+        raise ManusPageError(f"Manus stopped without attaching the page.{said}")
+    html = (await client.download(page)).decode("utf-8", errors="replace") if page else None
+    report_text = (await client.download(report)).decode("utf-8", errors="replace") if report else None
+    return {"document": compose_document(report_text, html)}
+
+
+async def build_page(
+    brief: str,
+    screenshot_urls: tuple[str, ...] = (),
+    *,
+    title: str = "",
+    client_factory: Callable[[], ManusClient] = ManusClient,
+    poll_seconds: float = POLL_SECONDS,
+    max_wait_seconds: float = MAX_WAIT_SECONDS,
+) -> AsyncIterator[dict[str, Any]]:
+    """Run the build. Yields `{"type": "manus", ...}` progress events, then exactly one
+    `{"type": "manus_result", "document": str, ...}`. Raises `ManusPageError` on failure."""
+    async for event in run_task(
+        build_content(brief, screenshot_urls),
+        _brief_key(brief, screenshot_urls),
+        _finish_page,
+        title=title,
+        client_factory=client_factory,
+        poll_seconds=poll_seconds,
+        max_wait_seconds=max_wait_seconds,
+    ):
+        yield event

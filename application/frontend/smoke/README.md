@@ -80,6 +80,17 @@ superseded, interrupted, failed, refining — without a browser or a new depende
 - `embedImages.tsx` — HTML downloads carry their images. A page is sent to
   `POST /pipeline/html/standalone` and the embedded page is what downloads. A report has only its
   HTML page block replaced. An unreachable backend still downloads the page, labelled "images linked".
+- `funnelBuild.tsx` — the deployable funnel. Offered only once Funnel and Funnel Hub & Media are both
+  approved; the build streams each page and email onto the card in the funnel's order; the card shows
+  each page's deploy check, Preview, Rebuild and the zip; "Not now" says how to get back; the menu
+  entry reopens a stored build without building again. Request changes is offered on every finished
+  file, sends that file only with the operator's words, and reports what landed or why nothing did.
+  Save marks it saved, shows it on Deliverables with its zip and moves to the next stage still to
+  build; with none left a notice clears after 3 seconds. Approving Funnel Hub & Media parks the walk
+  on the offer, and Not now moves on.
+- `funnelCompetitors.tsx` — the Funnel researches its competitors and never asks for a pasted list.
+  A re-run with no listing runs the search on the run's service, a re-run with a stored listing
+  reuses it, and an intake that reaches the input empty offers research instead of a question.
 
 ## What they do not cover
 

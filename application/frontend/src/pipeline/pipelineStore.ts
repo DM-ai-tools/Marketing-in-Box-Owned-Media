@@ -12,8 +12,12 @@ import {
   createRun,
   fetchAssetReadiness,
   fetchCompetitorBriefing,
+  fetchFunnelBuild,
+  fetchFunnelBuildReady,
   fetchRunContext,
   fetchRunIndustry,
+  reviseFunnelItem,
+  streamFunnelBuild,
   inferIndustry,
   getChatSession,
   listHeadlineSlots,
@@ -38,6 +42,11 @@ import {
 } from "./pipelineApi";
 import { ApiFaultError, StreamTruncatedError, checkAsset } from "./pipelineApi";
 import type {
+  FunnelBuildEngine,
+  FunnelBuildEvent,
+  FunnelManusEvent,
+  FunnelBuildPlan,
+  FunnelBuiltItem,
   ManusBuildEvent,
   ReplicaReport,
   ReplicaStreamEvent,
@@ -130,7 +139,40 @@ export type PipelineMessageKind =
   /** The next stage is one the client's industry rarely needs: skip it (the default) or build it. */
   | "stage-advisory"
   /** The services (Phase 1) or sub-services (Phase 2) found on the reference page, to pick from. */
-  | "service-choice";
+  | "service-choice"
+  /** Once Funnel and Funnel Hub & Media are approved: build the funnel as deployable files. */
+  | "funnel-build";
+
+/** The deployable funnel card (`FunnelBuildCard`). Summaries only — the HTML stays on the server
+ * and is fetched for a preview, so a chat's saved state does not carry every page. */
+export interface FunnelBuildState {
+  status: "offer" | "building" | "done" | "declined" | "error";
+  plan?: FunnelBuildPlan;
+  /** Built so far, in plan order once the build finishes. */
+  items: FunnelBuiltItem[];
+  /** Keys being built right now. */
+  building: string[];
+  forms?: { action: string; page_url: string }[];
+  notes?: string[];
+  /** False when the run has no captured page design, so nothing could be built in the brand. */
+  branded?: boolean;
+  /** The one page or email being rebuilt, if any. */
+  rebuilding?: string | null;
+  /** The one page or email a requested change is being applied to, if any. */
+  revising?: string | null;
+  /** The Manus task building the pages: latest status, its own words, elapsed time, link, credits. */
+  manus?: FunnelManusEvent;
+  /** Which builder made the pages, once the build is done. */
+  engine?: FunnelBuildEngine;
+  /** Saved to Deliverables by the operator. The build itself is already stored on the run; this is
+   * the approval, which is also what moves the run on to its next stage. */
+  saved?: boolean;
+  savedAt?: string;
+  /** What the last requested change did, shown under its row. */
+  revision?: { key: string; applied: number; notApplied: { excerpt: string; why: string }[]; unreadable: boolean };
+  error?: string;
+  builtAt?: string;
+}
 
 /** A draft's check against the client's business (`POST /pipeline/check/{asset}`). Advisory only. */
 export interface AssetCheckState {
@@ -442,6 +484,8 @@ export interface PipelineMessage {
   industryStandalone?: boolean;
   /** Populated on `kind: "stage-advisory"`. */
   advisory?: StageAdvisoryState;
+  /** Populated on `kind: "funnel-build"`. */
+  funnelBuild?: FunnelBuildState;
   /** On a generation card: the check of this draft against the client's business. */
   check?: AssetCheckState;
   /** On the keyword prepass's announcement: what it mapped, so every later asset's "Ahrefs keyword
@@ -750,6 +794,16 @@ interface PipelineState {
    * genuinely aborted, not just hidden). Nothing already approved is touched, which is what makes
    * it safe enough to be one click with an inline confirm rather than a modal. */
   stopStage: () => void;
+  /** Offer the deployable funnel by hand (the Funnel / Hub card's menu): for a run whose two stages
+   * were approved before the offer existed. Opens the stored build when there is one. */
+  offerFunnelBuild: () => Promise<void>;
+  startFunnelBuild: (messageId: string) => Promise<void>;
+  declineFunnelBuild: (messageId: string) => void;
+  /** Approve the built funnel into Deliverables and move on to the next stage. */
+  saveFunnelBuild: (messageId: string) => void;
+  rebuildFunnelBuildItem: (messageId: string, key: string) => Promise<void>;
+  /** Apply the operator's requested change to one built page or email, as exact edits only. */
+  reviseFunnelBuildItem: (messageId: string, key: string, note: string) => Promise<boolean>;
   /** Remove a generation card from the transcript. A draft only: the stage's last approved version
    * is refused (see `selectDeleteGeneration`), because approval is read off the transcript and the
    * Context Store version would outlive its card. Deleting a refined draft also removes the note that
@@ -1107,6 +1161,7 @@ export function selectNeedsResume(s: PipelineState): boolean {
     if (m.kind === "source-run") return m.sourceRunStatus === "pending" || m.sourceRunStatus === "error";
     if (m.kind === "competitor") return m.savePhase !== "saved";
     if (m.kind === "generation") return !m.refineSubmitted && m.savePhase !== "saved";
+    if (m.kind === "funnel-build") return funnelBuildAwaitsOperator(m);
     return false;
   });
   return !actionable;
@@ -3489,7 +3544,8 @@ function offerCompetitorResearch(
   if (!config) return false;
 
   const profile = get().clientProfile;
-  const answer = String(answers[config.topicFieldId] ?? "").trim();
+  const answer =
+    String(answers[config.topicFieldId] ?? "").trim() || (config.topicFallsBackToRunService ? serviceScanFocus(get()) : "");
   const topic = firstSelectedTopic(answer);
   const topicCount = countSelectedTopics(answer);
   const targetUrl = String(answers["client_website_url"] ?? "").trim() || profile.website_url || "";
@@ -3935,6 +3991,140 @@ function enterStage(get: () => PipelineState, set: (partial: Partial<PipelineSta
     return;
   }
   beginStage(get, set, index);
+}
+
+// ------------------------------------------------------------------------------------------------
+// The deployable funnel — `FunnelBuildCard`, `app/routers/funnel_build.py`
+// ------------------------------------------------------------------------------------------------
+
+/** The two stages the build reads. Offered once both are approved in the leg on screen. */
+export const FUNNEL_BUILD_SOURCES = ["funnel", "funnel_hub_media"] as const;
+
+/** After an approval of either source: offer to build the deployable funnel, once both are approved.
+ * An earlier offer nobody took is replaced rather than stacked; a finished build stays as history,
+ * because a re-approved funnel makes it stale and the new offer says so by being there. */
+export function maybeOfferFunnelBuild(
+  get: () => PipelineState,
+  set: (partial: Partial<PipelineState>) => void,
+  savedAssetId: string,
+): boolean {
+  if (!(FUNNEL_BUILD_SOURCES as readonly string[]).includes(savedAssetId)) return false;
+  const state = get();
+  const trackId = state.phase === "phase2" ? state.activePhase2TrackId : null;
+  const approved = approvedAssetIds(state.messages, state.phase, trackId);
+  if (!FUNNEL_BUILD_SOURCES.every((id) => approved.has(id))) return false;
+  const leg = new Set(messagesInPhase(state.messages, state.phase, trackId).map((m) => m.id));
+  set({
+    messages: state.messages.map((m) =>
+      leg.has(m.id) && m.kind === "funnel-build" && m.funnelBuild?.status === "offer" ? { ...m, superseded: true } : m,
+    ),
+  });
+  push(get, set, { role: "assistant", kind: "funnel-build", funnelBuild: { status: "offer", items: [], building: [] } });
+  return true;
+}
+
+/** An open funnel-build card is the operator's turn: offered, building, or built and not yet saved. */
+export function funnelBuildAwaitsOperator(m: PipelineMessage): boolean {
+  const build = m.funnelBuild;
+  if (!build || m.superseded) return false;
+  return build.status === "offer" || build.status === "building" || (build.status === "done" && !build.saved);
+}
+
+/** After the funnel-build card is saved or declined: on to the next stage still to build, or back to
+ * the stage already in progress. With nothing left in the phase, a 3-second notice says so. */
+function continueAfterFunnelBuild(get: () => PipelineState, set: (partial: Partial<PipelineState>) => void) {
+  const phase = get().phase;
+  const total = totalStagesFor(phase);
+  const target = nextUnexecutedIndex(get());
+  if (target >= total) {
+    if (get().currentIndex < total) finishPhase(get, set);
+    useUiStore.getState().showToast(`There are no more assets to run in ${PHASE_META[phase].label}.`);
+    return;
+  }
+  if (selectNeedsResume(get())) {
+    proceedToStage(get, set, target);
+  } else {
+    // A stage is already under way (the card was opened from a menu mid-stage): bring its pending
+    // question back into view rather than starting another.
+    resurfacePendingCard(get, set, get().currentIndex);
+  }
+}
+
+function patchFunnelBuild(
+  get: () => PipelineState,
+  set: (partial: Partial<PipelineState>) => void,
+  messageId: string,
+  patch: (current: FunnelBuildState) => Partial<FunnelBuildState>,
+) {
+  const message = get().messages.find((m) => m.id === messageId);
+  if (!message?.funnelBuild) return;
+  patchMessage(get, set, messageId, { funnelBuild: { ...message.funnelBuild, ...patch(message.funnelBuild) } });
+}
+
+/** Plan order: pages as the funnel lists them, then the emails. */
+function orderedItems(plan: FunnelBuildPlan | undefined, items: FunnelBuiltItem[]): FunnelBuiltItem[] {
+  if (!plan) return items;
+  const order = [...plan.files.map((f) => f.key), ...plan.emails.map((e) => e.key)];
+  return [...items].sort((a, b) => order.indexOf(a.key) - order.indexOf(b.key));
+}
+
+function applyFunnelBuildEvent(current: FunnelBuildState, event: FunnelBuildEvent): Partial<FunnelBuildState> {
+  switch (event.type) {
+    case "plan":
+      return { plan: event.plan };
+    case "inputs":
+      return { forms: event.forms, notes: event.notes, branded: event.branded };
+    case "item_start":
+      return { building: [...current.building.filter((k) => k !== event.key), event.key] };
+    case "item_done":
+      return {
+        building: current.building.filter((k) => k !== event.item.key),
+        items: orderedItems(current.plan, [...current.items.filter((i) => i.key !== event.item.key), event.item]),
+      };
+    case "manus":
+      return { manus: event };
+    case "done":
+      return {
+        status: "done",
+        building: [],
+        items: orderedItems(current.plan, event.items),
+        builtAt: new Date().toISOString(),
+        engine: event.engine,
+      };
+    case "error":
+      return { status: "error", building: [], error: event.message };
+  }
+}
+
+function funnelBuildBody(get: () => PipelineState) {
+  const s = get();
+  return { client_profile: s.clientProfile as Record<string, string>, phase: s.phase, chat_session_id: s.sessionId };
+}
+
+/** `enterStage`, after loading this run's stored competitor listing for the stage into the session
+ * when the session lacks it. A reopened chat has no session context, so without this a stage whose
+ * search was approved earlier would be searched — and charged — again. With no stored listing the
+ * search runs, which is the point: the stage never asks the operator to paste one. */
+async function enterStageWithStoredPrepass(
+  get: () => PipelineState,
+  set: (partial: Partial<PipelineState>) => void,
+  index: number,
+) {
+  const stage = stagesFor(get().phase)[index];
+  const competitor = stage ? competitorStageFor(get().phase, stage.asset.asset_id) : undefined;
+  const runId = get().runId;
+  if (competitor && runId && !get().context[competitor.assetId]) {
+    const stored = await fetchRunContext(runId, competitor.assetId).catch(() => null);
+    if (stored?.content) {
+      set({
+        context: {
+          ...get().context,
+          [competitor.assetId]: { assetId: competitor.assetId, label: competitor.label, text: stored.content },
+        },
+      });
+    }
+  }
+  enterStage(get, set, index);
 }
 
 export const usePipelineStore = create<PipelineState>((set, get) => ({
@@ -4541,12 +4731,14 @@ export const usePipelineStore = create<PipelineState>((set, get) => ({
             : ` ${PHASE_META[state.phase].label} is otherwise complete, so we'll return there once it's approved.`),
     });
 
-    // `beginMainIntake`, not `beginStage`: the gated competitor search is a separately approved
-    // asset of its own, and its result is already in the Context Store where this stage's intake
-    // reads it. Re-running it would spend another web-search call to re-answer a question the
-    // operator did not complain about — and if they *do* want a fresh competitor set, that card has
-    // its own Re-run.
-    beginMainIntake(get, set, index);
+    // `enterStage`, not `beginStage`: when the gated competitor search was already approved, its
+    // result is in the Context Store where this stage's intake reads it, and re-running it would
+    // spend another web-search call to re-answer a question the operator did not complain about (that
+    // card has its own Re-run). But a stage whose search never ran gets it now. Going straight to the
+    // intake here was a bug: the Funnel gained its competitor search after runs already had a funnel,
+    // so a re-run reached the empty "Competitor Funnel Analysis" input and asked the operator to paste
+    // a competitor list instead of researching one.
+    void enterStageWithStoredPrepass(get, set, index);
   },
 
   retryGeneration: async (messageId) => {
@@ -4677,6 +4869,9 @@ export const usePipelineStore = create<PipelineState>((set, get) => ({
         },
       });
       schedulePersist();
+      // Funnel and Funnel Hub & Media both approved: offer the deployable build. On the forward path
+      // the walk waits on the card — Save or Not now moves it on (`continueAfterFunnelBuild`).
+      const offeredFunnelBuild = maybeOfferFunnelBuild(get, set, message.assetId);
 
       const phase = get().phase;
       const total = totalStagesFor(phase);
@@ -4771,6 +4966,11 @@ export const usePipelineStore = create<PipelineState>((set, get) => ({
           // buried above everything the re-run added. Bring it back into view.
           resurfacePendingCard(get, set, target);
         }
+        return;
+      }
+
+      if (offeredFunnelBuild) {
+        set({ activeStatus: "hitl", navStatus: "Awaiting Review" });
         return;
       }
 
@@ -5751,6 +5951,132 @@ chooseHeadlines: async (messageId, ids) => {
     patchMessage(get, set, messageId, { advisory: { ...advisory, status: "building" } });
     push(get, set, { role: "user", kind: "text", text: `Build ${advisory.label} anyway.` });
     beginStage(get, set, index);
+  },
+
+  offerFunnelBuild: async () => {
+    const runId = get().runId;
+    if (!runId) return;
+    const message = push(get, set, {
+      role: "assistant",
+      kind: "funnel-build",
+      funnelBuild: { status: "offer", items: [], building: [] },
+    });
+    try {
+      const ready = await fetchFunnelBuildReady(runId);
+      if (!ready.buildable) {
+        patchFunnelBuild(get, set, message.id, () => ({
+          status: "error",
+          error: ready.funnel
+            ? "The approved Funnel document has no page copy in the shape the build reads. Re-run the Funnel stage, then build."
+            : "Approve the Funnel stage first: there is no funnel to build.",
+        }));
+        return;
+      }
+      patchFunnelBuild(get, set, message.id, () => ({ plan: ready.plan ?? undefined }));
+      if (ready.built) {
+        const stored = await fetchFunnelBuild(runId);
+        patchFunnelBuild(get, set, message.id, (current) => ({
+          status: "done",
+          items: orderedItems(current.plan, stored.items.map(({ html: _html, ...rest }) => rest)),
+          builtAt: stored.built_at,
+        }));
+      }
+    } catch (err) {
+      patchFunnelBuild(get, set, message.id, () => ({ status: "error", error: err instanceof Error ? err.message : String(err) }));
+    }
+  },
+
+  startFunnelBuild: async (messageId) => {
+    const message = liveMessage(get(), messageId);
+    if (!message?.funnelBuild || message.funnelBuild.status === "building") return;
+    patchFunnelBuild(get, set, messageId, () => ({
+      status: "building",
+      items: [],
+      building: [],
+      error: undefined,
+      manus: undefined,
+      engine: undefined,
+    }));
+    try {
+      const runId = await ensureRun(get, set);
+      await streamFunnelBuild(runId, funnelBuildBody(get), (event) =>
+        patchFunnelBuild(get, set, messageId, (current) => applyFunnelBuildEvent(current, event)),
+      );
+      const after = get().messages.find((m) => m.id === messageId)?.funnelBuild;
+      if (after?.status === "building") {
+        patchFunnelBuild(get, set, messageId, () => ({
+          status: "error",
+          building: [],
+          error: "The build stopped before it finished. Try again.",
+        }));
+      }
+    } catch (err) {
+      patchFunnelBuild(get, set, messageId, () => ({
+        status: "error",
+        building: [],
+        error: err instanceof Error ? err.message : String(err),
+      }));
+    }
+  },
+
+  declineFunnelBuild: (messageId) => {
+    if (!liveMessage(get(), messageId)?.funnelBuild) return;
+    patchFunnelBuild(get, set, messageId, () => ({ status: "declined" }));
+    continueAfterFunnelBuild(get, set);
+  },
+
+  saveFunnelBuild: (messageId) => {
+    const build = liveMessage(get(), messageId)?.funnelBuild;
+    if (!build || build.status !== "done" || build.saved || build.revising || build.rebuilding) return;
+    patchFunnelBuild(get, set, messageId, () => ({ saved: true, savedAt: new Date().toISOString() }));
+    schedulePersist();
+    continueAfterFunnelBuild(get, set);
+  },
+
+  rebuildFunnelBuildItem: async (messageId, key) => {
+    const runId = get().runId;
+    const current = get().messages.find((m) => m.id === messageId)?.funnelBuild;
+    if (!runId || !current || current.rebuilding) return;
+    patchFunnelBuild(get, set, messageId, () => ({ rebuilding: key, error: undefined, manus: undefined }));
+    try {
+      // The same stream as the full build, for this one file: Manus rebuilds a page (Claude an
+      // email), and the server merges it into the stored build.
+      await streamFunnelBuild(runId, { ...funnelBuildBody(get), only: [key] }, (event) =>
+        patchFunnelBuild(get, set, messageId, (now) => {
+          if (event.type === "error") return { error: event.message };
+          if (event.type === "plan" || event.type === "inputs") return {};
+          return applyFunnelBuildEvent(now, event);
+        }),
+      );
+      patchFunnelBuild(get, set, messageId, () => ({ rebuilding: null, building: [] }));
+    } catch (err) {
+      patchFunnelBuild(get, set, messageId, () => ({
+        rebuilding: null,
+        error: err instanceof Error ? err.message : String(err),
+      }));
+    }
+  },
+
+  reviseFunnelBuildItem: async (messageId, key, note) => {
+    const runId = get().runId;
+    const current = get().messages.find((m) => m.id === messageId)?.funnelBuild;
+    if (!runId || !current || current.revising || current.rebuilding || !note.trim()) return false;
+    patchFunnelBuild(get, set, messageId, () => ({ revising: key, revision: undefined, error: undefined }));
+    try {
+      const result = await reviseFunnelItem(runId, key, { ...funnelBuildBody(get), note });
+      patchFunnelBuild(get, set, messageId, (now) => ({
+        revising: null,
+        items: orderedItems(now.plan, [...now.items.filter((i) => i.key !== key), result.item]),
+        revision: { key, applied: result.applied, notApplied: result.not_applied, unreadable: result.unreadable },
+      }));
+      return true;
+    } catch (err) {
+      patchFunnelBuild(get, set, messageId, () => ({
+        revising: null,
+        error: err instanceof Error ? err.message : String(err),
+      }));
+      return false;
+    }
   },
 
   stopStage: () => {

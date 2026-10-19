@@ -7,6 +7,7 @@ import { summariseAsset } from "../lib/assetSummary";
 import { PreviewThumb } from "../components/PreviewThumb";
 import { SummaryFlags } from "../components/AssetDocumentView";
 import { useUiStore } from "../store/uiStore";
+import { funnelBuildZipUrl } from "./pipelineApi";
 import { stagesFor } from "./pipelineData";
 import { messagesInPhase, usePipelineStore } from "./pipelineStore";
 
@@ -28,6 +29,8 @@ export function DeliverablesGrid() {
   const phase = usePipelineStore((s) => s.phase);
   const activePhase2TrackId = usePipelineStore((s) => s.activePhase2TrackId);
   const openReader = useUiStore((s) => s.openReader);
+  const focusTranscriptMessage = useUiStore((s) => s.focusTranscriptMessage);
+  const runId = usePipelineStore((s) => s.runId);
 
   const stages = stagesFor(phase);
   const items = useMemo(() => {
@@ -53,7 +56,17 @@ export function DeliverablesGrid() {
       });
   }, [allMessages, phase, stages, activePhase2TrackId]);
 
-  if (!items.length) {
+  // A saved deployable funnel is a deliverable too: files rather than a document, so its tile opens
+  // its card in the transcript (previews, requested changes) and offers the zip.
+  const funnelBuilds = useMemo(
+    () =>
+      messagesInPhase(allMessages, phase, activePhase2TrackId).filter(
+        (m) => m.kind === "funnel-build" && m.funnelBuild?.saved && !m.superseded,
+      ),
+    [allMessages, phase, activePhase2TrackId],
+  );
+
+  if (!items.length && !funnelBuilds.length) {
     return (
       <div className="mx-auto max-w-[34rem] py-10 text-center">
         <p className="text-[0.92rem] font-medium">Nothing approved yet</p>
@@ -69,7 +82,7 @@ export function DeliverablesGrid() {
   return (
     <div className="mx-auto w-full max-w-[56rem]">
       <p className="mb-3 text-[0.78rem] text-[var(--fg-muted)]">
-        {items.length} approved {items.length === 1 ? "asset" : "assets"} in this chat ·{" "}
+        {items.length + funnelBuilds.length} approved {items.length + funnelBuilds.length === 1 ? "asset" : "assets"} in this chat ·{" "}
         {items.reduce((sum, i) => sum + i.words, 0).toLocaleString()} words total
       </p>
       <div className="grid grid-cols-[repeat(auto-fill,minmax(11.5rem,1fr))] gap-2.5">
@@ -117,6 +130,42 @@ export function DeliverablesGrid() {
             </span>
           </button>
         ))}
+        {funnelBuilds.map((m) => {
+          const build = m.funnelBuild!;
+          const pages = build.items.filter((i) => i.kind === "page");
+          const emails = build.items.filter((i) => i.kind === "email");
+          const scores = pages.map((p) => p.score).filter((v): v is number => typeof v === "number");
+          return (
+            <div
+              key={m.id}
+              className="overflow-hidden rounded-xl border border-[var(--border)] bg-[var(--bg-raised)] transition-colors hover:border-[var(--border-strong)]"
+            >
+              <button type="button" onClick={() => focusTranscriptMessage(m.id)} className="block w-full cursor-pointer text-left">
+                <span className="flex h-[4.9rem] items-center justify-center border-b border-[var(--border)] bg-[var(--bg-sunken)]">
+                  <span aria-hidden className="text-[1.5rem]">
+                    🚀
+                  </span>
+                </span>
+                <span className="block px-2.5 pt-2">
+                  <span className="block truncate text-[0.8rem] font-semibold">Deployable funnel</span>
+                  <span className="mt-0.5 block text-[0.68rem] text-[var(--fg-faint)]">
+                    {pages.length} page{pages.length === 1 ? "" : "s"} · {emails.length} email{emails.length === 1 ? "" : "s"}
+                    {scores.length ? ` · deploy check ${Math.min(...scores)}–${Math.max(...scores)}/100` : ""}
+                  </span>
+                </span>
+              </button>
+              {runId && (
+                <a
+                  href={funnelBuildZipUrl(runId)}
+                  download
+                  className="mx-2.5 mb-2 mt-1.5 inline-block text-[0.7rem] font-medium text-[var(--color-electric-blue)] hover:underline"
+                >
+                  Download .zip
+                </a>
+              )}
+            </div>
+          );
+        })}
       </div>
     </div>
   );

@@ -37,6 +37,7 @@ import { ScrapeCard } from "./ScrapeCard";
 import { ServiceChoiceCard } from "./ServiceChoiceCard";
 import { PlanSubServiceCard } from "./PlanSubServiceCard";
 import { SecondaryKeywordCard } from "./SecondaryKeywordCard";
+import { FunnelBuildCard } from "./FunnelBuildCard";
 import { IndustryGuessOptions, StageAdvisoryCard } from "./IndustryCards";
 import { AssetCheckPanel } from "./AssetCheckPanel";
 import { ImageNotes, ManusPanel, ReplicaPanel } from "./ReplicaPanel";
@@ -1262,6 +1263,9 @@ function MessageRow({ message, flashed }: { message: PipelineMessage; flashed?: 
     case "stage-advisory":
       content = <StageAdvisoryCard message={message} />;
       break;
+    case "funnel-build":
+      content = <FunnelBuildCard message={message} />;
+      break;
     case "service-choice":
       content = message.serviceScan?.plan ? (
         <PlanSubServiceCard message={message} />
@@ -1410,7 +1414,9 @@ export function GenerationStream() {
     awaitingField.kind !== "boolean_flag";
 
   const savedCount = messages.filter(
-    (m) => m.kind === "generation" && m.savePhase === "saved" && !m.superseded && m.text,
+    (m) =>
+      (m.kind === "generation" && m.savePhase === "saved" && !m.superseded && m.text) ||
+      (m.kind === "funnel-build" && m.funnelBuild?.saved && !m.superseded),
   ).length;
   // The tab only exists once something is approved, so a stale `workTab` must not strand the
   // operator on a surface with no way back to the conversation.
