@@ -2,8 +2,8 @@
 
 This is `experiments/keyword_clustering/run_keyword_clustering.py` promoted into the app. The
 experiment proved the pipeline end to end against real provider data; what changes here is
-everything around the edges, not the logic. The provider is Ahrefs Keywords Explorer, through
-`ahrefs_client.py` (it replaced DataForSEO):
+everything around the edges, not the logic. The provider is DataForSEO Labs, through
+`dataforseo_client.py`:
 
   * No terminal. `KeywordRunConfig` is built from the run-level client profile the ICP stage has
     already captured — industry, region, website, and the service (Phase 1) or sub-service
@@ -14,7 +14,7 @@ everything around the edges, not the logic. The provider is Ahrefs Keywords Expl
   * Usage is reported through the same `on_usage` callback every other calling service uses, so
     keyword spend lands in the usage panel next to generation spend instead of being invisible.
   * `KEYWORDS_PROVIDER=stub` replaces the experiment's `--dry-run` flag, so the whole feature can
-    be exercised — frontend included — without spending anything at Ahrefs.
+    be exercised — frontend included — without spending anything at DataForSEO.
 
 The Step 2 cleaning pipeline and the Step 3 validator are ported essentially verbatim. They are
 pure functions over strings, they are the part the experiment's saved output was verified against,
@@ -43,7 +43,7 @@ from typing import Any
 
 import httpx
 
-from app.services import ahrefs_client
+from app.services import dataforseo_client, keyword_rank
 from app.services.claude_client import get_client
 from app.services.usage import CallUsage
 
@@ -53,9 +53,9 @@ _BACKEND_ROOT = Path(__file__).resolve().parents[2]  # .../application/backend
 _PROMPT_PATH = _BACKEND_ROOT / "assets" / "word_fetching_prompt" / "key_word_clusttering.txt"
 
 # The prompt's Step 4 preserves each seed's exact / phrase / related / broad keywords. Those are
-# Google-Ads match classes; `ahrefs_client.MATCH_CLASS_ENDPOINTS` maps each to a Keywords Explorer
-# endpoint.
-MATCH_CLASS_ENDPOINTS = ahrefs_client.MATCH_CLASS_ENDPOINTS
+# Google-Ads match classes; `dataforseo_client.MATCH_CLASS_ENDPOINTS` maps each to a DataForSEO
+# Labs endpoint.
+MATCH_CLASS_ENDPOINTS = dataforseo_client.MATCH_CLASS_ENDPOINTS
 
 MODEL = "claude-sonnet-5"
 _MAX_TOKENS = 64000
@@ -73,13 +73,15 @@ _EFFORT = "medium"
 _CACHE_TTL = "1h"
 
 # Expansion is 3 HTTP calls per seed and seeds are independent, so they go out together. Bounded
-# because Ahrefs rate-limits per account and a 12-seed run would otherwise open 36 sockets at
+# because DataForSEO rate-limits per account and a 12-seed run would otherwise open 36 sockets at
 # once against an API that answers in seconds, not milliseconds.
 _MAX_CONCURRENT_EXPANSIONS = 6
+#: Ranked keywords shown in the report's Markdown; the stored `ranked_keywords` holds them all.
+RANKED_IN_REPORT = 25
 
 
 class KeywordProviderError(RuntimeError):
-    """Ahrefs refused a request, answered in a shape we cannot read, or the region names no country
+    """DataForSEO refused a request, answered in a shape we cannot read, or the region names no country
     it has data for. The message is one sentence the operator can act on."""
 
 
@@ -108,6 +110,24 @@ class KeywordRunConfig:
     services: dict[str, list[str]]
     competitor_brands: list[str] = field(default_factory=list)
     limit_per_class: int = 40
+    #: Alternate names per service (`service_synonyms.py`), seeded beside `services`' own seeds.
+    #: Kept apart from `services` because they are generated, not stated: the fingerprint is taken
+    #: over `services` alone, so a re-run's differently-worded synonyms never force a rebuild.
+    synonyms: dict[str, list[str]] = field(default_factory=dict)
+
+    def seed_map(self) -> dict[str, list[str]]:
+        """Every seed per service: its own seeds, then its synonyms not already among them."""
+        out: dict[str, list[str]] = {}
+        for service, seeds in self.services.items():
+            merged = list(seeds)
+            for name in self.synonyms.get(service, []):
+                if name not in merged:
+                    merged.append(name)
+            out[service] = merged
+        return out
+
+    def is_synonym(self, service: str, seed: str) -> bool:
+        return seed in self.synonyms.get(service, []) and seed not in self.services.get(service, [])
 
     def fingerprint(self) -> str:
         """What this config would produce, reduced to a comparable string.
@@ -129,10 +149,19 @@ class KeywordRunConfig:
 
 
 # Seeds are the service name plus the handful of phrasings a buyer actually searches for. Kept
-# deliberately small: every seed costs three Ahrefs calls (billed in API units per row), and the
+# deliberately small: every seed costs three DataForSEO requests, and the
 # expansion endpoints return
 # the long tail anyway — a seed list is a set of *starting points*, not a keyword list.
 _SEED_SUFFIXES = ("services", "agency")
+
+
+def service_name(answer: str) -> str:
+    """The service an intake answer names. A picked sub-service arrives with its parent
+    ("Digital-Marketing - AI optimised SEO", "SEO > Local SEO"), and seeded whole it is a phrase
+    nobody searches: DataForSEO returned nothing for it, and the broad ideas behind it drifted to
+    "ai chat bot" and "ai detector". The last part is the service, as `buyer_language` reads it."""
+    name = " ".join(str(answer or "").split())
+    return re.split(r"\s+[-–—>|/]\s+|\s*›\s*", name)[-1].strip()
 
 
 def seeds_for_service(service: str) -> list[str]:
@@ -181,7 +210,7 @@ def config_from_profile(
     service would produce sub-service headlines about the parent service — the drift this feature
     exists to prevent.
     """
-    service = (profile.get(_SERVICE_FACT_BY_PHASE.get(phase, "industry")) or "").strip()
+    service = service_name(profile.get(_SERVICE_FACT_BY_PHASE.get(phase, "industry")) or "")
     if not service:
         return None
 
@@ -214,14 +243,15 @@ class RawKeyword:
     seed: str
     service: str
     source: str
+    #: Search momentum, % (`dataforseo_client._trend`). None when DataForSEO gave none.
+    trend: int | None = None
 
 
 # ======================================================================================
 # Location resolution
 #
-# `location_name` is filled from the ICP intake's free-text "region" answer, and Ahrefs Keywords
-# Explorer accepts only a two-letter **country** code from its own list (`ahrefs_client.COUNTRIES`,
-# verified against the live API). There is no Melbourne, no Victoria, no California: volumes are
+# `location_name` is filled from the ICP intake's free-text "region" answer, and this pipeline asks
+# for keyword data by **country** only (`dataforseo_client.COUNTRIES`). There is no Melbourne, no Victoria, no California: volumes are
 # national.
 #
 # That is what makes this a lookup rather than string surgery. Splitting the region on commas and
@@ -230,7 +260,7 @@ class RawKeyword:
 # nothing.
 # ======================================================================================
 
-# What people write, mapped to the name in `ahrefs_client.COUNTRIES`. Only for cases the phrase
+# What people write, mapped to the name in `dataforseo_client.COUNTRIES`. Only for cases the phrase
 # match cannot reach on its own — an abbreviation or an older name shares no words with the
 # supported entry. Everything that *does* share a word ("Melbourne VIC Australia" -> Australia) is
 # handled by the matcher and must not be listed here.
@@ -318,28 +348,28 @@ def match_location(region: str, supported: Iterable[str]) -> str | None:
 
 
 def resolve_location(config: KeywordRunConfig) -> str:
-    """The Ahrefs country for this run, resolved from the operator's free-text region.
+    """The country for this run, resolved from the operator's free-text region.
 
     Resolved once, up front, so the expansion calls that follow all carry a country known to work
     rather than each discovering the same 400 separately.
 
     Widening a region to its country changes what the volumes mean — national demand is not metro
     demand — so the substitution is logged with both names. It is still the right trade, because
-    the country figure is the only one Ahrefs can produce.
+    the country figure is the only one this pipeline asks for.
 
     An unmatched region raises `KeywordProviderError` with a sentence the operator can act on. The
     alternative — a default country — would build a keyword set for somewhere the client does not
     trade and report it as fact.
     """
-    matched = match_location(config.location_name, ahrefs_client.COUNTRIES)
+    matched = match_location(config.location_name, dataforseo_client.COUNTRIES)
     if matched is None:
         raise KeywordProviderError(
-            f"Region {config.location_name!r} does not name a country Ahrefs has keyword data for. "
+            f"Region {config.location_name!r} does not name a country with keyword data. "
             "Add the country to the region answer (for example \"Melbourne, Australia\")."
         )
     if matched != config.location_name:
         logger.info(
-            "Region %r resolved to %r for Ahrefs. Search volumes are national, not local.",
+            "Region %r resolved to %r. Search volumes are national, not local.",
             config.location_name,
             matched,
         )
@@ -351,14 +381,14 @@ def provider_name() -> str:
 
     `stub` exercises the whole pipeline — clean, hierarchy, cluster, validate, and every piece of UI
     downstream of it — on fabricated keywords, at zero provider spend. It is also the automatic
-    fallback when no `AHREFS_API_KEY` is present, so a developer without a key gets a working
+    fallback when DataForSEO's login is not configured, so a developer without a key gets a working
     pipeline rather than a 500. The stub's numbers never reach a Plan of Action as measured
     volumes: `sub_service_discovery` refuses them.
     """
     configured = (os.environ.get("KEYWORDS_PROVIDER") or "").strip().lower()
-    if configured in {"stub", "ahrefs"}:
+    if configured in {"stub", "dataforseo"}:
         return configured
-    return "ahrefs" if ahrefs_client.is_configured() else "stub"
+    return "dataforseo" if dataforseo_client.is_configured() else "stub"
 
 
 def _stub_keywords(config: KeywordRunConfig) -> list[RawKeyword]:
@@ -384,30 +414,31 @@ def _stub_keywords(config: KeywordRunConfig) -> list[RawKeyword]:
 
 async def fetch_keywords(
     config: KeywordRunConfig,
-    client: ahrefs_client.AhrefsClient | None,
+    client: dataforseo_client.DataForSEOClient | None,
     errors: list[str] | None = None,
 ) -> list[RawKeyword]:
     """Service -> seed -> {exact, phrase, related, broad}. Every seed is kept even when empty,
     per the prompt's "Keep every seed in the service hierarchy even if its extracted keyword
     lists are empty".
 
-    `config.location_name` must already be a name in `ahrefs_client.COUNTRIES` (`resolve_location`).
+    `config.location_name` must already be a name in `dataforseo_client.COUNTRIES` (`resolve_location`).
 
     A per-class failure is survivable — the other classes still have data — so each one is caught
     rather than raised. But the *reason* must not die in the log: when every class fails the same
-    way ("Ahrefs rejected the API key"), that sentence is the entire diagnosis, and a caller that
+    way ("DataForSEO rejected the login"), that sentence is the entire diagnosis, and a caller that
     only sees an empty list has to guess at it. So pass `errors` to collect them.
     """
     if client is None:
         return _stub_keywords(config)
 
-    country = ahrefs_client.country_code(config.location_name)
+    country = config.location_name
     raw: list[RawKeyword] = []
-    all_seeds = [s for seeds in config.services.values() for s in seeds]
+    seed_map = config.seed_map()
+    all_seeds = [s for seeds in seed_map.values() for s in seeds]
     try:
         exact_metrics = await client.overview(all_seeds, country)
     except Exception as exc:  # noqa: BLE001 — the seed's own metrics are a nice-to-have
-        logger.warning("Ahrefs overview failed (%s); seeds will carry null volume", exc)
+        logger.warning("DataForSEO overview failed (%s); seeds will carry null volume", exc)
         if errors is not None:
             errors.append(f"overview: {exc}")
         exact_metrics = {}
@@ -429,10 +460,12 @@ async def fetch_keywords(
             logger.warning("%s / %s / %s: no keywords returned", service, seed, match_class)
         else:
             logger.info("%s / %s / %s: %d keywords", service, seed, match_class, len(rows))
-        return [RawKeyword(m.keyword, m.volume, m.difficulty, match_class, seed, service, "ahrefs") for m in rows]
+        return [
+            RawKeyword(m.keyword, m.volume, m.difficulty, match_class, seed, service, "dataforseo", m.trend) for m in rows
+        ]
 
     jobs = []
-    for service, seeds in config.services.items():
+    for service, seeds in seed_map.items():
         for seed in seeds:
             seed_metrics = exact_metrics.get(seed.lower())
             raw.append(
@@ -443,10 +476,15 @@ async def fetch_keywords(
                     "exact",
                     seed,
                     service,
-                    "ahrefs",
+                    "dataforseo",
+                    seed_metrics.trend if seed_metrics else None,
                 )
             )
-            jobs += [one(service, seed, cls_) for cls_ in ("phrase", "related", "broad")]
+            # A synonym is expanded by phrase and related search only. `broad` (keyword ideas) is
+            # topic-level, so for another name of the same service it returns the base seed's ideas
+            # again at the cost of one more request per synonym.
+            classes = ("phrase", "related") if config.is_synonym(service, seed) else ("phrase", "related", "broad")
+            jobs += [one(service, seed, cls_) for cls_ in classes]
 
     for batch in await asyncio.gather(*jobs):
         raw.extend(batch)
@@ -514,6 +552,7 @@ class CleanKeyword:
     parent_topic: str
     entities: list[str]
     topic_modifier: str | None
+    trend: int | None = None
 
 
 def normalize(keyword: str) -> str:
@@ -638,11 +677,41 @@ def build_vocabulary(config: KeywordRunConfig) -> set[str]:
     candidate's primary keyword is checked against exactly this set.
     """
     vocabulary: set[str] = set()
-    for service, seeds in config.services.items():
+    for service, seeds in config.seed_map().items():
         vocabulary |= {singular(t) for t in tokens(normalize(service))}
         for seed in seeds:
             vocabulary |= {singular(t) for t in tokens(normalize(seed))}
     return vocabulary
+
+
+#: Words every seed carries (`_SEED_SUFFIXES`), which say nothing about which service a search is for.
+_GENERIC_SERVICE_TOKENS = frozenset({"service", "agency", "company"})
+
+
+def on_service(keyword: str, config: KeywordRunConfig) -> bool:
+    """A search is about the service when it holds a service's head word ("seo" for "AI optimised
+    SEO"), or shares two words with one of its names (the service, a seed, an alternate name).
+
+    `is_relevant` accepts any one shared word, and the broad ideas DataForSEO returns for a seed
+    beginning "ai" are AI in general: a live build for AI-optimised SEO ranked "ai detector",
+    "character ai" and "google ai" as its top primaries, and those became the CRO's targets."""
+    every = {singular(t) for t in tokens(keyword)}
+    kw = every - _GENERIC_SERVICE_TOKENS
+    if not kw:
+        return False
+    # "ai agency" must share two real words, not one plus the generic suffix every seed carries.
+    needed = min(2, len(every))
+    for service, names in config.seed_map().items():
+        # `tokens` is a set, so the head word is read off the name's own word order.
+        words = normalize(service).split()
+        if words and singular(words[-1]) in kw:
+            return True
+        for name in [service, *names]:
+            shared = kw & ({singular(t) for t in tokens(normalize(name))} - _GENERIC_SERVICE_TOKENS)
+            # A one-word search ("what is ai" is just "ai") counts only as the head word, above.
+            if len(every) > 1 and len(shared) >= needed:
+                return True
+    return False
 
 
 def run_keyword_pipeline(
@@ -678,6 +747,11 @@ def run_keyword_pipeline(
                 {"keyword": keyword, "stage": "check_relevance", "reason": "no service/seed token overlap"}
             )
             continue
+        if not on_service(keyword, config):
+            dropped.append(
+                {"keyword": keyword, "stage": "check_relevance", "reason": "shares one word, not the service"}
+            )
+            continue
 
         clean = CleanKeyword(
             keyword=keyword,
@@ -690,6 +764,7 @@ def run_keyword_pipeline(
             parent_topic=normalize(item.seed),
             entities=sorted(tokens(keyword) - tokens(normalize(item.seed))),
             topic_modifier=extract_modifier(keyword),
+            trend=item.trend,
         )
 
         # Rule 2 — on a duplicate, keep the higher volume. `exact` always wins its slot so a seed
@@ -719,7 +794,7 @@ def run_keyword_pipeline(
 def build_service_hierarchy(clean: list[CleanKeyword], config: KeywordRunConfig) -> list[dict]:
     """Step 4's Service -> Seed -> Extracted keywords, with seeds numbered per service."""
     by_service: dict[str, dict[str, list[CleanKeyword]]] = {}
-    for service, seeds in config.services.items():
+    for service, seeds in config.seed_map().items():
         by_service[service] = {seed: [] for seed in seeds}
     for kw in clean:
         by_service.setdefault(kw.service, {}).setdefault(kw.seed, []).append(kw)
@@ -736,7 +811,8 @@ def build_service_hierarchy(clean: list[CleanKeyword], config: KeywordRunConfig)
                     "seed_index": index,
                     "seed_label": f"Seed {index}",
                     "seed": seed,
-                    "target_type": "service",
+                    # `synonym`: an alternate name for the service (`service_synonyms.py`).
+                    "target_type": "synonym" if config.is_synonym(service, seed) else "service",
                     "class_counts": class_counts,
                     "keywords": [
                         {
@@ -991,6 +1067,10 @@ def validate_clusters(
 # ======================================================================================
 
 
+def _cell_num(value: object) -> str:
+    return f"{value:,}" if isinstance(value, int) else "—"
+
+
 def to_markdown(report: dict, config: KeywordRunConfig) -> str:
     """The report as the Markdown the prompt specifies.
 
@@ -1034,6 +1114,53 @@ def to_markdown(report: dict, config: KeywordRunConfig) -> str:
     lines += [f"- {o.get('keyword')} — {o.get('notes', '')}" for o in orphans] or ["_none_"]
     lines.append("")
 
+    synonyms = {k: v for k, v in config.synonyms.items() if v}
+    if synonyms:
+        lines += ["### Alternate names seeded", ""]
+        lines += [f"- **{service}**: {', '.join(names)}" for service, names in synonyms.items()]
+        lines.append("")
+
+    groups = report.get("keyword_groups") or []
+    if groups:
+        lines += [
+            "### Primary and secondary keywords",
+            "",
+            "A primary keyword is a core search term; its secondary keywords are the same search with a "
+            "modifier (a place, buy, best, online).",
+            "",
+            "| Primary keyword | Searches/mo | Secondary keywords | Combined/mo |",
+            "|-----------------|-------------|--------------------|-------------|",
+        ]
+        for group in groups:
+            primary = group.get("primary") or {}
+            secondary = ", ".join(
+                f"{k.get('keyword')} ({_cell_num(k.get('volume'))})" for k in group.get("secondary") or []
+            )
+            lines.append(
+                f"| {primary.get('keyword')} | {_cell_num(primary.get('volume'))} | {secondary or '—'} "
+                f"| {_cell_num(group.get('combined_volume'))} |"
+            )
+        lines.append("")
+
+    ranked = report.get("ranked_keywords") or []
+    if ranked:
+        lines += [
+            f"### Top {len(ranked)} keywords, ranked",
+            "",
+            "Ranked by monthly searches, estimated traffic (searches × the click-through rate at the "
+            "position its difficulty usually allows) and search momentum (% change in searches).",
+            "",
+            "| Rank | Keyword | Searches/mo | KD | Est. traffic/mo | Momentum | Score |",
+            "|------|---------|-------------|----|-----------------|----------|-------|",
+        ]
+        for row in ranked:
+            lines.append(
+                f"| {row.get('rank')} | {row.get('keyword')} | {_cell_num(row.get('volume'))} "
+                f"| {_cell_num(row.get('difficulty'))} | {_cell_num(row.get('est_traffic'))} "
+                f"| {keyword_rank.momentum(row.get('trend'))} | {_cell_num(row.get('score'))} |"
+            )
+        lines.append("")
+
     roadmap = report.get("content_roadmap") or []
     lines += ["### Content Roadmap", ""]
     if roadmap:
@@ -1076,8 +1203,14 @@ class KeywordReport:
     vocabulary: list[str]
     dropped: list[dict]
     warnings: list[str]
-    #: The country the volumes are for (Ahrefs has countries only). "" for the stub provider.
+    #: The country the volumes are for (countries only). "" for the stub provider.
     location: str = ""
+    #: Every clean keyword with a volume, ranked (`keyword_rank.rank_keywords`), best first.
+    ranked: list[dict] = field(default_factory=list)
+    #: The ranked keywords as primary keywords, each with its secondaries (`keyword_rank.group_keywords`).
+    groups: list[dict] = field(default_factory=list)
+    #: The alternate names seeded per service.
+    synonyms: dict[str, list[str]] = field(default_factory=dict)
 
     def to_context_value(self) -> dict:
         """The JSONB payload written to `context_entries.value`.
@@ -1095,21 +1228,24 @@ class KeywordReport:
             "config_fingerprint": self.config_fingerprint,
             "warnings": self.warnings,
             "location": self.location,
+            "ranked_keywords": self.ranked,
+            "keyword_groups": self.groups,
+            "service_synonyms": self.synonyms,
         }
 
 
 async def build_keyword_report(config: KeywordRunConfig, on_usage: OnUsage | None = None) -> KeywordReport:
     """Fetch, clean, cluster and validate — the whole experiment, once, for one config."""
     provider = provider_name()
-    client: ahrefs_client.AhrefsClient | None = None
+    client: dataforseo_client.DataForSEOClient | None = None
     provider_errors: list[str] = []
-    if provider == "ahrefs":
+    if provider == "dataforseo":
         # Settle the country before spending a dozen calls on it — see `resolve_location`. Raises
-        # with an actionable sentence when the region names no country Ahrefs has.
+        # with an actionable sentence when the region names no country.
         config = replace(config, location_name=resolve_location(config))
         try:
-            client = ahrefs_client.AhrefsClient()
-        except ahrefs_client.AhrefsError as exc:
+            client = dataforseo_client.DataForSEOClient()
+        except dataforseo_client.DataForSEOError as exc:
             raise KeywordProviderError(str(exc)) from exc
     try:
         raw = await fetch_keywords(config, client, provider_errors)
@@ -1152,8 +1288,8 @@ async def build_keyword_report(config: KeywordRunConfig, on_usage: OnUsage | Non
         raise KeywordProviderError(
             f"The keyword provider accepted every request but returned no keywords beyond the "
             f"{len(raw)} seed {'term' if len(raw) == 1 else 'terms'} themselves. Check that "
-            f"{config.location_name!r} is a country Ahrefs has data for, and that the Ahrefs account "
-            f"has API units remaining."
+            f"{config.location_name!r} is a country DataForSEO has data for, and that the DataForSEO "
+            f"account has balance remaining."
         )
 
     hierarchy = build_service_hierarchy(clean, config)
@@ -1163,6 +1299,13 @@ async def build_keyword_report(config: KeywordRunConfig, on_usage: OnUsage | Non
     report, warnings, _ = validate_clusters(report, clean, vocabulary)
     for warning in warnings:
         logger.info("Cluster validation: %s", warning)
+
+    ranked_rows = keyword_rank.rank_keywords(k for k in clean if k.volume is not None)
+    ranked = [k.as_dict() for k in ranked_rows]
+    report["ranked_keywords"] = ranked[:RANKED_IN_REPORT]
+    seeds = [seed for seeds in config.seed_map().values() for seed in seeds]
+    groups = [g.as_dict() for g in keyword_rank.group_keywords(ranked_rows, seeds)]
+    report["keyword_groups"] = groups
 
     return KeywordReport(
         config_fingerprint=config.fingerprint(),
@@ -1179,11 +1322,15 @@ async def build_keyword_report(config: KeywordRunConfig, on_usage: OnUsage | Non
                 "match_class": kw.match_class,
                 "parent_topic": kw.parent_topic,
                 "topic_modifier": kw.topic_modifier,
+                "trend": kw.trend,
             }
             for kw in sorted(clean, key=lambda k: -(k.volume or 0))
         ],
         vocabulary=sorted(vocabulary),
         dropped=dropped,
         warnings=warnings,
-        location=config.location_name if provider == "ahrefs" else "",
+        location=config.location_name if provider == "dataforseo" else "",
+        ranked=ranked,
+        groups=groups,
+        synonyms={k: list(v) for k, v in config.synonyms.items() if v},
     )

@@ -41,7 +41,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from app.logging_config import configure_logging
-from app.routers import anthropic, auth, chat_sessions, funnel_build, intel, media, pipeline, usage
+from app.routers import anthropic, auth, buyer_language, chat_sessions, files, funnel_build, intel, media, page_variants, pipeline, summary, usage, vector_context
 
 configure_logging()
 logger = logging.getLogger(__name__)
@@ -181,6 +181,16 @@ app.include_router(anthropic.router, prefix="/test/anthropic", tags=["anthropic-
 app.include_router(pipeline.router, prefix="/pipeline", tags=["pipeline"])
 # The deployable funnel: its own module, same `/pipeline/runs/{run_id}/…` space.
 app.include_router(funnel_build.router, prefix="/pipeline", tags=["funnel-build"])
+# CRO's buyer-language questions, suggested from search data and the landing page.
+app.include_router(buyer_language.router, prefix="/pipeline", tags=["buyer-language"])
+# The reader's Summary tab: a deliverable's content as a few checked points.
+app.include_router(summary.router, prefix="/pipeline", tags=["summary"])
+# The clip button on file questions: an uploaded file's text, for the input box.
+app.include_router(files.router, prefix="/pipeline", tags=["files"])
+# Pillar Page variants: the comparison card's measured numbers.
+app.include_router(page_variants.router, prefix="/pipeline", tags=["page-variants"])
+# Context search (pgvector): suggested intake answers and the index behind them.
+app.include_router(vector_context.router, prefix="/pipeline", tags=["context-search"])
 app.include_router(chat_sessions.router, prefix="/chat-sessions", tags=["chat-sessions"])
 app.include_router(usage.router, prefix="/usage", tags=["usage"])
 # Market intelligence over Context.dev (brand records, web search). Every call in there goes

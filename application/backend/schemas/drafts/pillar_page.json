@@ -65,6 +65,16 @@
     { "field_id": "output_format", "label": "Output Format", "kind": "enum_choice", "required": true, "source": "user_input",
       "choices": ["Full HTML + CSS", "HTML sections only", "React component", "Figma-ready component brief", "WordPress block structure"],
       "raw_explanation": "Full HTML + CSS / HTML sections only / React component / Figma-ready component brief / WordPress block structure" },
+    { "field_id": "use_skill_document", "label": "Use a Skill Document", "kind": "boolean_flag", "required": true, "source": "user_input", "conditional_children": ["skill_document"],
+      "raw_explanation": "YES / NO. Yes builds an extra page variant that follows a skill document the operator supplies (a writing or page-building method)." },
+    { "field_id": "skill_document", "label": "Skill Document", "kind": "file_attach", "required": false, "source": "user_input", "accepted_types": ["file", "text"],
+      "conditional_on": { "field": "use_skill_document", "equals": true },
+      "raw_explanation": "UPLOAD (PDF, Word, Markdown or text) / PASTE the skill. Used only by the skill variant, as its governing method; brand rules, DESIGN.md, business rules and the facts in these INPUTS win where they conflict." },
+    { "field_id": "use_framework_document", "label": "Use a Framework Document", "kind": "boolean_flag", "required": true, "source": "user_input", "conditional_children": ["framework_document"],
+      "raw_explanation": "YES / NO. Yes builds an extra page variant structured by a framework the operator supplies (AIDA, StoryBrand, PAS, their own)." },
+    { "field_id": "framework_document", "label": "Framework Document", "kind": "file_attach", "required": false, "source": "user_input", "accepted_types": ["file", "text"],
+      "conditional_on": { "field": "use_framework_document", "equals": true },
+      "raw_explanation": "UPLOAD (PDF, Word, Markdown or text) / PASTE the framework. Used only by the framework variant: its parts become the page's sections, in its order." },
     { "field_id": "additional_notes_constraints_optional", "label": "Additional Notes / Constraints (optional)", "kind": "text", "required": false, "source": "user_input", "raw_explanation": "YOUR ANSWER / NONE" }
   ]
 }

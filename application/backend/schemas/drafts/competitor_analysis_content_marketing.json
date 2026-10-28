@@ -18,9 +18,8 @@
       "kind": "text",
       "required": false,
       "source": "user_input",
-      "default": "content marketing",
-      "fallback_instruction": "Fixed to \"content marketing\" as the discipline feeding {SERVICE} (the target's core service, inferred from {TARGET_URL} if not specified). Only include companies where content marketing is treated as a genuine, distinct service explicitly feeding into the target service — not companies that merely list \"content\" and the target service as separate, disconnected line items.",
-      "raw_explanation": "service: \"content marketing\" as the discipline feeding {SERVICE}."
+      "fallback_instruction": "The service the target sells, inferred from {TARGET_URL} if not specified. Competitors must sell this same service; their content programme (resource hub, blog, gated reports) is the lens, not the service they have to sell. Exclude content-marketing agencies unless the target itself sells content marketing.",
+      "raw_explanation": "{SERVICE} — the service the target sells; content marketing is how these rivals attract buyers of it."
     },
     {
       "field_id": "niche",
@@ -52,7 +51,7 @@
         "full_stack_niche"
       ],
       "fallback_instruction": "If missing or empty, include both types.",
-      "raw_explanation": "\"niche_specialist\" = a company specialised in content marketing and/or the target's core service as its core offer. \"full_stack_niche\" = a full-service company in the same industry offering content marketing as a distinct discipline feeding into the target service."
+      "raw_explanation": "\"niche_specialist\" = a company specialised in the target's service, whose content programme is its main demand-generation surface. \"full_stack_niche\" = a broader company in the same industry that sells the target's service and runs a distinct content programme feeding it."
     },
     {
       "field_id": "excluded_competitors",

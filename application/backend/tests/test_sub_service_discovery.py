@@ -1,11 +1,11 @@
 """The Plan of Action's sub-services: read off the client's site, suggested from the competitor
-research, measured with Ahrefs.
+research, measured with DataForSEO.
 
 Pinned here:
   - a sub-service is reported as existing only when the site links to it,
-  - volumes are Ahrefs' or None — never the stub provider's numbers, never 0,
-  - one Ahrefs request covers every keyword on the card,
-  - any Ahrefs failure keeps the list and sets `volume_error`, which the card shows as a warning,
+  - volumes are DataForSEO's or None — never the stub provider's numbers, never 0,
+  - one DataForSEO request covers every keyword on the card,
+  - any DataForSEO failure keeps the list and sets `volume_error`, which the card shows as a warning,
   - an unreadable site still gets suggestions, and says why nothing existing is listed,
   - the route answers with the shape the card reads, and a judge failure is a 422,
   - the stored list's line shape is the one the frontend composes (`composePlanSubServicesAnswer`).
@@ -24,7 +24,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.main import app
-from app.services import ahrefs_client
+from app.services import dataforseo_client
 from app.services import keywords as K
 from app.services import service_scan
 from app.services import sub_service_discovery as D
@@ -111,7 +111,8 @@ def test_an_unreadable_reply_is_an_error() -> None:
 def test_the_judge_is_shown_the_site_the_competitors_and_the_icp(monkeypatch: pytest.MonkeyPatch) -> None:
     _patch_scan(monkeypatch)
     prompts = _patch_judge(monkeypatch)
-    monkeypatch.delenv("AHREFS_API_KEY", raising=False)
+    for name in (*dataforseo_client.LOGIN_ENVS, *dataforseo_client.PASSWORD_ENVS):
+        monkeypatch.delenv(name, raising=False)
     D_run(D.discover("https://trafficradius.com.au/", "Social Media Marketing", region="Australia",
                      competitors="## cro\nRival Co has a TikTok Ads page.", icp="Ecommerce founders."))
     prompt = prompts[0]
@@ -134,73 +135,74 @@ def D_run(coro: Any) -> Any:
 def test_no_key_means_no_volumes_and_a_warning(monkeypatch: pytest.MonkeyPatch) -> None:
     _patch_scan(monkeypatch)
     _patch_judge(monkeypatch)
-    monkeypatch.delenv("AHREFS_API_KEY", raising=False)
+    for name in (*dataforseo_client.LOGIN_ENVS, *dataforseo_client.PASSWORD_ENVS):
+        monkeypatch.delenv(name, raising=False)
     found = D_run(D.discover("https://trafficradius.com.au/", "Social Media Marketing"))
     assert found.volume_source == "unavailable"
     assert all(k.volume is None for c in found.candidates for k in c.keywords), "never the stub provider's numbers"
     assert all(c.combined_volume is None for c in found.candidates)
-    assert "AHREFS_API_KEY" in found.volume_error, "the card warns with the reason"
+    assert "DATAFORSEO_LOGIN" in found.volume_error, "the card warns with the reason"
 
 
-class _FakeAhrefs:
-    instances: list["_FakeAhrefs"] = []
+class _FakeDfs:
+    instances: list["_FakeDfs"] = []
     fail: Exception | None = None
 
     def __init__(self) -> None:
         self.calls: list[tuple[list[str], str]] = []
         self.closed = False
-        _FakeAhrefs.instances.append(self)
+        _FakeDfs.instances.append(self)
 
-    async def overview(self, keywords: list[str], country: str) -> dict[str, ahrefs_client.KeywordMetrics]:
+    async def overview(self, keywords: list[str], country: str) -> dict[str, dataforseo_client.DfsKeyword]:
         self.calls.append((keywords, country))
-        if _FakeAhrefs.fail is not None:
-            raise _FakeAhrefs.fail
+        if _FakeDfs.fail is not None:
+            raise _FakeDfs.fail
         rows = {"meta ads agency": 880, "facebook ads agency": 590, "tiktok ads agency": 320}
-        return {k: ahrefs_client.KeywordMetrics(k, v, 10) for k, v in rows.items()}
+        return {k: dataforseo_client.DfsKeyword(k, v, 10) for k, v in rows.items()}
 
     async def aclose(self) -> None:
         self.closed = True
 
 
-def _patch_ahrefs(monkeypatch: pytest.MonkeyPatch, fail: Exception | None = None) -> None:
-    _FakeAhrefs.instances.clear()
-    _FakeAhrefs.fail = fail
-    monkeypatch.setenv("AHREFS_API_KEY", "x")
-    monkeypatch.setattr(ahrefs_client, "AhrefsClient", _FakeAhrefs)
+def _patch_dfs(monkeypatch: pytest.MonkeyPatch, fail: Exception | None = None) -> None:
+    _FakeDfs.instances.clear()
+    _FakeDfs.fail = fail
+    monkeypatch.setattr(dataforseo_client, "is_configured", lambda: True)
+    monkeypatch.setattr(dataforseo_client, "DataForSEOClient", _FakeDfs)
 
 
-def test_an_ahrefs_failure_keeps_the_list_and_says_why(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_a_provider_failure_keeps_the_list_and_says_why(monkeypatch: pytest.MonkeyPatch) -> None:
     _patch_scan(monkeypatch)
     _patch_judge(monkeypatch)
-    _patch_ahrefs(monkeypatch, ahrefs_client.AhrefsError("Ahrefs rejected the API key (401). Check AHREFS_API_KEY."))
+    _patch_dfs(monkeypatch, dataforseo_client.DataForSEOError("DataForSEO rejected the login (401)."))
     found = D_run(D.discover("https://trafficradius.com.au/", "Social Media Marketing", region="Australia"))
     assert found.candidates, "the suggestions still stand"
     assert found.volume_source == "unavailable"
     assert all(k.volume is None for c in found.candidates for k in c.keywords)
-    assert "rejected the API key (401)" in found.volume_error
-    assert _FakeAhrefs.instances[0].closed, "the client is closed on failure too"
+    assert "rejected the login (401)" in found.volume_error
+    assert _FakeDfs.instances[0].closed, "the client is closed on failure too"
 
 
 def test_a_region_with_no_country_is_a_warning_not_a_crash(monkeypatch: pytest.MonkeyPatch) -> None:
     _patch_scan(monkeypatch)
     _patch_judge(monkeypatch)
-    _patch_ahrefs(monkeypatch)
+    _patch_dfs(monkeypatch)
     found = D_run(D.discover("https://trafficradius.com.au/", "Social Media Marketing", region="Sydney NSW"))
     assert found.candidates and found.volume_source == "unavailable"
     assert "does not name a country" in found.volume_error
-    assert not _FakeAhrefs.instances, "nothing is sent for a region Ahrefs cannot take"
+    assert not _FakeDfs.instances, "nothing is sent for a region with no country"
 
 
-def test_one_ahrefs_request_measures_every_keyword(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_one_request_measures_every_keyword(monkeypatch: pytest.MonkeyPatch) -> None:
     _patch_scan(monkeypatch)
     _patch_judge(monkeypatch)
-    _patch_ahrefs(monkeypatch)
+    _patch_dfs(monkeypatch)
     found = D_run(D.discover("https://trafficradius.com.au/", "Social Media Marketing", region="Melbourne VIC Australia"))
 
-    (client,) = _FakeAhrefs.instances
+    (client,) = _FakeDfs.instances
     assert len(client.calls) == 1 and client.closed
-    assert client.calls[0][1] == "au", "the region becomes Ahrefs' country code"
-    assert found.volume_source == "ahrefs" and found.location == "Australia"
+    assert client.calls[0][1] == "Australia", "the region becomes a country"
+    assert found.volume_source == "dataforseo" and found.location == "Australia"
     assert found.volume_error == ""
     meta = next(c for c in found.candidates if c.name == "Meta Ads")
     assert meta.combined_volume == 880 + 590
@@ -216,7 +218,8 @@ def test_an_unreadable_site_still_gets_suggestions(monkeypatch: pytest.MonkeyPat
 
     monkeypatch.setattr(service_scan, "scan_services", scan)
     _patch_judge(monkeypatch, {"sub_services": [{"name": "TikTok Ads", "status": "existing", "url": "https://x/", "keywords": ["tiktok ads"]}]})
-    monkeypatch.delenv("AHREFS_API_KEY", raising=False)
+    for name in (*dataforseo_client.LOGIN_ENVS, *dataforseo_client.PASSWORD_ENVS):
+        monkeypatch.delenv(name, raising=False)
     found = D_run(D.discover("https://trafficradius.com.au/", "Social Media Marketing"))
     assert [c.status for c in found.candidates] == [D.NEW]
     assert any("could not be read" in n for n in found.notes)
@@ -243,7 +246,7 @@ def test_competitor_block_keeps_order_and_bounds_each_listing() -> None:
 
 def test_stored_names_read_the_frontends_line_shape() -> None:
     content = (
-        "Volume source: Ahrefs, monthly Google searches in Australia.\n"
+        "Volume source: DataForSEO, monthly Google searches in Australia.\n"
         "- Meta Ads — EXISTING PAGE — enhance: https://trafficradius.com.au/meta-ads/ — keywords: meta ads agency (880/mo)\n"
         "- TikTok Ads — NEW PAGE — proposed slug: /tiktok-ads/\n"
         "- Pinterest Ads — NEW PAGE (typed by the operator; keywords not measured)\n"
@@ -274,7 +277,7 @@ def test_the_route_returns_the_cards_shape_and_422s_a_judge_failure(monkeypatch:
             primary_service=primary_service,
             candidates=[D.SubServiceCandidate("Meta Ads", D.EXISTING, url + "meta-ads/", "/meta-ads/",
                                               keywords=[D.KeywordVolume("meta ads agency", 880)])],
-            volume_source="ahrefs",
+            volume_source="dataforseo",
             location="Australia",
         )
 
@@ -283,7 +286,7 @@ def test_the_route_returns_the_cards_shape_and_422s_a_judge_failure(monkeypatch:
     res = TestClient(app).post("/pipeline/plan/sub-services/discover", json=body)
     assert res.status_code == 200, res.text
     data = res.json()
-    assert data["volume_source"] == "ahrefs"
+    assert data["volume_source"] == "dataforseo"
     assert data["candidates"][0]["combined_volume"] == 880
     assert data["candidates"][0]["keywords"] == [{"keyword": "meta ads agency", "volume": 880}]
 

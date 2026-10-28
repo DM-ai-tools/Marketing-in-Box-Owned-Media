@@ -1,22 +1,21 @@
 import { useState } from "react";
 import { motion, useReducedMotion } from "framer-motion";
-import { CountUp } from "./AhrefsActivity";
+import { CountUp } from "../components/CountUp";
 import { usePipelineStore } from "./pipelineStore";
 import type { PipelineMessage } from "./pipelineStore";
 import type { KeywordProvider, ProviderSuggestions, SecondaryKeyword } from "./pipelineApi";
 import { KEYWORD_PROVIDER_LABEL, type PickedSecondaryTerm } from "./pipelineData";
 
-const PROVIDERS: KeywordProvider[] = ["ahrefs", "dataforseo"];
+const PROVIDERS: KeywordProvider[] = ["dataforseo"];
 
 const keyOf = (provider: KeywordProvider, keyword: string) => `${provider}|${keyword}`;
 
-/** The Pillar Page's secondary / cluster terms, suggested from its head term by Ahrefs and by
- * DataForSEO, in two columns so the operator can compare them and tick from either.
+/** The Pillar Page's secondary / cluster terms, suggested from its head term by DataForSEO, as a
+ * checklist with each term's measured volume, difficulty, CPC and intent.
  *
- * Optional, so nothing starts ticked and Skip is always there. Each column says what its provider
- * returned in total (terms, combined volume, median difficulty) above its list, and a term both
- * providers suggested is marked in both columns. A provider that is unconfigured or failed says so
- * in its own column; the other still works, and the text box works when both failed.
+ * Optional, so nothing starts ticked and Skip is always there. The list says what was returned in
+ * total (terms, combined volume, median difficulty) above it. When DataForSEO is unconfigured or
+ * failed the card says so, and the text box still works.
  */
 export function SecondaryKeywordCard({ message }: { message: PipelineMessage }) {
   const confirm = usePipelineStore((s) => s.confirmSecondaryKeywords);
@@ -35,12 +34,7 @@ export function SecondaryKeywordCard({ message }: { message: PipelineMessage }) 
   const result = secondary.result;
   const superseded = Boolean(message.superseded);
   const open = !superseded && (scan.status === "ready" || scan.status === "error" || scan.status === "loading");
-  const columns = result ? { ahrefs: result.ahrefs, dataforseo: result.dataforseo } : null;
-  const inBoth = new Set(
-    columns
-      ? columns.ahrefs.keywords.map((k) => k.keyword).filter((k) => columns.dataforseo.keywords.some((d) => d.keyword === k))
-      : [],
-  );
+  const columns = result ? { dataforseo: result.dataforseo } : null;
   const typedCount = other.split(/[,;\n]/).filter((s) => s.trim()).length;
   const uniqueTerms = new Set(picked.map((k) => k.split("|")[1]));
   const total = uniqueTerms.size + typedCount;
@@ -74,8 +68,8 @@ export function SecondaryKeywordCard({ message }: { message: PipelineMessage }) 
     >
       <div className="text-[0.92rem] font-medium">Secondary terms for “{secondary.headTerm}”</div>
       <p className="mt-0.5 text-[0.75rem] leading-relaxed text-[var(--fg-muted)]">
-        Supporting terms the page covers in passing, each placed in the section that actually describes it. Compare what
-        Ahrefs and DataForSEO suggest and tick any from either column. Optional.
+        Supporting terms the page covers in passing, each placed in the section that actually describes it. Tick any
+        DataForSEO suggests. Optional.
       </p>
 
       {scan.status === "loading" && (
@@ -90,7 +84,7 @@ export function SecondaryKeywordCard({ message }: { message: PipelineMessage }) 
               />
             ))}
           </span>
-          Asking Ahrefs and DataForSEO for terms around “{secondary.headTerm}”…
+          Asking DataForSEO for terms around “{secondary.headTerm}”…
         </div>
       )}
 
@@ -111,22 +105,20 @@ export function SecondaryKeywordCard({ message }: { message: PipelineMessage }) 
         <>
           <p className="mt-2 text-[0.7rem] text-[var(--fg-faint)]">
             Monthly Google searches{result?.location ? ` in ${result.location}` : ""}. KD is keyword difficulty, 0–100.
-            {inBoth.size > 0 && ` ${inBoth.size} ${inBoth.size === 1 ? "term was" : "terms were"} suggested by both.`}
           </p>
-          {columns.ahrefs.keywords.length + columns.dataforseo.keywords.length === 0 && (
+          {columns.dataforseo.status === "ok" && columns.dataforseo.keywords.length === 0 && (
             <p data-no-terms className="mt-1.5 text-[0.75rem] leading-relaxed text-[var(--fg-muted)]">
-              Neither provider has search data around “{secondary.headTerm}”.
+              DataForSEO has no search data around “{secondary.headTerm}”.
               {secondary.headTerm.split(/\s+/).length > 4
                 ? " It reads like a headline rather than something people search; try the 2–4 word term the page should rank for."
                 : " Try a broader term below."}
             </p>
           )}
-          <div className="mt-2 grid gap-3 @[40rem]:grid-cols-2">
+          <div className="mt-2 grid gap-3">
             {PROVIDERS.map((provider) => (
               <ProviderColumn
                 key={provider}
                 column={columns[provider]}
-                inBoth={inBoth}
                 picked={picked}
                 onToggle={toggle}
                 onAll={(on) => setColumn(provider, on)}
@@ -245,14 +237,12 @@ function median(values: number[]): number | null {
 
 function ProviderColumn({
   column,
-  inBoth,
   picked,
   onToggle,
   onAll,
   still,
 }: {
   column: ProviderSuggestions;
-  inBoth: Set<string>;
   picked: string[];
   onToggle: (key: string) => void;
   onAll: (on: boolean) => void;
@@ -299,7 +289,6 @@ function ProviderColumn({
               <TermRow
                 key={row.keyword}
                 row={row}
-                both={inBoth.has(row.keyword)}
                 selected={picked.includes(keyOf(column.provider, row.keyword))}
                 onToggle={() => onToggle(keyOf(column.provider, row.keyword))}
               />
@@ -311,7 +300,7 @@ function ProviderColumn({
   );
 }
 
-function TermRow({ row, both, selected, onToggle }: { row: SecondaryKeyword; both: boolean; selected: boolean; onToggle: () => void }) {
+function TermRow({ row, selected, onToggle }: { row: SecondaryKeyword; selected: boolean; onToggle: () => void }) {
   return (
     <li>
       <label
@@ -333,11 +322,6 @@ function TermRow({ row, both, selected, onToggle }: { row: SecondaryKeyword; bot
             <span>KD {row.difficulty ?? "—"}</span>
             {row.cpc != null && <span>CPC ${row.cpc.toFixed(2)}</span>}
             {row.intent && <span>{row.intent}</span>}
-            {both && (
-              <span className="font-semibold" style={{ color: "var(--color-electric-blue)" }}>
-                in both
-              </span>
-            )}
           </span>
         </span>
       </label>

@@ -8,6 +8,12 @@ their blog, or their rankings alone. If fewer than 10 genuinely qualifying compe
 and verified, return fewer rather than padding the list with weak or unverified matches — flag any
 lower-confidence entries instead of silently including them.
 
+WHO COUNTS AS A COMPETITOR HERE: a business that competes with the target for the same buyers —
+it sells the same or a substitutable service to the same kind of customer, in the same market.
+The funnel is the lens this listing is judged through, never the service the competitor has to
+sell. Do NOT include companies that sell funnel building, conversion-rate optimisation or
+landing-page services unless that is what the target itself sells.
+
 Additional inputs (all optional unless stated):
 
 competitor_type:
@@ -47,6 +53,7 @@ Competitor Selection Logic:
 
 CRITICAL REQUIREMENTS:
 - ONLY include high-quality competitors with strong organic traffic/SEO presence in {LOCATION}
+- Exclude funnel-building and CRO agencies unless the target itself sells those
 - Describe only the funnel steps you saw on the fetched pages. A step you could not reach (behind a
   form submission, a login, a payment) is named as unverified in `offering_summary`, never filled in
   from what such funnels usually do

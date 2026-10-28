@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { motion, useReducedMotion } from "framer-motion";
-import { CountUp } from "./AhrefsActivity";
+import { CountUp } from "../components/CountUp";
 import { usePipelineStore } from "./pipelineStore";
 import type { PipelineMessage } from "./pipelineStore";
 import type { PlanSubServiceCandidate } from "./pipelineApi";
@@ -9,7 +9,7 @@ import type { PlanSubServiceCandidate } from "./pipelineApi";
  *
  * Two groups: what the client's site already has a page for under the primary service (read off
  * its own menu, each with its real URL), and what it should add (suggested from the approved
- * competitor research and the ICP). Every row carries its keyword cluster and, when Ahrefs is
+ * competitor research and the ICP). Every row carries its keyword cluster and, when DataForSEO is
  * configured, the measured monthly volume — the card says plainly when it is not, because the plan
  * then labels every volume as an estimate.
  *
@@ -43,7 +43,7 @@ export function PlanSubServiceCard({ message }: { message: PipelineMessage }) {
   const suggested = plan.candidates.filter((c) => c.status !== "existing");
   const typedCount = other.split(/[,;\n]/).filter((s) => s.trim()).length;
   const total = picked.length + typedCount;
-  const measured = plan.volumeSource === "ahrefs";
+  const measured = plan.volumeSource === "dataforseo";
 
   function toggle(name: string) {
     setPicked((current) => (current.includes(name) ? current.filter((n) => n !== name) : [...current, name]));
@@ -92,7 +92,7 @@ export function PlanSubServiceCard({ message }: { message: PipelineMessage }) {
       {scan.status === "ready" && !superseded && (
         <>
           <p className="mt-2 flex flex-wrap items-center gap-1.5 text-[0.7rem] text-[var(--fg-faint)]">
-            {measured && <AhrefsBadge still={!!reduceMotion} />}
+            {measured && <SourceBadge still={!!reduceMotion} />}
             {measured
               ? `Monthly Google searches${plan.location ? `, ${plan.location}` : ""}.`
               : "Search volumes not measured: the plan will label its volumes as estimates."}
@@ -276,8 +276,8 @@ function pathOf(url: string): string {
   }
 }
 
-/** "Ahrefs" with a soft pulse ring, marking volumes that were measured rather than estimated. */
-function AhrefsBadge({ still }: { still: boolean }) {
+/** "DataForSEO" with a soft pulse ring, marking volumes that were measured rather than estimated. */
+function SourceBadge({ still }: { still: boolean }) {
   return (
     <span className="relative inline-flex items-center gap-1 rounded-full border border-[var(--border)] px-1.5 py-[1px] font-semibold text-[var(--color-electric-blue)]">
       <span className="relative flex h-1.5 w-1.5">
@@ -292,7 +292,7 @@ function AhrefsBadge({ still }: { still: boolean }) {
         )}
         <span className="relative h-1.5 w-1.5 rounded-full bg-[var(--color-electric-blue)]" />
       </span>
-      Ahrefs
+      DataForSEO
     </span>
   );
 }

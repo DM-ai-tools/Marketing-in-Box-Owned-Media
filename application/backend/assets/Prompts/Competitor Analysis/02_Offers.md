@@ -6,6 +6,12 @@ If fewer than 10 genuinely qualifying competitors can be found and verified, ret
 than padding the list with weak or unverified matches — flag any lower-confidence entries instead
 of silently including them.
 
+WHO COUNTS AS A COMPETITOR HERE: a business that competes with the target for the same buyers —
+it sells the same or a substitutable service to the same kind of customer, in the same market.
+Published pricing is the lens this listing is judged through, never the service the competitor
+has to sell. Do NOT include companies that sell pricing strategy, packaging or offer-design
+services unless that is what the target itself sells.
+
 Additional inputs (all optional unless stated):
 
 competitor_type:
@@ -42,6 +48,7 @@ CRITICAL REQUIREMENTS:
   show credible client results or reviews
 - Exclude: directories, marketplaces, freelancer platforms, low-quality or inactive sites, and
   aggregators
+- Exclude pricing consultancies and offer-design agencies unless the target itself sells those
 
 Ranking & Scoring Guidance:
 similarity_score (0–1) should reflect:

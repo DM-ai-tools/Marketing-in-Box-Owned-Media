@@ -18,6 +18,7 @@ import pytest
 from app.services.competitor import (
     COMPETITOR_CONFIGS,
     GATED_COMPETITOR_MAIN_ASSET_IDS,
+    PHASE2_COMPETITOR_CONFIGS,
     PREPASS_BY_MAIN_ASSET,
     SONNET,
     CompetitorParseError,
@@ -372,3 +373,64 @@ def test_the_social_audit_searches_the_clients_own_market_not_social_agencies() 
     assert "specialised in social content strategy" not in prompt
     # No fixed default may re-point the search at the social-media service itself.
     assert "service" not in _schema_defaults(_config(asset))
+
+
+@pytest.mark.parametrize("asset_id", sorted(COMPETITOR_CONFIGS))
+def test_no_stage_defaults_service_to_the_artefact(asset_id) -> None:
+    """A default of 'conversion rate optimisation (CRO)' or 'content marketing' re-points the
+    search at agencies that sell the stage, not at rivals that sell what the client sells. That
+    was the CRO card returning CRO agencies for an AI SEO client."""
+    from app.services.competitor import _schema_defaults, _config
+
+    assert "service" not in _schema_defaults(_config(asset_id)), asset_id
+
+
+def test_every_stage_searches_the_clients_own_service() -> None:
+    """`{SERVICE}` is the client's service. The stage is the lens (better CRO on their page, their
+    lead magnet), never the market. An AI SEO agency's CRO listing is other SEO agencies."""
+    from app.services.competitor import _config, build_competitor_prompt, resolve_inputs
+
+    inputs = resolve_inputs(
+        _config("competitor_analysis_cro"),
+        main_answers={},
+        client_profile={
+            "website_url": "https://clicktrends.com.au/",
+            "industry": "Digital marketing",
+            "region": "Australia",
+            "target_service": "AI SEO",
+        },
+    )
+    assert inputs["service"] == "AI SEO"
+
+    cro = build_competitor_prompt("competitor_analysis_cro", {**inputs, "service": "AI SEO"})
+    assert "AI SEO" in cro
+    assert "competes with the target for the same buyers" in cro
+    assert "NOT a company that sells conversion rate optimisation" in cro
+
+    content = build_competitor_prompt(
+        "competitor_analysis_content_marketing",
+        {"target_url": "https://clicktrends.com.au/", "service": "AI SEO", "niche": "", "location": "Australia"},
+    )
+    assert "AI SEO" in content
+    assert "competes with the target for the same buyers" in content
+    assert 'service: "content marketing"' not in content
+    assert "content-marketing agencies" in content or "sells content marketing" in content
+
+
+@pytest.mark.parametrize(
+    ("asset_id", "phase"),
+    [(a, "phase1") for a in sorted(COMPETITOR_CONFIGS)]
+    + [(a, "phase2") for a in sorted(PHASE2_COMPETITOR_CONFIGS)],
+)
+def test_every_competitor_prompt_names_same_service_rivals(asset_id, phase) -> None:
+    """The WHO COUNTS paragraph is the search's targeting rule. A stage that drops it silently
+    goes back to finding agencies that sell the artefact."""
+    from app.services.competitor import build_competitor_prompt
+
+    prompt = build_competitor_prompt(
+        asset_id,
+        {"target_url": "https://client.example/", "service": "AI SEO", "niche": "Digital marketing", "location": "Australia"},
+        phase=phase,
+    )
+    assert "WHO COUNTS AS A COMPETITOR HERE" in prompt, f"{phase}:{asset_id}"
+    assert "AI SEO" in prompt, f"{phase}:{asset_id}"

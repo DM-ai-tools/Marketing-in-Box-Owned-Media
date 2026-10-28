@@ -138,6 +138,57 @@ def _markdown_outline(text: str) -> tuple[str, ...]:
     return tuple(outline)
 
 
+#: Skeleton entries a business fix may never remove: what a visitor sees as the brand and the frame
+#: (images, icons, the header, nav and footer), what the page runs on (CSS, scripts) and what it
+#: converts with (buttons, forms).
+_PROTECTED_TAGS = frozenset(
+    {
+        "html", "head", "body", "main", "header", "nav", "footer", "img", "picture", "source", "svg",
+        "video", "iframe", "style", "script", "link", "button", "form", "input", "select", "textarea",
+    }
+)
+
+
+def _removed(before: tuple, after: tuple) -> list | None:
+    """The entries `before` lost to become `after`, or None when `after` is not `before` with entries
+    deleted (something was added, changed or moved)."""
+    removed: list = []
+    i = 0
+    for entry in before:
+        if i < len(after) and after[i] == entry:
+            i += 1
+        else:
+            removed.append(entry)
+    return removed if i == len(after) else None
+
+
+def only_removes_sections(before: tuple, after: tuple) -> bool:
+    """Whether `after` is `before` with whole sections, cards or headings deleted and nothing else.
+
+    This has broken once. A CRO draft sold four services the client does not offer, and the only
+    fix, removing those sections, changed the heading outline, so the lock refused it on every
+    "Fix with Refine". The side edits that did land changed nothing that mattered, and each re-check
+    scored the same problems again, a few points lower. Deletion moves nothing: what stays keeps its
+    order, classes and styles. Images, icons, the frame, CSS, scripts and forms still cannot go."""
+    (outline_before, pages_before), (outline_after, pages_after) = before, after
+    if _removed(outline_before, outline_after) is None or len(pages_before) != len(pages_after):
+        return False
+    for page_before, page_after in zip(pages_before, pages_after):
+        if page_before[:1] == ("unparsed",) or page_after[:1] == ("unparsed",):
+            if page_before != page_after:
+                return False
+            continue
+        gone = _removed(page_before, page_after)
+        if gone is None:
+            return False
+        for entry in gone:
+            if entry[0] == "raw" or entry[1] in _PROTECTED_TAGS:
+                return False
+            if any(k in ("class", "id") and "logo" in v.lower() for k, v in entry[2]):
+                return False
+    return True
+
+
 def layout_fingerprint(text: str) -> tuple:
     """What a business fix must leave alone: the heading outline, and every HTML page's skeleton."""
     pages = _FENCED_HTML.findall(text)
@@ -213,10 +264,12 @@ def build_edit_prompt(
     )
     layout_rules = (
         "- THE LAYOUT IS LOCKED. Change only wording, link targets (href), alt text and the meta "
-        "description, and remove a paragraph or list item where a claim must go. Do not add, move, "
-        "remove or re-tag any section, container, heading, image, icon, logo, button or form. Do "
-        "not change any class, id, style, CSS rule, script or image source. Code checks every edit "
-        "and rejects one that changes the layout, so such an edit is wasted.\n"
+        "description, and remove a paragraph or list item where a claim must go. Where a finding says "
+        "a whole section, card or FAQ item must go (a service the client does not sell), remove it "
+        "entirely, heading and all, in one edit. Do not add, move or re-tag any section, container "
+        "or heading, and never remove an image, icon, logo, button, form, the header, nav or footer. "
+        "Do not change any class, id, style, CSS rule, script or image source. Code checks every "
+        "edit and rejects one that changes the layout, so such an edit is wasted.\n"
         "- A finding that can only be fixed by changing the layout (a CSS rule, a width, a colour, "
         "an image, the menu's structure) is left alone: put it in `skipped` with the reason.\n"
         if lock_layout
@@ -392,7 +445,7 @@ def apply_edits(draft: str, edits: list[Edit], *, lock_layout: bool = False) -> 
             )
             continue
         candidate = text[:start] + edit.replace + text[end:]
-        if locked is not None and layout_fingerprint(candidate) != locked:
+        if locked is not None and not only_removes_sections(locked, layout_fingerprint(candidate)):
             report.rejected.append(
                 (
                     excerpt,

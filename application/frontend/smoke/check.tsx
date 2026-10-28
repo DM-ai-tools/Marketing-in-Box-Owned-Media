@@ -9,6 +9,7 @@
  *   - a check that fails says so and offers a retry, and a failed or truncated draft is not checked.
  */
 import { renderToStaticMarkup } from "react-dom/server";
+import { FixesApplied, FixingBanner } from "../src/pipeline/FixingBanner";
 import { AssetCheckPanel } from "../src/pipeline/AssetCheckPanel";
 import { GenerationStream } from "../src/pipeline/GenerationStream";
 import type { AssetCheckReport } from "../src/pipeline/pipelineApi";
@@ -142,12 +143,32 @@ async function main() {
   // ---------- "Fix" goes to Refine, quoted ----------
   const note = composeFixNote(REPORT.checks[0].findings.slice(0, 1));
   ok("the note quotes the finding", note.includes('Where: "Guaranteed results in 30 days."') && note.includes("Fix: Qualify it."));
-  await usePipelineStore.getState().fixCheckFindings("g1", REPORT.checks[0].findings.slice(0, 1));
+  const before = usePipelineStore.getState().messages;
+  const beforeText = card("g1")?.text;
+  const beforeReport = card("g1")?.check?.report;
+  const fixing = usePipelineStore.getState().fixCheckFindings("g1", REPORT.checks[0].findings.slice(0, 1));
+  ok("while the fix runs, the card keeps its draft", card("g1")?.fixing === true && card("g1")?.text === beforeText);
+  await fixing;
   await flush();
   const refine = calls.find((c) => c.url.includes("/api/pipeline/refine/blog"));
   ok("fix sends the findings to Refine", String(refine?.body?.note ?? "").includes("Guaranteed results in 30 days."), JSON.stringify(refine?.body));
-  const revised = usePipelineStore.getState().messages.filter((m) => m.kind === "generation").pop();
-  ok("the refined draft is checked too", revised?.id !== "g1" && revised?.check?.status === "done");
+  ok("fix sends the business facts", refine?.body?.business_fix === true);
+  const after = usePipelineStore.getState().messages;
+  ok("the fix edits the same card: no new card", after.filter((m) => m.kind === "generation").length === before.filter((m) => m.kind === "generation").length);
+  ok("the fix note is not posted to the chat", !after.some((m) => m.role === "user" && (m.text ?? "").includes("Fix these issues")));
+  ok("the card holds the fixed draft", card("g1")?.text !== beforeText && !card("g1")?.fixing, card("g1")?.text);
+  ok("the fixed draft is checked again, against the report it had", card("g1")?.check?.status === "done" && card("g1")?.priorCheck === beforeReport);
+  ok("the card records when the fix landed", typeof card("g1")?.fixedAt === "number");
+  const banner = renderToStaticMarkup(<FixingBanner />);
+  ok(
+    "the fixing banner animates: ring, shimmer, step and bar",
+    ["bc-spin", "fx-banner", "bc-bar", "fx-dots", "Reading the findings", "Applying the fixes"].every((c) => banner.includes(c)),
+  );
+  ok("the fixing banner is announced politely", banner.includes('role="status"') && banner.includes('aria-live="polite"'));
+  ok("a just-fixed card says so", renderToStaticMarkup(<FixesApplied at={Date.now()} />).includes("Fixes applied"));
+  ok("an old fix says nothing", !renderToStaticMarkup(<FixesApplied at={Date.now() - 60_000} />).includes("Fixes applied"));
+  const recheck = [...calls].reverse().find((c) => c.url.includes("/check/"));
+  ok("the re-check sends the earlier report", Array.isArray(recheck?.body?.previous) && recheck.body.previous.length > 0);
 
   // ---------- a failed check is a retry, not a failed stage ----------
   checkReply = () => json({ detail: "overloaded" }, 503);

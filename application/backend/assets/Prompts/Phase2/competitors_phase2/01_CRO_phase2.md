@@ -6,6 +6,13 @@ If fewer than 10 genuinely qualifying competitors can be found and verified, ret
 than padding the list with weak or unverified matches — flag any lower-confidence entries instead
 of silently including them.
 
+WHO COUNTS AS A COMPETITOR HERE: a business that competes with the target for the same buyers of
+this sub-service — it sells {SERVICE} (or a substitutable offering) to the same kind of customer,
+in the same market. Conversion of their {SERVICE} page is the lens this listing is judged through,
+never the service the competitor has to sell. It is NOT a company that sells conversion rate
+optimisation, CRO audits, A/B testing or landing page services, unless that is what the target
+itself sells.
+
 Additional inputs (all optional unless stated):
 
 competitor_type:
@@ -53,6 +60,7 @@ CRITICAL REQUIREMENTS:
   a clear conversion action
 - Exclude: directories, marketplaces, freelancer platforms, low-quality or inactive sites, and
   aggregators. Ensure competitors are true service providers, not aggregators.
+- Exclude CRO / conversion-optimisation agencies and tools unless the target itself sells CRO.
 - Mark verification_confidence for each entry (Verified / Partially verified / Unverified) based
   on whether the {SERVICE} page was directly confirmed
 

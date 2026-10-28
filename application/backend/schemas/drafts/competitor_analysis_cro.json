@@ -18,9 +18,8 @@
       "kind": "text",
       "required": false,
       "source": "user_input",
-      "default": "conversion rate optimisation (CRO)",
-      "fallback_instruction": "Fixed to \"conversion rate optimisation (CRO)\" for this stage; only include companies with a genuine, identifiable CRO offering (dedicated CRO service page, described process such as audits/A-B testing/landing page optimisation/funnel analysis, or case studies with concrete conversion-lift results) — a page that only mentions \"conversion\" in passing does not count.",
-      "raw_explanation": "service: \"conversion rate optimisation (CRO)\" — only include companies with a genuine, identifiable CRO offering."
+      "fallback_instruction": "The service the target sells, inferred from {TARGET_URL} if not specified. Competitors must sell this same service; CRO is the lens their service page is judged through, not the service they have to sell. Exclude CRO / conversion-optimisation agencies unless the target itself sells CRO.",
+      "raw_explanation": "{SERVICE} — the service the target sells and whose page is being rewritten."
     },
     {
       "field_id": "niche",
@@ -52,7 +51,7 @@
         "full_stack_niche"
       ],
       "fallback_instruction": "If missing or empty, include both types.",
-      "raw_explanation": "\"niche_specialist\" = a company specialised in the target's core service/industry, offering CRO as part of that specialism. \"full_stack_niche\" = a full-service company in the same industry as the target that prominently offers CRO as one of several services."
+      "raw_explanation": "\"niche_specialist\" = a company specialised in the target's service, whose page for that service is its main conversion surface. \"full_stack_niche\" = a broader company in the same industry that sells the target's service as a distinct line of business, with its own dedicated page for it."
     },
     {
       "field_id": "excluded_competitors",

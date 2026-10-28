@@ -97,7 +97,7 @@
       "source": "auto_from_context",
       "context_key": "competitor_analysis_content_marketing",
       "fallback": "ask_user_if_missing",
-      "raw_explanation": "YOUR ANSWER — attach or reference 3-5 direct content-marketing competitors in this industry and region. Include quantified footprint data if you have it (monthly visits, service page count, case study count, educational/blog page count, paid landing page count, bounce rate) from a tool such as Ahrefs/SEMrush/Similarweb. If you don't have this data, name the competitors anyway and state \"no traffic/page-count data available — competitor content gaps will be assessed qualitatively only.\" Now sourced from the paired Competitor Analysis — Content Marketing stage (06_Content_Marketing.md) when available; falls back to asking the user for a manual list."
+      "raw_explanation": "YOUR ANSWER — attach or reference 3-5 direct content-marketing competitors in this industry and region. Include quantified footprint data if you have it (monthly visits, service page count, case study count, educational/blog page count, paid landing page count, bounce rate) from a tool such as SEMrush/Similarweb. If you don't have this data, name the competitors anyway and state \"no traffic/page-count data available — competitor content gaps will be assessed qualitatively only.\" Now sourced from the paired Competitor Analysis — Content Marketing stage (06_Content_Marketing.md) when available; falls back to asking the user for a manual list."
     },
     {
       "field_id": "keyword_search_volume_data_source_optional",
@@ -109,7 +109,7 @@
         "file",
         "text"
       ],
-      "raw_explanation": "YOUR ANSWER — attach or reference a keyword research export (Ahrefs, SEMrush, Google Keyword Planner) covering this service in this region. If left blank, state estimated monthly search volumes using judgement and clearly label every volume figure as an estimate, not verified data.",
+      "raw_explanation": "YOUR ANSWER — attach or reference a keyword research export (SEMrush, Google Keyword Planner) covering this service in this region. If left blank, state estimated monthly search volumes using judgement and clearly label every volume figure as an estimate, not verified data.",
       "fallback_instruction": "If left blank, state estimated monthly search volumes using judgement and clearly label every volume figure as an estimate, not verified data."
     },
     {

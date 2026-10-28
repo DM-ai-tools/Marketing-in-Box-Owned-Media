@@ -86,7 +86,7 @@
       "kind": "text",
       "required": true,
       "source": "user_input",
-      "raw_explanation": "YOUR ANSWER — the sub-services of the primary service confirmed for Phase 2, one per line: name — status (existing page on the client's site, or new) — the existing page's URL or a proposed slug — the keyword cluster with each keyword's monthly search volume — the combined volume — and the volume source (Ahrefs for a named country, or \"not measured\"). If you want these inferred rather than supplied, say \"infer 6-10 sub-services from the primary service and industry norms.\""
+      "raw_explanation": "YOUR ANSWER — the sub-services of the primary service confirmed for Phase 2, one per line: name — status (existing page on the client's site, or new) — the existing page's URL or a proposed slug — the keyword cluster with each keyword's monthly search volume — the combined volume — and the volume source (DataForSEO for a named country, or \"not measured\"). If you want these inferred rather than supplied, say \"infer 6-10 sub-services from the primary service and industry norms.\""
     },
     {
       "field_id": "industry_verticals_to_target_phase_3_optional",

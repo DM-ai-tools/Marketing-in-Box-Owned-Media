@@ -9,7 +9,7 @@
  */
 
 import type { AssetDocument } from "./assetDocument";
-import { AHREFS_USAGE_LABEL } from "./ahrefsUsage";
+import { KEYWORD_USAGE_LABEL } from "./keywordUsage";
 import { BUSINESS_CHECK_LABEL } from "./businessCheck";
 import { plainCell, parseVisualBlocks, scoreOf, type ShowSlot, type VisualBlock } from "./visualBlocks";
 
@@ -46,10 +46,10 @@ interface Located {
 function located(doc: AssetDocument): Located[] {
   // The business check is a score table about the draft, not part of it. Left in, an asset with no
   // score of its own (a funnel, a lead magnet) would open on the check's scores as if they were its.
-  // The Ahrefs keyword data is skipped for the same reason: its tables describe the data behind the
+  // The keyword data is skipped for the same reason: its tables describe the data behind the
   // asset, not the asset.
   return doc.sections
-    .filter((s) => s.label !== BUSINESS_CHECK_LABEL && s.label !== AHREFS_USAGE_LABEL)
+    .filter((s) => s.label !== BUSINESS_CHECK_LABEL && s.label !== KEYWORD_USAGE_LABEL)
     .flatMap((s) => parseVisualBlocks(s.body).map((block) => ({ sectionId: s.id, label: s.label, block })));
 }
 

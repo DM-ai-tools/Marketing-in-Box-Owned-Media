@@ -17,9 +17,10 @@ rows in `STAGE_CONFIGS`:
    `generation.build_prompt` rebuilds the INPUTS block and splices on everything after the
    marker. The competitor files have no marker and no INPUTS block: the whole file *is* the
    prompt, with `{TARGET_URL}` / `{NICHE}` / `{LOCATION}` / `{SERVICE}` placeholders
-   substituted in place (verified across all 10 files; `01_CRO.md` and
-   `07_Social_Content_Strategy_and_Posts.md` hardcode their service and so have no
-   `{SERVICE}`).
+   substituted in place. `{SERVICE}` is always the client's own service (or Phase 2's
+   sub-service) — the stage is the lens the listing is judged through, never the market
+   the search is run in. A CRO run for an AI SEO agency finds other SEO agencies, then
+   scores their service pages on conversion; it does not find CRO agencies.
 
 2. **Tool use.** Each file explicitly requires verifying candidates by fetching the actual page
    ("do not rely on titles or search snippets alone"). Without a real search tool Claude can
@@ -224,8 +225,16 @@ class CompetitorConfig:
     source_fields: dict[str, tuple[str, ...]]
 
 
-def _sources(url: tuple[str, ...], niche: tuple[str, ...], location: tuple[str, ...]) -> dict[str, tuple[str, ...]]:
-    return {"target_url": url, "niche": niche, "location": location}
+def _sources(
+    url: tuple[str, ...],
+    niche: tuple[str, ...],
+    location: tuple[str, ...],
+    service: tuple[str, ...] = (),
+) -> dict[str, tuple[str, ...]]:
+    """Placeholder sources. `service` defaults to the run-level client service
+    (`target_service` / `sub_service` in `resolve_inputs`) so every stage searches the
+    client's own market unless a stage opts into a more specific seed."""
+    return {"target_url": url, "niche": niche, "location": location, "service": service}
 
 
 # Field-name drift across the 16 main schemas is real and intentional (each was transcribed from
@@ -347,8 +356,9 @@ COMPETITOR_CONFIGS: dict[str, CompetitorConfig] = {
 #
 # That substitution is the whole point of the phase split. In Phase 1 `{SERVICE}` is the client's
 # headline service; here it is the sub-service the operator named at the start of the run, so the
-# search returns competitors doing *Google Ads* lead magnets rather than competitors doing marketing
-# lead magnets. It reaches `resolve_inputs` through the run-level client profile's `sub_service`.
+# search returns competitors selling *Google Ads*, then looks at those rivals' lead magnets / pages
+# / funnels — not companies that sell lead-magnet design, and not the headline service's market.
+# It reaches `resolve_inputs` through the run-level client profile's `sub_service`.
 #
 # All of them are gated: each one is reviewed before the stage it feeds runs, because a sub-service
 # competitor set is exactly the thing an operator needs to read before choosing a blog topic or
@@ -372,8 +382,8 @@ def _phase2_sources(
 
 PHASE2_COMPETITOR_CONFIGS: dict[str, CompetitorConfig] = {
     # Phase 2's CRO stage audits and rewrites the page for one sub-service, so what it has to be
-    # benchmarked against is competitors' pages *for that sub-service* — not their CRO offering,
-    # which is what Phase 1's file searches for. Hence its own prompt file rather than the Phase-1
+    # benchmarked against is competitors' pages *for that sub-service* — same-service rivals whose
+    # page converts better, never CRO agencies. Hence its own prompt file rather than the Phase-1
     # one: `01_CRO_phase2.md` looks for a dedicated {SERVICE} page with its own proposition, process
     # and proof, and rejects a company that sells {SERVICE} only as a line item on a combined
     # services page — such a company has no page for this one to be measured against.
@@ -758,6 +768,7 @@ def to_prompt_text(analysis: ParsedAnalysis, target_url: str) -> str:
 _PROSE_HEADER = re.compile(r"^\s*Competitor analysis\s*[—-]\s*benchmarked against\b", re.IGNORECASE)
 _PROSE_ENTRY = re.compile(r"^\s*\d+\.\s+(?P<name>.+?)\s+\((?P<domain>[^()\s]+)\)\s+[—-]\s+(?P<confidence>.+?)\s*$")
 _PROSE_PAGE = re.compile(r"^\s+Page:\s*(?P<url>\S+)\s*$")
+_PROSE_OFFERING = re.compile(r"^\s+Offering:\s*(?P<text>.+)$")
 # A website anywhere on a free-typed line: a URL, or a bare host with a dot and a 2+ letter TLD. Not
 # inside an email address — `sales@acme.com` names a contact, not a competitor.
 _TYPED_SITE = re.compile(
@@ -798,7 +809,7 @@ def parse_competitor_listing(asset_id: str, text: str) -> ParsedAnalysis:
     competitors: list[ParsedCompetitor] = []
     seen: set[str] = set()
 
-    def _add(domain: str, name: str, confidence: str, page_url: str | None) -> None:
+    def _add(domain: str, name: str, confidence: str, page_url: str | None, offering: str | None = None) -> None:
         if not domain or domain in seen:
             return
         seen.add(domain)
@@ -809,7 +820,7 @@ def parse_competitor_listing(asset_id: str, text: str) -> ParsedAnalysis:
                 name=name or domain,
                 page_url=page_url,
                 verification_confidence=confidence if confidence in _VALID_CONFIDENCE else "Unverified",
-                offering_summary=None,
+                offering_summary=offering,
                 starting_price=None,
                 category=None,
                 similarity_score=None,
@@ -826,7 +837,15 @@ def parse_competitor_listing(asset_id: str, text: str) -> ParsedAnalysis:
             (m.group("url") for m in (_PROSE_PAGE.match(nxt) for nxt in lines[i + 1 : i + 3]) if m),
             None,
         )
-        _add(_bare_domain(entry.group("domain")), entry.group("name").strip(), entry.group("confidence"), page)
+        # The entry's own detail lines run until the next entry or a blank line.
+        offering = None
+        for nxt in lines[i + 1 : i + 7]:
+            if not nxt.strip() or _PROSE_ENTRY.match(nxt):
+                break
+            found = _PROSE_OFFERING.match(nxt)
+            if found:
+                offering = found.group("text").strip()
+        _add(_bare_domain(entry.group("domain")), entry.group("name").strip(), entry.group("confidence"), page, offering)
 
     if not competitors:
         for line in lines:
@@ -876,9 +895,10 @@ def _web_search_enabled() -> bool:
 
 
 def _schema_defaults(cfg: CompetitorConfig) -> dict[str, str]:
-    """Per-stage placeholder defaults declared in the competitor schema JSON (e.g. `service` is
-    fixed to "conversion rate optimisation (CRO)" for the CRO stage, `location` to
-    "Australia-wide")."""
+    """Per-stage placeholder defaults declared in the competitor schema JSON (`location` is
+    "Australia-wide" on every stage). Service is never defaulted here — a default of
+    "conversion rate optimisation (CRO)" or "content marketing" would re-point the search
+    at agencies that sell the stage, not at rivals that sell what the client sells."""
     data = json.loads((_SCHEMAS_DIR / cfg.schema_file).read_text(encoding="utf-8"))
     return {f["field_id"]: str(f["default"]) for f in data["fields"] if f.get("default") is not None}
 
@@ -928,7 +948,7 @@ def resolve_inputs(
         # Phase 2's `{SERVICE}` — the sub-service the run is for, established before stage 1 and
         # never asked again. Empty on a Phase 1 run, where no stage sources `service` from the
         # profile and the schema default or an intake answer supplies it instead.
-        "service": profile.get("sub_service", ""),
+        "service": (profile.get("sub_service") or profile.get("target_service") or "").strip(),
     }
 
     resolved: dict[str, str] = {}

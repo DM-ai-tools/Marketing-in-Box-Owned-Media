@@ -62,13 +62,12 @@ superseded, interrupted, failed, refining — without a browser or a new depende
   The losslessness check there is word-multiset containment rather than line matching, and the
   comment above it records why: two weaker versions of that check each let a real data-loss bug
   through.
-- `ahrefsUsage.tsx` — the "Ahrefs keyword data" section at the end of an asset. It checks which
+- `keywordUsage.tsx` — the "Keyword data" section (DataForSEO) at the end of an asset. It checks which
   assets get it and what it says and tables. It checks that the stub provider, a failed lookup or
   another leg's data never appear, and that the section comes last and is parsed as its own section.
 - `secondaryKeywords.tsx` — the Pillar Page's secondary terms. Answering the head term opens the
-  Ahrefs-vs-DataForSEO card, not a question, with nothing ticked. The two columns show their totals
-  and the terms both suggested. A failed provider says why in its own column. The answer carries
-  each term's provider and volume, and Skip answers N/A.
+  DataForSEO terms card, not a question, with nothing ticked. The list shows its totals, and a failed
+  lookup says why. The answer carries each term's provider and volume, and Skip answers N/A.
 - `manus.tsx` — the Pillar Page built by Manus, on the card: the building state (the agent's own
   words, elapsed time, task link), the one-line done state with credits, the fallback note saying
   Claude built the page instead, and that a reloaded card never claims to still be building.
@@ -88,9 +87,32 @@ superseded, interrupted, failed, refining — without a browser or a new depende
   Save marks it saved, shows it on Deliverables with its zip and moves to the next stage still to
   build; with none left a notice clears after 3 seconds. Approving Funnel Hub & Media parks the walk
   on the offer, and Not now moves on.
+- `blogKeywords.tsx` — the Blog keyword card. Answering the topic opens it at the primary keyword, seeded
+  with the topic's own keyword. It shows what was compared, the current keyword, why each suggestion is
+  better and both providers' numbers. Confirming answers the primary and the supporting keywords, so
+  the supporting question is never asked.
+- `webinarSources.tsx` — the Webinar's competitor sources. Answering the competitor research opens the
+  sources card instead of the question. It lists each webinar page, whether it was read, why it was
+  chosen and what came back. Confirming answers the field with the pages read plus anything typed.
+- `competitorValidation.tsx` — the competitor validation on every listing. It is requested with the
+  client's site and region, and the card shows the verdicts, the three axes, what to take, how to
+  prove it, each number's source, the plays and the limits. Approving a subset carries only those
+  competitors' ranking into the prompt, and the appendix carries each verdict.
 - `funnelCompetitors.tsx` — the Funnel researches its competitors and never asks for a pasted list.
   A re-run with no listing runs the search on the run's service, a re-run with a stored listing
   reuses it, and an intake that reaches the input empty offers research instead of a question.
+- `buyerLanguage.tsx` — CRO's outcome words and words to avoid. Each field opens a suggestions card,
+  asked with the session's services, landing page, region and run. Nothing starts ticked, the answers
+  are plain comma lists under the Phase 2 limit, the avoid card's Skip answers NONE, and an error
+  still takes typed words.
+- `summary.tsx` — the reader's Summary tab. One request per draft, none on reopening, again for a
+  changed draft or after "Try again", and again for a `loading` left by a closed tab; the loading,
+  error and done states render, with the AI-written note and section jumps.
+- `contextSearch.tsx` — suggested answers from the run's approved documents. Entering a stage sends
+  one prefill request with only the questions the walk would ask (an unextractable sub-key goes
+  restricted to its own document), the question card carries its suggestion with source and quote,
+  "Use this" answers it, and a failed prefill still asks. The generation card says when an input
+  was sent as its relevant sections.
 
 ## What they do not cover
 

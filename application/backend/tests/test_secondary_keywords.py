@@ -1,6 +1,6 @@
-"""Secondary / cluster terms for the Pillar Page, from Ahrefs and DataForSEO side by side.
+"""Secondary / cluster terms for the Pillar Page, from DataForSEO.
 
-Never reaches either live API. The filter is pinned against the rows the live APIs actually returned
+Never reaches the live API. The filter is pinned against the rows live providers actually returned
 for "social media marketing agency" in Australia; DataForSEO's client against its real nesting.
 """
 from __future__ import annotations
@@ -26,7 +26,7 @@ def kw(text: str, volume: int | None = 100) -> SecondaryKeyword:
 # ---------- the shared filter ----------
 
 
-def test_the_filter_drops_what_live_ahrefs_actually_returned_off_topic() -> None:
+def test_the_filter_drops_what_a_live_provider_actually_returned_off_topic() -> None:
     rows = [
         kw("social", 3100),
         kw("agency", 1700),
@@ -59,55 +59,49 @@ def test_the_list_is_capped() -> None:
     assert len(secondary_keywords.filter_suggestions(HEAD, rows)) == secondary_keywords.MAX_PER_PROVIDER
 
 
-# ---------- suggest(): each provider on its own ----------
+# ---------- suggest() ----------
 
 
-def _patch(monkeypatch: pytest.MonkeyPatch, ahrefs: Any, dfs: Any) -> list[tuple[str, str]]:
-    calls: list[tuple[str, str]] = []
-
-    async def fake_ahrefs(head: str, country: str) -> ProviderSuggestions:
-        calls.append(("ahrefs", country))
-        return ahrefs if isinstance(ahrefs, ProviderSuggestions) else ProviderSuggestions("ahrefs", "error", error="Ahrefs boom")
+def _patch(monkeypatch: pytest.MonkeyPatch, dfs: Any) -> list[str]:
+    calls: list[str] = []
 
     async def fake_dfs(head: str, country: str) -> ProviderSuggestions:
-        calls.append(("dataforseo", country))
+        calls.append(country)
         return dfs if isinstance(dfs, ProviderSuggestions) else ProviderSuggestions("dataforseo", "error", error="DataForSEO boom")
 
-    monkeypatch.setattr(secondary_keywords, "_from_ahrefs", fake_ahrefs)
     monkeypatch.setattr(secondary_keywords, "_from_dataforseo", fake_dfs)
     return calls
 
 
 @pytest.mark.asyncio
-async def test_both_providers_are_asked_for_the_same_country(monkeypatch: pytest.MonkeyPatch) -> None:
-    ok = ProviderSuggestions("ahrefs", "ok", [kw("social media management")])
-    calls = _patch(monkeypatch, ok, ProviderSuggestions("dataforseo", "ok", [kw("social media agency melbourne")]))
+async def test_dataforseo_is_asked_for_the_clients_country(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = _patch(monkeypatch, ProviderSuggestions("dataforseo", "ok", [kw("social media agency melbourne")]))
     result = await secondary_keywords.suggest(HEAD, "Melbourne, Australia")
-    assert sorted(calls) == [("ahrefs", "Australia"), ("dataforseo", "Australia")]
-    assert result.location == "Australia" and result.ahrefs.status == result.dataforseo.status == "ok"
+    assert calls == ["Australia"]
+    assert result.location == "Australia" and result.dataforseo.status == "ok"
 
 
 @pytest.mark.asyncio
-async def test_one_provider_failing_leaves_the_other_column(monkeypatch: pytest.MonkeyPatch) -> None:
-    _patch(monkeypatch, ProviderSuggestions("ahrefs", "ok", [kw("social media management")]), "fail")
+async def test_a_failure_is_a_status_and_a_sentence(monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch(monkeypatch, "fail")
     result = await secondary_keywords.suggest(HEAD, "Australia")
-    assert result.ahrefs.keywords and result.dataforseo.status == "error" and "boom" in result.dataforseo.error
+    assert result.dataforseo.status == "error" and "boom" in result.dataforseo.error
 
 
 @pytest.mark.asyncio
 async def test_a_region_with_no_country_asks_nothing_and_says_how_to_fix_it(monkeypatch: pytest.MonkeyPatch) -> None:
-    calls = _patch(monkeypatch, "fail", "fail")
+    calls = _patch(monkeypatch, "fail")
     result = await secondary_keywords.suggest(HEAD, "Sydney NSW")
     assert calls == []
-    assert result.ahrefs.status == "error" and "Melbourne, Australia" in result.dataforseo.error
+    assert result.dataforseo.status == "error" and "Melbourne, Australia" in result.dataforseo.error
 
 
 @pytest.mark.asyncio
-async def test_unconfigured_providers_say_so(monkeypatch: pytest.MonkeyPatch) -> None:
-    for name in ("AHREFS_API_KEY", *dataforseo_client.LOGIN_ENVS, *dataforseo_client.PASSWORD_ENVS):
+async def test_unconfigured_says_so(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in (*dataforseo_client.LOGIN_ENVS, *dataforseo_client.PASSWORD_ENVS):
         monkeypatch.delenv(name, raising=False)
     result = await secondary_keywords.suggest(HEAD, "Australia")
-    assert (result.ahrefs.status, result.dataforseo.status) == ("unconfigured", "unconfigured")
+    assert result.dataforseo.status == "unconfigured"
 
 
 # ---------- the DataForSEO client, against its real nesting ----------
@@ -157,13 +151,79 @@ async def test_a_200_can_still_be_a_failure(status: int, body: dict, words: str)
     await client.aclose()
 
 
+@pytest.mark.asyncio
+async def test_overview_and_the_broad_class_read_their_own_endpoints() -> None:
+    """The keyword pipeline's two other calls: `keyword_overview` for exact keywords (a list body)
+    and `keyword_ideas` for the broad class (a seed list, not a single keyword)."""
+    seen: list[dict] = []
+    row = {"keyword": "Social Media Agency", "keyword_info": {"search_volume": 880}, "keyword_properties": {"keyword_difficulty": 22}}
+    client = dataforseo_client.DataForSEOClient("u", "p", transport=_dfs_transport(seen, _ok([row])))
+    measured = await client.overview(["social media agency", "social media agency", " "], "Australia")
+    broad = await client.expand(HEAD, "broad", "Australia", 40)
+    phrase = await client.expand(HEAD, "phrase", "Australia", 40)
+    await client.aclose()
+    assert measured["social media agency"].volume == 880
+    assert seen[0]["path"].endswith("keyword_overview/live") and seen[0]["body"][0]["keywords"] == ["social media agency"]
+    assert seen[1]["path"].endswith("keyword_ideas/live") and seen[1]["body"][0]["keywords"] == [HEAD]
+    assert seen[2]["path"].endswith("keyword_suggestions/live") and seen[2]["body"][0]["keyword"] == HEAD
+    assert broad[0].volume == 880 and phrase[0].difficulty == 22
+
+
+@pytest.mark.asyncio
+async def test_ideas_sends_every_seed_in_one_request() -> None:
+    """Buyer language's outcome searches: one `keyword_ideas` request over all the seeds, deduped,
+    and nothing sent when there are none."""
+    seen: list[dict] = []
+    row = {"keyword": "how to rank in chatgpt", "keyword_info": {"search_volume": 320}}
+    client = dataforseo_client.DataForSEOClient("u", "p", transport=_dfs_transport(seen, _ok([row])))
+    rows = await client.ideas(["rank in chatgpt", "ai overviews", "rank in chatgpt", " "], "Australia", limit=50)
+    assert await client.ideas([], "Australia") == []
+    await client.aclose()
+    assert len(seen) == 1 and seen[0]["path"].endswith("keyword_ideas/live")
+    assert seen[0]["body"][0]["keywords"] == ["rank in chatgpt", "ai overviews"]
+    assert seen[0]["body"][0]["limit"] == 50
+    assert rows[0].keyword == "how to rank in chatgpt" and rows[0].volume == 320
+
+
+@pytest.mark.asyncio
+async def test_ranked_overview_reads_result_level_totals() -> None:
+    """`metrics.organic.count` / `etv` are on the result, not the items. `_post` used to throw
+    them away, so competitor validation could only sum the sampled rows."""
+    seen: list[dict] = []
+    item = {
+        "keyword_data": {"keyword": "ai seo melbourne", "keyword_info": {"search_volume": 320}},
+        "ranked_serp_element": {"serp_item": {"rank_absolute": 4, "url": "https://rival.com.au/ai-seo/", "etv": 90.0}},
+    }
+    body = {
+        "tasks": [{
+            "status_code": 20000,
+            "result": [{
+                "total_count": 4821,
+                "metrics": {"organic": {"count": 4821, "etv": 15230.5}},
+                "items": [item],
+            }],
+        }]
+    }
+    client = dataforseo_client.DataForSEOClient("u", "p", transport=_dfs_transport(seen, body))
+    overview = await client.ranked_overview("rival.com.au", "Australia", limit=50)
+    pages = await client.ranking_page_count("https://www.rival.com.au/ai-seo/", "Australia")
+    await client.aclose()
+    assert overview.keyword_count == 4821 and overview.traffic == 15230.5
+    assert overview.keywords[0].keyword == "ai seo melbourne" and overview.keywords[0].position == 4
+    assert seen[0]["path"].endswith("ranked_keywords/live")
+    assert seen[1]["path"].endswith("relevant_pages/live") and seen[1]["body"][0]["target"] == "rival.com.au"
+    assert seen[1]["body"][0]["limit"] == 1
+    # The relevant_pages mock reuses the same body, so total_count 4821 is what comes back.
+    assert pages == 4821
+
+
 # ---------- the route ----------
 
 
-def test_the_route_returns_both_columns_and_never_errors_for_a_provider(monkeypatch: pytest.MonkeyPatch) -> None:
-    _patch(monkeypatch, ProviderSuggestions("ahrefs", "ok", [kw("social media management", 1700)]), "fail")
+def test_the_route_returns_the_suggestions_and_never_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch(monkeypatch, ProviderSuggestions("dataforseo", "ok", [kw("social media management", 1700)]))
     response = TestClient(app).post("/pipeline/keywords/secondary", json={"head_term": HEAD, "region": "Australia"})
     assert response.status_code == 200
     body = response.json()
-    assert body["ahrefs"]["keywords"][0] == {"keyword": "social media management", "volume": 1700, "difficulty": 10, "cpc": None, "intent": None}
-    assert body["dataforseo"]["status"] == "error"
+    assert "ahrefs" not in body
+    assert body["dataforseo"]["keywords"][0] == {"keyword": "social media management", "volume": 1700, "difficulty": 10, "cpc": None, "intent": None, "trend": None}

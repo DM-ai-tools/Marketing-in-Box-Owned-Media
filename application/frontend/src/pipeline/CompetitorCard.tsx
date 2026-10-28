@@ -4,8 +4,11 @@ import { TypingIndicator } from "../components/TypingIndicator";
 import { ASSET_BY_ID } from "../data/assetCatalog";
 import { PREPASS_BY_MAIN_ASSET } from "./pipelineData";
 import { usePipelineStore } from "./pipelineStore";
+import { CompetitorValidationPanel } from "./CompetitorValidationPanel";
 import type { PipelineMessage } from "./pipelineStore";
-import type { CompetitorRow } from "./pipelineApi";
+import type { CompetitorRow, ValidatedCompetitor } from "./pipelineApi";
+import { BUSINESS_LEVEL_LABEL } from "../lib/competitorValidation";
+import { ScannedKeywords } from "./ScannedKeywords";
 import {
   buildApprovedResult,
   parseOwnCompetitorList,
@@ -34,11 +37,14 @@ function ConfidenceBadge({ value }: { value: string }) {
 
 function CompetitorRowItem({
   competitor,
+  scored,
   selectable = false,
   checked = true,
   onToggle,
 }: {
   competitor: CompetitorRow;
+  /** Measured size vs the client, once validation has run. */
+  scored?: ValidatedCompetitor;
   /** In "Choose which to use" mode each row gets a checkbox; an unticked row is dimmed rather than
    * hidden, so the operator can see what they are leaving out and change their mind. */
   selectable?: boolean;
@@ -96,7 +102,33 @@ function CompetitorRowItem({
                 {competitor.starting_price}
               </span>
             )}
+            {scored?.business_level && (
+              <span
+                className="shrink-0 rounded-full border px-2 py-0.5 text-[0.66rem] font-medium"
+                style={{ borderColor: "var(--border-strong)", color: "var(--fg-muted)" }}
+                title="Organic traffic vs this client's own site"
+              >
+                {BUSINESS_LEVEL_LABEL[scored.business_level]}
+              </span>
+            )}
           </div>
+          {scored && (scored.page_count != null || scored.keyword_count != null || scored.top_keywords.length > 0) && (
+            <p className="mt-0.5 text-[0.7rem] text-[var(--fg-faint)]">
+              {scored.page_count != null ? `Number of pages: ${scored.page_count.toLocaleString("en-US")}` : null}
+              {scored.page_count != null && scored.keyword_count != null ? " · " : null}
+              {scored.keyword_count != null ? (
+                <ScannedKeywords keywords={scored.scanned_keywords} total={scored.keyword_count}>
+                  {`${scored.keyword_count.toLocaleString("en-US")} ranking keywords`}
+                </ScannedKeywords>
+              ) : null}
+              {scored.top_keywords.length > 0 ? (
+                <>
+                  {(scored.page_count != null || scored.keyword_count != null) ? " · " : null}
+                  ranks for {scored.top_keywords.slice(0, 4).map((k) => `${k.keyword}${k.position ? ` (#${k.position})` : ""}`).join(", ")}
+                </>
+              ) : null}
+            </p>
+          )}
 
           {competitor.page_url && (
             <a
@@ -223,6 +255,11 @@ export function CompetitorCard({ message }: { message: PipelineMessage }) {
   const result = message.competitor;
   const saving = message.savePhase === "saving";
   const saved = message.savePhase === "saved";
+  const scoredByDomain = new Map(
+    (message.competitorValidation?.status === "ready" ? message.competitorValidation.report?.competitors : undefined)?.map(
+      (c) => [c.domain.toLowerCase(), c],
+    ) ?? [],
+  );
 
   const [mode, setMode] = useState<CompetitorSelectionMode>("all");
   // Tracked as what was *excluded*, so a re-run's fresh domains all start ticked without an effect
@@ -355,7 +392,7 @@ export function CompetitorCard({ message }: { message: PipelineMessage }) {
       <div className="w-full min-w-0 max-w-[47rem] rounded-2xl border border-[var(--border)] bg-[var(--bg-raised)] px-3 py-3 msg-rise @[30rem]:px-4 @[30rem]:py-3.5">
         {header}
         <p className="mb-2 text-[0.8rem] text-[var(--fg-muted)]">
-          Researching competitors and verifying each one's CRO offering on their own page…
+          Researching same-service competitors and verifying each one's page…
         </p>
         <TypingIndicator />
       </div>
@@ -389,6 +426,9 @@ export function CompetitorCard({ message }: { message: PipelineMessage }) {
         </>
       )}
 
+      {/* The operator's own list was never searched, so there is nothing of the search's to score. */}
+      {(saved || activeMode !== "own") && <CompetitorValidationPanel message={message} />}
+
       {!saved && activeMode === "own" ? (
         <OwnListEditor text={ownText} onChange={setOwnText} readCount={own.rows.length} unreadable={own.unreadable} />
       ) : result.returned_count === 0 ? (
@@ -419,6 +459,7 @@ export function CompetitorCard({ message }: { message: PipelineMessage }) {
               <CompetitorRowItem
                 key={c.domain}
                 competitor={c}
+                scored={scoredByDomain.get(c.domain.toLowerCase())}
                 selectable={!saved && activeMode === "select"}
                 checked={selectedDomains.has(c.domain)}
                 onToggle={() => toggle(c.domain)}

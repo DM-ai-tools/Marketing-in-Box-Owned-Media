@@ -237,6 +237,61 @@ ok("a blank note is never sent", !(await store().reviseFunnelBuildItem(card.id, 
   ok("Not now moves on to the next asset", store().subStep === "competitor" && store().currentIndex === offersIndex);
 }
 
+// 6. The ClickTrends chat as it was stored (2026-10-19): Funnel and Funnel Hub & Media approved, the
+//    deployable funnel saved, and "stopped" cards for Funnel Hub Media, Funnel and Pillar Page — each a
+//    stage already approved — with the cursor on Funnel. The chat offered "Start Funnel again".
+{
+  const { stagesFor } = await import("../src/pipeline/pipelineData");
+  const { selectCanStop, selectStoppableStage } = await import("../src/pipeline/pipelineStore");
+  const { renderToStaticMarkup: render2 } = await import("react-dom/server");
+  const { GenerationStream } = await import("../src/pipeline/GenerationStream");
+  const stages = stagesFor("phase1");
+  const idx = (id: string) => stages.findIndex((s) => s.asset.asset_id === id);
+  const approved = ["icp", "cro", "pillar_page", "funnel", "funnel_hub_media"].map((id, i) => saved(id, `ok-${i}`));
+  const stoppedCard = (assetId: string, label: string, id: string) =>
+    ({ id, role: "assistant", kind: "stage-stopped", phase: "phase1", assetId, createdAt: 3, stopped: { assetId, label, wasGenerating: false } }) as PipelineMessage;
+  const stored: PipelineMessage[] = [
+    ...approved,
+    { id: "offers-search", role: "assistant", kind: "competitor", assetId: "competitor_analysis_offers", savePhase: "idle", superseded: true, phase: "phase1", createdAt: 2 } as PipelineMessage,
+    stoppedCard("funnel_hub_media", "Funnel Hub Media", "stop-hub"),
+    { id: "fb-saved", role: "assistant", kind: "funnel-build", phase: "phase1", createdAt: 3, funnelBuild: { status: "done", saved: true, plan, items: built, building: [] } } as PipelineMessage,
+    stoppedCard("funnel", "Funnel", "stop-funnel"),
+    { id: "gate-funnel", role: "assistant", kind: "stage-gate", assetId: "funnel", phase: "phase1", createdAt: 4, gate: { index: idx("funnel"), assetId: "funnel", status: "pending" } } as unknown as PipelineMessage,
+    stoppedCard("pillar_page", "Pillar Page Design", "stop-pillar"),
+  ];
+  calls.length = 0;
+  seed(stored);
+  usePipelineStore.setState({ currentIndex: idx("funnel"), activeStatus: "running", navStatus: "Awaiting Input", intake: null, subStep: null } as never);
+
+  ok("an approved stage with nothing in progress cannot be stopped", !selectCanStop(store()) && !selectStoppableStage(store()));
+  Object.assign(usePipelineStore.getInitialState(), { ...store() });
+  const transcript = render2(<GenerationStream />);
+  ok("a stopped card for an approved stage offers the next stage", transcript.includes("Continue with Stage 06: Offers"), transcript.match(/(Start|Continue)[^<]{0,60}/g)?.join(" | "));
+  ok("and no longer offers to start Funnel again", !transcript.includes("Start Funnel again"));
+
+  store().continueToNextStage();
+  await new Promise((r) => setTimeout(r, 20));
+  const now = store();
+  ok("Continue starts Offers", now.currentIndex === idx("offers") && now.subStep === "competitor", `${now.currentIndex} ${now.subStep}`);
+  ok("the stale stopped cards and gate are retired", ["stop-hub", "stop-funnel", "gate-funnel", "stop-pillar"].every((id) => now.messages.find((m) => m.id === id)?.superseded));
+
+  // Stop during Offers' competitor search names Offers, not the stage before it.
+  const live = now.messages.filter((m) => m.kind === "competitor" && !m.superseded);
+  usePipelineStore.setState({ currentIndex: idx("funnel_hub_media"), messages: now.messages.map((m) => (live.includes(m) ? { ...m, competitor: built as never } : m)) } as never);
+  ok("Stop during Offers' competitor search names Offers", selectStoppableStage(store())?.assetId === "offers", selectStoppableStage(store())?.assetId);
+
+  // Saving the deployable funnel with an old stopped card on screen moves forward, not back.
+  seed([...approved, stoppedCard("funnel_hub_media", "Funnel Hub Media", "stop-old"), doneOf("fb-new")]);
+  usePipelineStore.setState({ currentIndex: idx("funnel_hub_media"), activeStatus: "hitl", intake: null, subStep: null } as never);
+  store().saveFunnelBuild("fb-new");
+  await new Promise((r) => setTimeout(r, 20));
+  ok("Save goes on to Offers even with an old stopped card", store().currentIndex === idx("offers") && store().subStep === "competitor", `${store().currentIndex} ${store().subStep}`);
+}
+
+function doneOf(id: string): PipelineMessage {
+  return { id, role: "assistant", kind: "funnel-build", phase: "phase1", createdAt: 5, funnelBuild: { status: "done", plan, items: built, building: [] } } as PipelineMessage;
+}
+
 console.log(`funnelBuild: ${pass} passed, ${fails.length} failed`);
 for (const f of fails) console.log(`  FAIL ${f}`);
 if (fails.length) process.exitCode = 1;

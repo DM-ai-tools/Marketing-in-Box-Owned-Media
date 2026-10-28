@@ -8,7 +8,8 @@
  *   - the stage's only approved card is refused, with the reason; a second approved card makes the
  *     older one deletable;
  *   - a card still generating is refused;
- *   - the confirmation is a root-mounted modal that names the stage.
+ *   - the confirmation is a root-mounted modal that names the stage;
+ *   - the operator's own chat bubble can be deleted (right-click → Delete message), nothing else.
  */
 import { renderToStaticMarkup } from "react-dom/server";
 import { GenerationDeleteDialog } from "../src/pipeline/GenerationDeleteDialog";
@@ -103,6 +104,25 @@ const dialog = renderToStaticMarkup(<GenerationDeleteDialog />);
 ok("the modal names the stage", dialog.includes("Delete this ICP card?"), dialog.slice(0, 300));
 ok("the modal says what stays", dialog.includes("Context Store are not deleted"));
 ok("cancel is offered", dialog.includes("Keep it"));
+
+/* ---------- the operator's own chat bubble (right-click → Delete message) ---------- */
+const said = (id: string, text: string, over: Partial<PipelineMessage> = {}): PipelineMessage => ({
+  id,
+  role: "user",
+  kind: "text",
+  text,
+  createdAt: Date.now(),
+  ...over,
+});
+seed([said("u1", "Melbourne, Australia"), gen("d9"), said("u2", "Make it shorter")]);
+S().deleteUserMessage("u1");
+ok("a user bubble is deleted", !ids().includes("u1") && ids().includes("u2"));
+ok("deleting a bubble leaves every card alone", ids().includes("d9"));
+S().deleteUserMessage("d9");
+ok("only the operator's own messages can be deleted this way", ids().includes("d9"));
+seed([said("a1", "An assistant note", { role: "assistant" })]);
+S().deleteUserMessage("a1");
+ok("an assistant message is never deleted by it", ids().includes("a1"));
 
 console.log(`deleteCard: ${pass} passed, ${fails.length} failed`);
 for (const f of fails) console.log(`  FAIL ${f}`);

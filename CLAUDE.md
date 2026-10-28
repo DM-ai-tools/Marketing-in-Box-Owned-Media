@@ -193,6 +193,11 @@ An edit can land in the right place and still do the wrong thing, so the rule is
   are looked through, so copy, hrefs, alt text and removing a claim's paragraph stay possible; a
   classed empty text-level element (an icon) is skeleton. The model lists what it left alone in
   `skipped`.
+- **Removing a whole section is not a layout change** (`only_removes_sections`). An edit may delete
+  skeleton entries, a card, an FAQ item or a Markdown section with its heading, as long as nothing is
+  added, changed or moved. Images, icons, logos, the header, nav and footer, CSS, scripts, buttons
+  and forms (`_PROTECTED_TAGS`) still cannot go. This has broken once: a CRO draft sold four services
+  the client does not offer, the only fix was to remove them, and the lock refused it on every run.
 - **Do not widen `_TEXT_LEVEL` or `_FREE_ATTRS` to let a finding through.** A finding that needs a
   layout change is the operator's call: an ordinary Refine that asks for it (edit-only, not locked),
   or a re-run.
@@ -785,6 +790,79 @@ pillar page covers them all. Same asset and field in both phases: `SERVICE_SCAN_
 
 ---
 
+## Pillar Page variants — several takes, compared, one approved for the run
+
+The Pillar Page is drafted as up to four variants, and the operator approves one for the rest of the
+run. It stays one stage (`pillar_page`): only that draft is filed to the Context Store, so nothing
+downstream changes. Every other finished draft is kept in Deliverables as an alternate
+(`variantAlternate`), so the operator still has every take they paid to generate.
+
+| Variant | Lens | Measured first (free reads only) |
+| --- | --- | --- |
+| `reference` — Beat your current page | outperform the client's hosted page | that page's outline, plus CRO's `cro_audit_findings` |
+| `competitor` — Outperform competitors | beat every competitor page | each competitor page's outline, as a beat sheet |
+| `skills` — Built with your skill | follow the operator's skill document | nothing: the document is the input |
+| `framework` — Built with your framework | structure by the operator's framework | nothing |
+
+- **The flow.** `runStage` pushes a `page-variants` picker (`PageVariantsCard`) instead of a draft.
+  - The picker offers each variant with what it needs, and says why one is off (`lib/pageVariants.ts`'s `variantOptions`).
+  - `startPageVariants` streams one generation per ticked variant, side by side. Each card carries `message.variant`.
+  - A `variant-compare` card (`VariantCompareCard`) follows, with Approve on each column. It opens
+    only when **every** variant draft is final: written, any in-place fix landed, and its business
+    check finished (`maybeCompareVariants`, called when a variant stream, check or fix ends). A
+    later change to a draft re-measures the same card (`measuredOn`); nothing measures a draft
+    mid-stream.
+  - **The live page is always a column** ("Current page (live)"). The reference variant's outline
+    is reused when it has one; otherwise the compare route reads the page from the drafts' answers
+    (`_variant_reference_url`). The live page alone may fall back to one rendered read (1 credit,
+    `read_outline(rendered=True)`) when the free read is walled off, never the competitor pages. An
+    unreadable page keeps its column, empty, with the reason under the table. No column only when
+    the page does not exist yet (`NO REFERENCE PAGE`).
+  - Approving one keeps the siblings in Deliverables (`keepSiblingVariants`: `savePhase: "saved"` +
+    `variantAlternate`). Only a failed or empty sibling is closed (`superseded` + `variantNotChosen`).
+- **The search is paid for once.** In Phase 1 the Pillar Page's competitor search runs inside the
+  stream when its field is empty. So the first variant (competitor, when ticked) runs alone until its
+  `prepass` event arrives, and the rest start with the listing filled in.
+- **Server.** `GenerateStageRequest.variant`:
+  - `page_variants.answers_for` blanks the other document variant's fields, so a draft reads only its own document;
+  - `_measure_page_variant` reads what the variant needs;
+  - `variant_block` (`PAGE_VARIANT`) joins the tail beside the business brief, and the stream emits `page_variant`;
+  - a variant with nothing to work from fails before any model call with `code: "variant_unavailable"`;
+  - the stream lock is keyed per variant, so they run side by side.
+- **Where competitor pages come from.** The stage's own listing, else `competitor_analysis_seo_pillar_page`
+  on the run, else `competitor_analysis_cro`. Phase 2 drops the pillar page's search; its CRO
+  search finds the competitors' sub-service pages. At most `MAX_COMPETITOR_PAGES` (5), never the client's host.
+- **Measured, never judged** (`app/services/page_compare.py`).
+  - What it counts: words, H1, H2 sections, CTAs, internal links, images, FAQ, JSON-LD types, proof mentions and target-keyword coverage.
+  - Where it reads them: a live page's HTML, or a draft's largest ```html fence.
+  - The beat sheet merges competitor H2s by shared content words and sets a length to beat (longest × 1.1).
+  - `POST /pipeline/pillar/variants/compare` counts every draft alike. It is free and stores nothing.
+- **Cost.** Claude drafts every variant: one generation each, plus one business check each.
+  - Manus builds only the one the operator picks: "Build with Manus" on the variant's card sends `use_manus`. The Claude draft is kept as history (`manusRebuilt`).
+  - A variant never starts a Manus task on its own.
+- **The skill and framework questions.** `use_skill_document` / `skill_document` and
+  `use_framework_document` / `framework_document`, before the notes field, in both phases (schema and
+  catalog). The documents are `file_attach` questions, so the clip button applies.
+
+### The clip button — a file question takes an upload
+
+`file_attach` questions were paste boxes. `PipelineInputBar` now shows `AttachFileButton` on any of
+them.
+- **Upload.** `POST /pipeline/files/extract` (`app/services/document_text.py`) returns the file's text.
+- **Answer.** The text lands in the box under an "Attached file: name (pages, characters)" header (`lib/attachedFile.ts`). The operator reads it before sending.
+- **What it stores.** The answer stays text, so INPUTS, the Context Store and exports are unchanged. Nothing is stored server-side, and it costs nothing.
+- **Formats.** `.pdf` via `pypdf`; `.docx` via `python-docx`, keeping headings, lists and tables; `.md`, `.markdown` and `.txt` decoded as UTF-8, then cp1252.
+- **Refused with the fix:**
+  - `.doc` (save it as .docx or PDF);
+  - a scanned PDF with no text layer (no OCR);
+  - a password-protected PDF;
+  - a file whose content does not match its name.
+- **Limits.** 10 MB per upload, 50 MB unpacked for a .docx (zip bombs), and 60,000 characters of text, with a note when it is cut.
+
+`tests/test_page_variants.py`, `tests/test_document_text.py` and `smoke/pageVariants.tsx` pin it.
+
+---
+
 ## Slide decks — the webinar's Step 5, as a file
 
 `universal-webinar-prompt.md` Step 5 writes a slide-by-slide brief "for the designer or presenter",
@@ -867,120 +945,339 @@ palette.
 
 ---
 
-## Ahrefs — keyword data
+## Keyword data — DataForSEO
 
-Ahrefs Keywords Explorer (API v3) is the keyword source for the pipeline. It replaced DataForSEO
-everywhere except one card: the Pillar Page's secondary terms, where the operator compares the two
-(see "Secondary terms — Ahrefs and DataForSEO side by side" below).
+DataForSEO Labs is the pipeline's only keyword source: the keyword clusters, plan discovery's
+volumes, the secondary-terms, blog and content keyword cards, and competitor validation. **Ahrefs was
+removed on 2026-10-21**, after its account ran out of API units and every run posted a "Couldn't map
+search demand" message. Do not add a second keyword provider back without a reason the operator
+asked for.
 
-The key is `AHREFS_API_KEY` in the backend `.env`, sent as a bearer token, server-side only.
-With no key, `keywords.provider_name()` is `stub`. That keeps the pipeline working on fabricated
-keywords, and `sub_service_discovery` refuses to show those numbers as measured.
+**`app/services/dataforseo_client.py` is the only module that talks to DataForSEO.** It returns raw
+fields; relevance, brand and intent stay in `keywords.py`.
+- **Auth.** HTTP Basic from `DATAFORSEO_LOGIN` / `DATAFORSEO_PASSWORD` (the names first used,
+  `DataForTopicClusttering_LOGIN` / `_PASSWORD`, are read too). Server-side only. With no login,
+  `keywords.provider_name()` is `stub`: the pipeline works on fabricated keywords, and
+  `sub_service_discovery` refuses to show those numbers as measured.
+- **Match classes** (`MATCH_CLASS_ENDPOINTS`): `exact` → `keyword_overview` (`overview`, a list body,
+  chunked at `_OVERVIEW_CHUNK`); `phrase` → `keyword_suggestions`; `related` → `related_keywords`
+  at depth 1; `broad` → `keyword_ideas` (a seed list). `expand` dispatches them.
+- **Countries only.** `COUNTRIES` is the `location_name` list. `keywords.resolve_location` matches the
+  free-text region to one; sub-national names are stripped first (New South Wales is not Wales). A
+  region naming no country raises `KeywordProviderError` with the fix ("Melbourne, Australia"),
+  never a default country.
+- **Shapes.** A 200 can still be a failure: the task's `status_code` must be 20000, and 40200 means
+  out of balance. `keyword_suggestions` items are flat, `related_keywords` nests them under
+  `keyword_data`; `_dig` reads both. A missing value stays None, never 0. CPC is in dollars.
+- **Failures stay where they happen, quietly.** The keyword prepass logs a failure to the console
+  and posts nothing to the transcript; topic cards already show when a suggestion has no volume.
+  Plan discovery shows `volume_error` on its own card; the keyword cards show their own status.
+  There is no provider toast and no activity chip any more (`ProviderNoticeToast` and
+  `AhrefsActivity` were deleted). The route still answers a 502 with the sentence, for the log.
+- **Every deliverable says what the keyword data did for it.** `lib/keywordUsage.ts` appends a
+  "Keyword data" section, last in the appendix (`assetAppendixFor`): the leg's search demand map,
+  the grounded topics, the plan's sub-service sizing, and a benchmarked business check, each read
+  from the transcript, with tables. Only `dataforseo` answers count, never the stub; it is never
+  written into `message.text`. `smoke/keywordUsage.tsx` pins it.
+- **Tests never hit the live API.** Pass an `httpx.MockTransport` to `DataForSEOClient`, or patch
+  `dataforseo_client.DataForSEOClient` / `is_configured`.
 
-**`app/services/ahrefs_client.py` is the only module that talks to Ahrefs.** It returns raw fields,
-and deciding relevance, brand and intent stays in `keywords.py`.
+### Alternate names, ranking, primary and secondary keywords
 
-- **Match classes.** `keywords.fetch_keywords` maps each class to its own endpoint:
-  - `exact` → `overview`;
-  - `phrase` → `matching-terms`;
-  - `related` → `related-terms`;
-  - `broad` → `search-suggestions`.
-- **Country codes only.** `country` must be a lowercase two-letter code; anything else is a 400.
-  `COUNTRIES` is the list the live API accepts, by name.
-  - `keywords.resolve_location` matches the free-text region to a country.
-  - Sub-national names are stripped first: New South Wales is not Wales, New Jersey is not Jersey.
-  - A region naming no country raises `KeywordProviderError` with the fix ("Melbourne, Australia").
-    It never falls back to a default country.
-- **Shapes verified live, not from the docs.**
-  - CPC is US cents (`cpc_dollars`).
-  - A missing value is `null` and stays `None`, never 0.
-  - A rejected key answers 401 with a JSON *list*, `["Error","Unauthorized"]`. `_error_detail`
-    reads every shape, after that shape once crashed the error path.
-  - `related-terms` returns broad neighbours ("facebook", "instagram"). `keywords.is_relevant`
-    drops them.
-- **Units are money.** Ahrefs bills per request and per row. `limit_per_class` is the dial for
-  clustering. `overview` sends every keyword in one request, chunked at `_OVERVIEW_CHUNK`.
-- **Every failure is shown to the operator, never swallowed.** `AhrefsError` carries one actionable
-  sentence: rejected key, no units or plan (402/403), rate limit (429), bad country, or other.
-  - **Keyword prepass.** The route turns the error into a 502 with that sentence. `runKeywordPrepass`
-    posts it in the transcript and raises `uiStore.notifyProvider`.
-  - **Plan discovery.** The error becomes `volume_error`, shown on the card and raised as the same
-    notice.
-  - **Where it renders.** `ProviderNoticeToast` is root-mounted and stays until dismissed. The run
-    carries on without volumes, so it is a notice, not the blocking `FaultDialog`.
-- **Success is shown too.** `AhrefsActivity` (root, bottom-left) runs while either call is out, as
-  an equaliser and a sheen.
-  - It finishes with a drawn check and a count-up of what was measured, then leaves after 4.5s.
-  - It finishes only when Ahrefs actually answered (`provider` / `volume_source` is `ahrefs`). The
-    stub provider or a skip just clears it.
-  - `startAhrefsActivity` returns an id, so an older call cannot finish a newer one's chip.
-  - The sub-service card counts its volumes up under an "Ahrefs" badge.
-  - All of it is static under reduced motion. `smoke/planPhase1.tsx` pins the states.
-- **Every deliverable says what Ahrefs did for it.** `lib/ahrefsUsage.ts` appends an "Ahrefs keyword
-  data" section. It is last in the appendix, after Business check (`assetAppendixFor`), so it
-  appears in the reader and in every export.
-  - **How it was used.** Up to four ways, each read from the transcript:
-    - the leg's search demand map (`keywordReport` on the prepass announcement, with its country,
-      `location` on the keyword report);
-    - the grounded topics the asset was built on;
-    - the Plan of Action's sub-service sizing;
-    - a business check benchmarked on those volumes.
-  - **What was measured.** Tables follow: clusters by volume, chosen topics with keyword, volume and
-    difficulty, and the confirmed sub-services with their volumes.
-  - **When it is absent.** Only Ahrefs answers count, never the stub. An asset Ahrefs did not touch
-    gets no section, and a Phase 2 track never claims Phase 1's map.
-  - **Not part of the asset.** Like the other appendices it is never written into `message.text`.
-    `assetDocument` treats its heading as a section boundary, and `assetGlance` skips it.
-  - `smoke/ahrefsUsage.tsx` pins it.
-- **Tests never hit the live API.** `tests/test_ahrefs_client.py` uses an `httpx.MockTransport`.
-  Discovery tests patch `ahrefs_client.AhrefsClient`.
+"SEO" and "search engine optimisation" are one service, but DataForSEO treats them as two queries.
+So every service is seeded under its other names too, every fetched keyword is ranked the same way,
+and every stage writes with the top of that ranking.
 
-### Secondary terms — Ahrefs and DataForSEO side by side
+- **Alternate names** (`app/services/service_synonyms.py`). One Haiku call per service (the client's
+  industry and market in the prompt, so Australia gets "optimisation"), 4-6 names. `GUIDANCE` holds
+  the rules and the worked examples across industries.
+  - **`clean_synonyms` drops in code:** any name with a qualifier word (`QUALIFIERS`: agency,
+    company, near, best, cheap, cost, a city…), the service itself, a near-duplicate (plurals and
+    "services" ignored), anything over five words.
+  - **Do not add a word to `QUALIFIERS` that one of the worked examples uses** ("professional
+    training"). `test_every_worked_example_passes_the_check` fails if you do.
+  - Where they apply:
+    - **The demand map:** `KeywordRunConfig.synonyms`, seeded via `seed_map()` but kept out of
+      `fingerprint()`, so a re-worded set never forces a rebuild. Generated only on a real build,
+      never on reuse. A synonym gets `phrase` + `related` only: `broad` repeats the base seed's
+      ideas.
+    - **Content Marketing:** see below.
+    - **Plan discovery:** asked inside the existing call, up to `MAX_SYNONYMS_PER_CANDIDATE`,
+      measured in the same overview request (`kind: "synonym"`).
+- **What is seeded, and what is kept.** This has broken once: from 21 Oct to 27 Oct no run got a
+  keyword map. The build route called `replace` without importing it, on the DataForSEO-only branch
+  the stub-provider tests never reach. Once that was fixed, the map came back as AI in general
+  ("ai detector", "character ai").
+  - `keywords.service_name` seeds the service, not the menu path ("Digital-Marketing - AI optimised
+    SEO" → "AI optimised SEO").
+  - `keywords.on_service` keeps a search only when it holds the service's head word, or shares two
+    real words with the service, a seed or an alternate name. One shared word ("ai") is not enough.
+  - `test_the_run_build_seeds_alternate_names_with_the_real_provider` and
+    `test_a_search_must_be_about_the_service_not_one_shared_word` pin both.
+- **Momentum** (`dataforseo_client._trend`). DataForSEO's `search_volume_trend`, quarterly then
+  yearly, else the last 3 vs previous 3 months of `monthly_searches`. On every `DfsKeyword` and
+  `RankedKeyword`. None, never 0.
+- **Ranking** (`app/services/keyword_rank.py`). `score` weighs three things, over whichever are
+  present:
+  - **40% searches;**
+  - **40% estimated traffic:** volume × the CTR at the position its KD usually allows;
+  - **20% momentum:** the "virality" signal, which means rising search interest, not social
+    shares.
+
+  It is used in:
+  - the demand map (`ranked_keywords`);
+  - the shared `filter_suggestions` order (Secondary terms, Content Marketing);
+  - plan discovery's keyword order.
+
+  The Blog card keeps its own opportunity score and multiplies it by a 0.8-1.2 momentum weight.
+- **Primary and secondary** (`group_keywords`). A secondary holds every word of its primary plus a
+  modifier ("bedroom accessories" → "bedroom accessories brisbane", "buy bedroom accessories").
+  - Seeds are always primaries.
+  - A bare word is a primary only if it is a seed.
+  - A plural joins its singular's group.
+
+  Stored as `keyword_groups`. A report stored before this is ranked and grouped on read.
+- **Every stage writes with them.** `_keyword_targets` reads this run's own `keyword_clusters`
+  (phase-scoped, never a parent's). `targets_block` (`KEYWORD_TARGETS`) goes into the tail through
+  the business brief, so Claude, Manus and a continuation all get it.
+  - What it gives: the top 5 primaries with 5 secondaries each, and the alternate names. It also
+    says never to quote the numbers to customers.
+  - Not the ICP (`NO_TARGETS`), and never from the stub provider.
+  - `KEYWORD_TARGETS` is in `lib/promptEcho.ts`'s names.
+- **The deliverable says what happened.** The stream sends `keyword_targets` (`message.keywordTargets`).
+  The "Keyword data" section adds:
+  - the seeds and alternate names fetched;
+  - the primary/secondary table;
+  - the top 15 ranked;
+  - **Keywords used in this asset:** each targeted keyword counted in the asset's own text
+    (`keywordMentions`: whole words, markup stripped, case, hyphens, singular/plural), never
+    judged.
+- `tests/test_keyword_rank.py` and `smoke/keywordUsage.tsx` pin it. `conftest.py` stubs
+  `service_synonyms.synonyms_for`, because the Anthropic key in `.env` would otherwise make it live.
+
+### Buyer language — CRO's outcome words and words to avoid, suggested
+
+CRO's "Words the buyer uses for the outcome" and "Words to avoid" are not typed cold. The walk opens a
+`service-choice` card with `serviceScan.buyerLanguage` set (`BUYER_LANGUAGE_OPTION`,
+`BuyerLanguageCard`), one per field. `POST /pipeline/keywords/buyer-language`
+(`app/routers/buyer_language.py`, `app/services/buyer_language.py`) suggests; the operator ticks.
+
+- **The session's inputs** (`sessionServices`, `openBuyerLanguage`): the CRO service answer, the
+  run's service and the profile's target service; the landing page (`existing_page_url`, else the
+  client's site); the region; the industry label. For the outcome card the route reads the run's
+  keyword report itself, free.
+- **Outcome words: clusters around the service, measured then judged.** This has broken twice: first
+  "grow my business" and "increase online sales" for "AI-Optimised SEO" (outcomes every service
+  promises), then only "rank higher on google" with nothing about SEO or AI SEO itself. The operator
+  wants the service's own territory: for AI-Optimised SEO "ai seo", "how to use ai for seo"; for
+  Social Media Marketing "instagram ads", "meta ads".
+  - **The service's lexicon** (`ServiceProfile`, one Haiku call: `profile_prompt`, `parse_profile`):
+    - **core**, its short names as searched (seo, ai seo);
+    - **facets**, its topics and channels, paid side included (ai seo tools; instagram ads);
+    - **anchors**, where the result happens (google, ranking);
+    - **distinct**, what the name's qualifier adds (ai, chatgpt). Only a name with a qualifier has
+      any (`qualifier_words`).
+    - Dropped in code: a term made only of `GENERIC_WORDS` and one naming a job or course
+      (`OFF_INTENT_WORDS`). A bare list under one label is read whole (`_profile_lines`): read one
+      term per label, Social Media Marketing kept 1 of 17 facets.
+    - The seeds are two core names, then the facets, up to `MAX_TOPIC_SEEDS` (8).
+  - **Service names.** "Digital-Marketing - AI optimised SEO" is cut to its last part, and spellings
+    of one name are one service (`_clean_services`).
+  - The pool is real searches: the run's keyword report; suggestions and related searches per
+    service; suggestions around each seed plus one `keyword_ideas` request over all of them
+    (`DataForSEOClient.ideas`); what the landing page ranks for.
+  - **The relevance gate** (`on_service`): a search reaches the judge only if it holds a profile term
+    as whole words (singular, -ise/-ize, ranking = rank) and no job or course word. A one-word term
+    under four letters ("ai") needs a core word beside it ("kling ai" is an image app). The card's
+    notes say how many were left out.
+  - One Haiku call groups the searches into clusters by number, around the service's topics and the
+    results buyers want from it. Searches naming the service are kept.
+  - **Order:** clusters about what sets the service apart (`OutcomeCluster.distinct`) lead, then the
+    rest, each by combined volume.
+  - Do not add a word to `GENERIC_WORDS` that is the medium of some service's result (google, roof).
+- **Words to avoid**, two groups. **Never competitor names**: the operator asked for them off the
+  card, so the route reads no competitor research for it, and a card stored with names hides them.
+  - jargon on the landing page, kept only when DataForSEO measures the plain alternative and buyers
+    search it more;
+  - claims on the page.
+
+  Every term must be on the page. The page is read with `scrape_page`: Context.dev (1 credit) only
+  when the free read is walled off, which SiteGround's captcha does to trafficradius.com.au.
+- **The answers are plain comma lists** (`composeOutcomeWordsAnswer`, `composeWordsToAvoidAnswer`),
+  typed words first.
+  - No group labels: `business_facts.words_to_avoid` splits on commas.
+  - Under `BUYER_LANGUAGE_MAX_CHARS` (380), because both cross to Phase 2 as one line of
+  `cro_client_settings` and the sub-key reader caps that at 400.
+  - The outcome card has no Skip (required). The avoid card's Skip answers `NONE`.
+  - **Regenerate** (outcome card only, bottom right: `regenerateBuyerLanguage`) asks again on the
+    same card, clearing its clusters and ticks. Each press is a full lookup (up to 13 DataForSEO
+    requests and 2 Haiku calls); only an open card (ready or failed) offers it.
+- **Cost.**
+  - Outcome: up to 13 DataForSEO requests and 2 Haiku calls.
+  - Avoid: 1 Haiku call, 1 overview, and 0-1 Context.dev credit.
+
+  Recorded as `kind="keywords"`, asset `cro`. Phase 2 normally inherits both answers and never sees
+  the card.
+- `tests/test_buyer_language.py` (it refuses any live page read: an earlier version of it reached
+  Context.dev while the service changed readers) and `smoke/buyerLanguage.tsx` pin it.
+
+### Secondary terms — DataForSEO, as a checklist
 
 The Pillar Page's `secondary_cluster_terms_optional` ("supporting terms this page should cover in
 passing") is not a text question when a head term was chosen. The walk opens a `service-choice`
 card with `serviceScan.secondary` set (`SECONDARY_KEYWORD_OPTION`, `SecondaryKeywordCard`), in both
 phases.
 
-- **One route, two providers.** `POST /pipeline/keywords/secondary` (`app/services/
-  secondary_keywords.py`) asks both providers about the head term in the same country, concurrently,
-  with two requests each. Ahrefs uses `matching-terms` and `related-terms`. DataForSEO uses
-  `keyword_suggestions` and `related_keywords` at depth 1. It never loops over keywords. It stores
-  nothing.
-- **`app/services/dataforseo_client.py` is the only module that talks to DataForSEO.** It uses HTTP
-  Basic auth from `DATAFORSEO_LOGIN` / `DATAFORSEO_PASSWORD`. The names first used,
-  `DataForTopicClusttering_LOGIN` / `_PASSWORD`, are read too.
-  - A 200 can still be a failure: the task's own `status_code` must be 20000, and 40200 means the
-    account is out of balance.
-  - `keyword_suggestions` items are flat, while `related_keywords` nests them under `keyword_data`.
-    `_dig` reads both.
-- **One filter for both columns** (`filter_suggestions`), so the comparison is of the data, not the
-  cleaning. Each rule comes from the live first run for "social media marketing agency" in Australia:
+- **`POST /pipeline/keywords/secondary`** (`app/services/secondary_keywords.py`) asks DataForSEO
+  about the head term in the client's country: `keyword_suggestions` and `related_keywords`, two
+  requests, never a loop. It stores nothing and is always a 200; a failure is a status and a
+  sentence on the card.
+- **The filter** (`filter_suggestions`, shared with the content and blog keyword services). Each rule
+  comes from a live run for "social media marketing agency" in Australia:
   - it drops the head term, its plurals and single words;
   - a term must share two content words with the head term (one for a one-word head term), because
-    with one, Ahrefs filled the column with "social", "agency" and "social club";
-  - it drops terms naming another country, because DataForSEO offered "... agency india".
+    with one the list filled with "social", "agency" and "social club";
+  - it drops terms naming another country ("... agency india").
   - Highest volume first, capped at `MAX_PER_PROVIDER` (15). A missing number is None, shown as —.
-- **Each provider fails on its own.** A column says `unconfigured` or `error` with one sentence, and
-  the other column still works. A region naming no country asks neither, and both columns carry the
-  fix. The route is always a 200.
-- **The card.** Each column states its own totals: terms, combined volume and median KD. A term both
-  suggested is marked "in both". DataForSEO's columns add intent and CPC.
-- **Answering.** The field is optional, so nothing starts ticked. The operator ticks terms from
-  either column, can type others, or skips (the answer is `N/A`).
-  - The answer is `composeSecondaryTermsAnswer`'s shape: a line naming the country, then one term
-    per line with each ticking provider's volume, then the typed terms.
-  - A head term that is not a usable seed (empty, or over 80 characters) gets the plain question.
+- **The card** states its totals (terms, combined volume, median KD) and shows intent and CPC.
+- **Answering.** The field is optional, so nothing starts ticked. The operator ticks terms, can type
+  others, or skips (`N/A`). The answer is `composeSecondaryTermsAnswer`'s shape: a line naming the
+  country, then one term per line with its volume and provider, then the typed terms. A head term
+  that is not a usable seed (empty, or over 80 characters) gets the plain question.
 - **The seed is the chosen suggestion's `primary_keyword`, never its headline.** This has broken
-  once. The head-term gate suggests headlines, and the field's answer is the headline text. Seeded
-  with "How AI SEO Services Beat Traditional Agencies In Melbourne", both providers returned nothing
-  and the card showed two empty columns. `headTermSeed` reads the keyword off the chosen candidate.
-  The answer is used only for a head term the operator typed.
-- **"Search a different term"** (`researchSecondaryKeywords`) re-asks both providers about another
-  seed: two requests each, the same as the first search. An empty result says why, and names a
-  headline-shaped seed as the likely cause.
-- `tests/test_secondary_keywords.py` covers the filter against the live rows, the DataForSEO shapes
-  and the route. `smoke/secondaryKeywords.tsx` drives the walk, the card and the answer.
+  once: seeded with "How AI SEO Services Beat Traditional Agencies In Melbourne", the lookup returned
+  nothing. `headTermSeed` reads the keyword off the chosen candidate.
+- **"Search a different term"** (`researchSecondaryKeywords`) asks again for another seed. An empty
+  result says why, and names a headline-shaped seed as the likely cause.
+- `tests/test_secondary_keywords.py` covers the filter, the DataForSEO shapes (including `overview`
+  and `keyword_ideas`) and the route. `smoke/secondaryKeywords.tsx` drives the walk, the card and the
+  answer.
+
+### Blog keywords — better than the current one, measured against the client's page and competitors
+
+The Blog's `primary_keyword` is not a text question when the topic has a keyword. The walk opens a
+`service-choice` card with `serviceScan.blog` set (`BLOG_KEYWORD_OPTION`, `BlogKeywordCard`), in both
+phases. One card answers the primary keyword and `secondary_supporting_keywords_optional`.
+
+- **The seed is the chosen topic's own keyword** (`blogKeywordSeed`, the topic gate's
+  `primary_keyword`). It is also the "current" keyword the card compares against. With no seed, the
+  plain question is asked.
+- **`POST /pipeline/keywords/blog`** (`app/services/blog_keywords.py`) measures, then judges:
+  1. **Competitors.** The Blog's approved competitor listing when the run has one (Phase 2), else the
+     pages in Google's organic top 10 for the seed (DataForSEO SERP). Phase 1's competitor search
+     comes at the end of the Blog intake, after this question. The client's own pages are excluded.
+  2. **Rankings.** DataForSEO `ranked_keywords` for the client's reference page (the run's design
+     source, else its site) and up to `MAX_COMPETITOR_PAGES` competitor pages. A competitor is read
+     as its ranking page, never site-wide: measured live, StudioHawk's site-wide rankings put its
+     Sydney pages ahead of an AI SEO blog's own topic. The client's home page is read site-wide.
+  3. **Candidates.** Those rankings plus the seed's suggestions and related searches. They are kept
+     only when on-topic (two shared content words) and not about another country (`usa` included)
+     or another listed city (`_MAJOR_CITIES`).
+  4. **The current keyword** is measured with one `keyword_overview` request when no read above
+     reached it, so the comparison has a number to beat.
+- **"Better" is a stated score** (`_score`): volume × ease (KD) × intent weight × status weight.
+  - `gap`: a competitor ranks top 20 and the client doesn't.
+  - `improve`: the client ranks 11-100.
+  - `new`: nobody compared ranks.
+  - `owned`: the client ranks top 10; never suggested as primary.
+  Each row shows why (who ranks, where the client stands), its volume and KD, and the volume
+  gained over the current keyword.
+- **The answers.** The primary is the bare keyword. The supporting answer is one keyword per line
+  with its measured numbers (`composeBlogSecondaryAnswer`), or `N/A`, so the walk passes that
+  question as already answered.
+- **Cost.** About six DataForSEO requests per card, seven when the current keyword needs measuring. Stores nothing.
+- `tests/test_blog_keywords.py` pins the comparison, the filters and the route;
+  `smoke/blogKeywords.tsx` drives the walk, the card and both answers.
+
+### Content Marketing Strategy keywords — DataForSEO, never asked
+
+`keyword_search_volume_data_source_optional` is not a question on Content Marketing Strategy (both
+phases). The catalog fills it with `N/A`, and `_run_content_keyword_prepass` in
+`app/routers/pipeline.py` replaces that before generation with a DataForSEO table
+(`app/services/content_keywords.py`).
+- **Seed and country.** The seed is the pillar service answer with its URL or slug cut off. The
+  country comes from `region_country`. A region naming no country sends no request.
+- **Cost.** One Haiku call for alternate names, then two requests for the service
+  (`keyword_suggestions` + `related_keywords`) plus one `keyword_suggestions` per alternate name.
+  Each seed's rows are filtered with `secondary_keywords.filter_suggestions` against *that* seed
+  ("organic search" results share no word with "SEO"), then merged, ranked and capped at
+  `MAX_KEYWORDS`. The table carries est. traffic and momentum, and a primary/secondary table leads.
+  A missing volume is "—".
+- **An answer the operator gave is kept.** That includes an edited answer and a continuation's
+  `prefilled`. A failure leaves the field alone: the prompt falls back to labelled estimates, and the
+  `keyword_prepass` event says why.
+- `tests/test_content_keywords.py` pins it. The Plan of Action's field of the same name is still asked.
+
+---
+
+## Webinar — competitor sources read from the research, not pasted
+
+`competitor_webinar_sources` ("transcripts, slide content, or URLs of 2-5 competitor webinars") is
+not a question when the competitor research has a listing. The research field
+(`competitor_analysis_webinars`) now sits directly after the topic, so its consent card runs first.
+The walk then opens a `service-choice` card with `serviceScan.webinar` set (`WEBINAR_SOURCES_OPTION`,
+`WebinarSourcesCard`).
+- **`POST /pipeline/webinar/sources`** (`app/services/webinar_sources.py`) reads each competitor's
+  `webinar_page_url` off the approved listing. It uses free reads only (`scraper.read_direct`)
+  because it loops over URLs. At most `MAX_SOURCES` (5) pages are read, Verified first, then rank.
+- **The card shows what and why.** Each row has the page, Read / Couldn't read / Not read, the
+  research's own reason (rank, confidence, offering summary), and the title and an excerpt. Fewer than
+  two pages read is flagged.
+- **The answer** is the pages read, each with "Why this source", plus anything the operator types
+  (`composeWebinarSourcesAnswer`). The block says these are registration/replay pages, not
+  transcripts, so Step 2 does not invent session content.
+- **A declined or empty research** asks the plain question, as before.
+- `parse_competitor_listing` now reads the `Offering:` line of `to_prompt_text`'s prose too.
+- `tests/test_webinar_sources.py` and `smoke/webinarSources.tsx` pin it.
+
+---
+
+## Competitor validation — will it work for this client?
+
+Every competitor listing, on every stage in both phases, is scored for this client on its card before
+approval (`app/services/competitor_validation.py`, `POST /pipeline/competitor/{id}/validate`,
+`CompetitorValidationPanel`). It is advisory: approving never waits on it.
+- **Proof (is it working for them), measured.**
+  - DataForSEO `ranked_keywords` on the competitor's page: estimated visits/mo and top-10 count.
+  - A free page read: is it live, and the latest year on the page.
+  - Not "Competitors running this play" or "Search verification": both were removed as evidence rows
+    and from the Proof score at the operator's request. How common a play is still shows in the
+    plays table and still decides the Differentiate verdict.
+- **Fit (would it work here).**
+  - Measured: the share of the page's ranking keywords that are the client's own (keyword clusters,
+    service words), and the price band against the ladder.
+  - Judged: one Sonnet call scores buyer fit against the ICP. A reason whose quote is not in the ICP
+    or the competitor text is dropped (`_verified`).
+- **Feasibility (can the client run it).** Rules from `cro_client_settings` (testimonials, claim
+  tier, pricing disclosure) and judged blockers. Any rule blocker makes the verdict **Avoid**.
+- **Verdicts:** Implement now / Test first / Differentiate / Avoid / Not a fit.
+  - Avoid is not shown as a tag on the card or in the count strip, at the operator's request
+    (`HIDDEN_VERDICTS`). The row's blocker line says why, and the verdict still ranks the row.
+  - The fit score weights proof 40, fit 40 and feasibility 20.
+  - "Implement now" items carry `how_to_prove`, the KPI and test.
+  - Hovering any "ranking keywords" (a competitor's count, its evidence row, the client's baseline)
+    lists every keyword scanned (`scanned_keywords` / `client_keywords`, `ScannedKeywords.tsx`):
+    the top `_RANKED_LIMIT` by traffic, with position and searches. No extra request: it is the
+    data the score already read.
+  - A "Plays across the market" table (Play, Used by, Their traffic/mo) and market gaps go with
+    them. Its "Avg fit" and "For this client" columns were removed at the operator's request; each
+    competitor's own verdict and fit score still show on its row.
+- **The operator picks the plays to apply.** Each non-avoided competitor row carries `what_to_take`
+  (the lead magnet, offer or funnel entry bringing them leads) and `how_to_apply` (steps adapted to
+  this client). The card ranks them best verdict first with a "Use as reference" box; Implement now
+  and Test first start ticked (`defaultPicks`). Ticked plays are appended to `validation_md` as
+  "Plays selected by the operator — build from these" (`selectedPlaysMarkdown`), so Offers, Lead
+  Magnet and Funnel build from them. Untick everything and none is appended.
+- **Every metric names its source** (`measured` | `judged` | `unavailable`). A failed measurement is
+  None, never 0. The panel states that conversion rates and leads aren't public.
+- **Where it goes.**
+  - The ranking (`render_md`) is appended to the approved listing's context prose as `validation_md`.
+    It is narrowed to the approved competitors by `validationMarkdownFor`, so the stage builds on it.
+  - The "Competitors scanned" appendix carries each verdict.
+  - `VERDICT_LABEL` is restated in `lib/competitorValidation.ts`.
+- **Cost.** One DataForSEO request per competitor (`MAX_MEASURED`, 10), one for the client's site,
+  and one judge call. It runs once per listing found, never for a stored listing reopened.
+- `tests/test_competitor_validation.py` and `smoke/competitorValidation.tsx` pin it.
 
 ---
 
@@ -1356,15 +1653,22 @@ fails a test rather than landing on an operator.
 
 Five of the stages research competitors (CRO, Lead Magnet, Blog, Content Marketing, Funnel) and **all of it is gated** — reviewed on its own card
 before the stage it feeds, never folded invisibly into a generation call
-(`PREPASS_BY_MAIN_ASSET_BY_PHASE["phase2"]` is empty and stays empty). `{SERVICE}` resolves from the
-run-level `sub_service` fact rather than from any stage's intake, which is the whole point of the
-phase split: the search returns competitors doing *Google Ads* lead magnets, not marketing ones.
+(`PREPASS_BY_MAIN_ASSET_BY_PHASE["phase2"]` is empty and stays empty). `{SERVICE}` is always the
+client's own service (Phase 2: the sub-service). The stage is the **lens**, never the market: a CRO
+run for an AI SEO agency finds other SEO agencies, then scores their service pages on conversion.
+It does not find CRO agencies. Schema defaults must not re-point `{SERVICE}` at the artefact
+("conversion rate optimisation (CRO)", "content marketing") — that was the CRO card returning CRO
+agencies for an AI SEO client.
 
 `01_CRO_phase2.md` searches for competitors' **pages for the sub-service** — a real page with its own
-proposition, process and proof — rather than for a CRO offering the way Phase 1's file does, because
-what the rewrite is benchmarked against is the page, not the vendor. Its target-URL tuple omits
+proposition, process and proof. Same-service rivals, not CRO vendors. Its target-URL tuple omits
 `existing_page_url`, which Phase 1 has second: in Phase 2 that field is the NEW PAGE sentinel, so
 reading it would search the market for the phrase "NEW PAGE — no existing URL".
+
+Validation then measures each rival's domain (DataForSEO ranked keywords + ranking pages) against
+the client's: organic visits, ranking page count, ranking keywords with positions, and a business
+level of above / same level / below (2× and 0.5× traffic cutoffs). Those numbers are measured,
+never guessed, and they travel with the listing into the rewrite.
 
 ---
 
@@ -1412,12 +1716,12 @@ then measures again:
    - it suggests the missing ones (status `new`, a proposed slug), each with a 4-6 keyword cluster.
    - **An `existing` item needs a URL the scan found.** Otherwise `_parse_reply` demotes it to `new`
      with a note: a page the site does not link to is never reported as built.
-3. **One Ahrefs `overview` request** measures every keyword on the card (`ahrefs_client.py`).
+3. **One DataForSEO `keyword_overview` request** measures every keyword on the card.
    **Never the stub provider's numbers, and never 0.** Any failure leaves the volumes `None` and
    sets `volume_error`:
    - Causes include no key, a rejected key, no units left, a region with no country, or a network
      error.
-   - The card shows `volume_error` as a warning and the store raises the provider toast.
+   - The card shows `volume_error` as a warning; nothing else is raised.
    - The list still stands, and the plan labels its volumes "(est.)".
 
 The operator confirms the list on the card. Everything starts ticked; they can untick, type others,
@@ -1456,7 +1760,7 @@ or skip.
 
 ### Rules
 
-- **Credits are money.** Discovery costs two Haiku calls and one Ahrefs request, capped at
+- **Credits are money.** Discovery costs two Haiku calls and one DataForSEO request, capped at
   `MAX_CANDIDATES` × `MAX_KEYWORDS_PER_CANDIDATE` keywords.
 - **The plan speaks the pipeline's vocabulary.** Its phases are titled like the toggle
   (`PHASE_META.scope`). Step 2 lists Phase 1's 14 stages and Step 3 Phase 2's 9 by their catalog
@@ -1465,6 +1769,74 @@ or skip.
 - `tests/test_plan_context.py` pins the record and the wiring, and that no Phase 2 plan exists on
   either side. `tests/test_sub_service_discovery.py` pins discovery and the route.
   `smoke/planPhase1.tsx` drives the card and the hand-off.
+
+## Context search — pgvector over the Context Store
+
+Context is matched by key name. That stays: it is exact and free. Two gaps it leaves are covered by
+`app/services/vector_context.py`: questions an approved document already answers, and whole
+documents pasted where a few sections would do.
+
+- **Storage.** `context_chunks` (migration `d3a7c5e91f24`), one row per section of a
+  `ContextEntry`, with a `vector(1536)` embedding.
+  - A derived index, so no append-only trigger. Rows are written once per entry and model.
+  - **No HNSW/IVFFlat index, on purpose.** Every search is filtered to one run's few hundred
+    chunks, and pgvector filters *after* an ANN scan, so an ANN index returns fewer than `k`.
+  - The migration creates nothing on a Postgres without pgvector (a Windows local install), and
+    the app then behaves exactly as before. Railway's Postgres has it.
+- **Embeddings.** `app/services/embedding_client.py` is the only module that embeds:
+  `text-embedding-3-small` over `OPENAI_API_KEY`. `VECTOR_CONTEXT=off` turns every vector
+  feature off without touching images. The model is a constant: changing it is a migration and a
+  re-index.
+- **Chunking** (`context_chunks.py`). Cut at headings, about 1,600 characters, tables never split.
+  HTML pages, DESIGN.md and other machine-read keys (`SKIP_KEYS`) are not indexed.
+- **Scope.** `visible_entries` / `scope_entries` apply `_latest_context_entry`'s rule to every key
+  at once: latest version, up `source_run_id`, `PHASE_SCOPED_CONTEXT_KEYS` never inherited. The
+  constant now lives in `app/services/context_scope.py` and the router imports it.
+- **Indexing.** After every save and seed (a background task), and lazily before any search. Runs
+  approved before this existed need no backfill. `POST /pipeline/runs/{id}/context/index` forces it.
+
+### A. Suggested answers (and C. the sub-key fallback)
+
+- **Request.** `beginMainIntake` calls `POST /pipeline/runs/{id}/prefill/{asset}` once per stage,
+  after hydration, with a 12 s timeout. `lib/contextSearch.ts`'s `prefillCandidates` sends:
+  - only questions the walk would ask;
+  - never one answered from the profile, a topic or file question, or a conditional follow-up.
+  - A context field whose document is present but whose `sub_key` the regex missed goes too,
+    restricted to that document and its producer. That is the sub-key fallback.
+- **Measure, then judge.** One embedding request for all questions, sections above `MIN_SCORE`,
+  then one Haiku call for the stage (`kind="prefill"` in usage). An answer survives only with a
+  verbatim quote from the excerpt it names, a listed choice for a choice question, and yes/no for
+  a flag.
+- **Never suggested.** `NEVER_SUGGEST` (claim tier, testimonials, pricing disclosure, regulation,
+  compliance). Never sourced from a competitor listing or the stage's own earlier output.
+- **The card.** The question card shows "Found in …", the answer and the quote, with **Use this**
+  (`SuggestionOptions`). Nothing is filled without that click.
+
+### B. Relevant sections at generation time
+
+- `RETRIEVAL_FIELDS` lists the inputs where the CRO rewrite is read for voice, proof or messaging
+  (Offers, Lead Magnet, Blog, Content Marketing, Webinar, Book, Podcast, SMS, Plan of Action).
+- `_generation_sse_stream` calls `expand_retrieval` before the prepasses, so a continuation sees
+  the same INPUTS. Such an input over its budget (14,000 characters) is replaced by its best
+  sections in document order, the opening always kept, under a header saying so.
+- **Only the stored document is cut.** `same_document` compares the answer with the stored entry.
+  A document the operator supplied goes through whole.
+- **Page copy is never retrieved.** `FULL_TEXT_FIELDS` (the Pillar Page's `improved_page_content`,
+  the Funnel's `cro_rewritten_copy`).
+- The stream emits `context_retrieval`. The card shows it (`ContextRetrievalNote`).
+- Any failure sends the input whole and says why.
+
+### Rules
+
+- **Do not add a field to `RETRIEVAL_FIELDS` whose every word reaches the deliverable.**
+- **Do not loosen `_verified` or drop `NEVER_SUGGEST` entries to get more suggestions.** A wrong
+  one-click answer is worse than a question.
+- **Three places have to agree for retrieval:** `RETRIEVAL_FIELDS`, the schema's field and
+  `context_key`, and the catalog's `ctx(...)`. `test_every_retrieval_field_reads_the_cro_rewrite_
+  in_both_schema_and_catalog` reads all three.
+- **Tests never reach OpenAI or pgvector.** `conftest.py` sets `VECTOR_CONTEXT=off` for every test.
+  `tests/test_vector_context.py` turns it on and fakes the API and the database.
+  `smoke/contextSearch.tsx` drives the intake.
 
 ## Output style — bullets, not paragraphs
 
@@ -1572,9 +1944,12 @@ build instead of rebuilding.
 - **Save puts it in Deliverables and moves on.** `saveFunnelBuild` marks the card `saved`, which the
   Deliverables grid lists as a "Deployable funnel" tile: it opens the card in the transcript, offers
   the zip, and counts toward the tab. "Not now" also moves on.
-  - **Where to.** `continueAfterFunnelBuild` goes to the next stage still to build
-    (`nextUnexecutedIndex`). If a stage is already under way, it resurfaces that stage's pending card
-    instead.
+  - **Where to.** `continueToNextStage` goes to the next stage still to build
+    (`nextUnexecutedIndex`). It resurfaces a pending card only for work genuinely mid-way
+    (`legWorkInProgress`: a waiting question, a stream, an unsaved draft or competitor listing).
+    "Stopped" cards and unentered gates are history: they are retired, never resurfaced. This has
+    broken once. A ClickTrends chat had a stale "Funnel Hub Media stopped" card, and saving the
+    deployable funnel brought that card back instead of starting Offers.
   - **Nothing left.** It finishes the phase and shows a 3-second notice (`showToast` / `TimedToast`)
     that there are no more assets to run.
 - **One file failing never fails the build.** It is reported on its row, with Rebuild.
@@ -1761,6 +2136,25 @@ or the Plan of Action's existing `PlanMindMap`. Each item jumps to the section i
 Deliverables cards show the same glance, card-sized (`MiniGlance`), so a card and the document it
 opens never disagree.
 
+### The Summary tab — the one view that is not the document
+
+The reader's toggle is Visual · Text · **Summary**. Visual and Text are the document; Summary is
+4-8 points about what it contains (`app/services/asset_summary.py`, `POST /pipeline/summary/{asset}`,
+`SummaryView.tsx`), and says it was written by AI and checked.
+- **One Haiku call per draft**, built pages replaced by a marker. Usage kind `summary`.
+- **One `- point || heading` line per point, not JSON.** The first real ICP's JSON reply was
+  unreadable because of one unescaped quote.
+- **Checked in code:**
+  - a point quoting a number the document does not contain is dropped;
+  - a heading that is not one of the document's own is cleared;
+  - more than `MAX_POINTS` is thinned evenly (`_spread`), never cut at the end. Cutting summarised
+    a 16-section ICP as sections 1-8.
+- **Kept on the message** (`message.docSummary`, keyed by `textHash`), so reopening costs nothing and
+  a refined draft is summarised again. A `loading` saved by a closed tab is asked again
+  (`summariesInFlight`). Never stored server-side, never exported, never in `message.text`.
+- A point with a section jumps to it, switching to Visual first.
+- `tests/test_asset_summary.py` and `smoke/summary.tsx` pin it.
+
 ### Templates, and the HTML report
 
 `lib/assetTemplates.ts` gives each asset a **template**. A template sets three things:
@@ -1904,8 +2298,14 @@ that data: keyword volume for terms the draft uses, and the real top posts' open
   - **When it finishes:** a card per check, each with its score, the question it answers, its band
     (Good / Needs work / At risk) and, after a Refine, the score it had before ("was 58").
   - **Findings:** listed must-fix first, and open by default only when something must be fixed.
-- **Fixing.** "Fix N with Refine" sends the chosen findings to `submitRefine` as one quoted note
-  (`composeFixNote`). Errors and warnings are pre-selected; info is opt-in.
+- **Fixing.** "Fix N with Refine" sends the chosen findings as one quoted note (`composeFixNote`).
+  Errors and warnings are pre-selected; info is opt-in.
+  - **It edits the same card** (`fixInPlace`), at the operator's request: no note is posted to the
+    chat and no new card appears. The draft stays readable ("Applying the fixes…", Approve hidden,
+    `isFixing`) while the revision streams into a buffer, and is replaced only on a clean finish. A
+    failed, empty or cut-off fix leaves the draft unchanged with a `fixNote`. The report before the
+    fix is kept as `priorCheck`, which `earlierCheckReport` reads first. An ordinary Refine still
+    makes a new card.
   - The refine request carries `business_fix: true`, so `build_revision_prompt` is handed
     `asset_check.fix_context(facts)`, the same facts and ICP excerpt the judge used. Without them
     a "price not on the ladder" finding can only be fixed by guessing a price or deleting the line.
@@ -1913,8 +2313,9 @@ that data: keyword volume for terms the draft uses, and the real top posts' open
   - The re-check sends the report on the draft it was refined from (`earlierCheckReport`, which is
     also what the panel's "was N" reads) as `previous`. The judge is told to re-report only
     unfixed findings and to score relative to before. `_hold_unexplained_drops` keeps the old
-    score when the judge scores lower but reports no error or warning in that check, because
-    that drop is run-to-run noise, not a regression.
+    score when the judge scores lower without a **new** error or warning in that check. The same
+    unfixed findings, quoted the same or overlapping, cannot lower it: that drop is run-to-run
+    noise, and it made every "Fix with Refine" look as if it had made the draft worse.
   - **A missing score must never be shown to the judge as "n/a".** It copies what it is shown:
     one unscored check made every re-check after it unscored too, which the panel displayed as 0.
     `_previous_block` writes "not scored", the prompt requires an integer, and `_score_of` also
@@ -2027,6 +2428,13 @@ it would stop. `selectCanStop` / `selectStoppableStage` decide both.
   belong to the run rather than to a stage; the sub-service card is pushed without an `assetId`, so
   the supersede pass would not reach it and the question would be left on screen with no intake
   behind it.
+- **Stop names the stage actually in progress, never an approved one.** `selectStoppableStage`
+  reads a pending competitor listing as its own stage's work (Offers' search is Offers). It falls
+  back to the cursor's stage only when that stage is not approved, and `selectCanStop` needs a
+  stage to name. A leftover `activeStatus` once offered Stop over approved stages, and each click
+  left a "Start Funnel again" card for a finished stage.
+- **A stopped card whose stage is approved offers the way on.** It reads "Continue with Stage NN:
+  …" (`continueToNextStage`), not "Start … again".
 - **The `stage-stopped` card counts as the operator's turn** in `deriveResumeActivity` and
   `selectNeedsResume`. Without that the resume banner appears underneath it offering to continue the
   stage they just stopped.
@@ -2046,6 +2454,10 @@ it would stop. `selectCanStop` / `selectStoppableStage` decide both.
   `stage-stopped` card (`deleted: true`) offers "Start … again", rather than "Awaiting Review" of
   nothing.
 - Nothing is deleted from the database.
+- **The operator's own chat bubbles** can be deleted too: right-click (or the context-menu key on a
+  focused bubble) → **Delete message** → confirm (`TextBubble`, `deleteUserMessage`). Only
+  `role: "user"` text bubbles. It tidies the chat and does not un-answer anything: the answer stays
+  with the stage, and the confirm says so. To change an answer, use its Edit button.
 
 ### Clearing a leg, and the warning in front of every deletion
 

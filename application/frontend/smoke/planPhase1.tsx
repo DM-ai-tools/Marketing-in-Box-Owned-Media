@@ -23,9 +23,6 @@ import {
 } from "../src/pipeline/pipelineData";
 import type { PlanSubServiceCandidate } from "../src/pipeline/pipelineApi";
 import { usePipelineStore } from "../src/pipeline/pipelineStore";
-import { useUiStore } from "../src/store/uiStore";
-import { renderToStaticMarkup } from "react-dom/server";
-import { AhrefsActivity } from "../src/pipeline/AhrefsActivity";
 import type { PipelineMessage } from "../src/pipeline/pipelineStore";
 
 let pass = 0;
@@ -91,7 +88,7 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
         source_url: body.url,
         primary_service: body.primary_service,
         candidates: CANDIDATES,
-        volume_source: volumeError ? "unavailable" : "ahrefs",
+        volume_source: volumeError ? "unavailable" : "dataforseo",
         location: "Australia",
         volume_error: volumeError,
         notes: [],
@@ -112,12 +109,6 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
   }
   return new Response(JSON.stringify({ detail: "not stubbed" }), { status: 404 });
 }) as typeof fetch;
-
-/** Server rendering reads a store's initial state, so mirror the live activity into it first. */
-const renderActivity = () => {
-  Object.assign(useUiStore.getInitialState(), { ahrefsActivity: useUiStore.getState().ahrefsActivity });
-  return renderToStaticMarkup(<AhrefsActivity />);
-};
 
 const PLAN = ASSET_BY_ID.plan_of_action;
 
@@ -173,13 +164,13 @@ async function main() {
 
   // ---------- the answer's shape ----------
   const composed = composePlanSubServicesAnswer(CANDIDATES.slice(0, 1).concat(CANDIDATES[2]), "Pinterest Ads", {
-    volumeSource: "ahrefs",
+    volumeSource: "dataforseo",
     location: "Australia",
   });
   ok(
     "the answer states the source, then one line per sub-service",
     composed ===
-      "Volume source: Ahrefs, monthly Google searches in Australia.\n" +
+      "Volume source: DataForSEO, monthly Google searches in Australia.\n" +
         "- Meta Ads — EXISTING PAGE — enhance: https://trafficradius.com.au/meta-ads/ — keywords: meta ads agency (880/mo), facebook ads agency (590/mo) — combined 1,470/mo\n" +
         "- TikTok Ads — NEW PAGE — proposed slug: /tiktok-ads/ — keywords: tiktok ads agency (not measured)\n" +
         "- Pinterest Ads — NEW PAGE (typed by the operator; keywords not measured)",
@@ -208,7 +199,7 @@ async function main() {
   );
   ok("the suggestions are on the card", card?.serviceScan?.status === "ready" && card.serviceScan.plan?.candidates.length === 3, card?.serviceScan?.status);
   ok("every suggestion starts ticked", JSON.stringify(card?.serviceScan?.preselected) === JSON.stringify(CANDIDATES.map((c) => c.name)));
-  ok("the volumes are marked measured", card?.serviceScan?.plan?.volumeSource === "ahrefs" && card.serviceScan.plan.location === "Australia");
+  ok("the volumes are marked measured", card?.serviceScan?.plan?.volumeSource === "dataforseo" && card.serviceScan.plan.location === "Australia");
 
   // ---------- confirming ----------
   usePipelineStore.getState().confirmPlanSubServices(card!.id, ["Meta Ads", "TikTok Ads"], "Pinterest Ads");
@@ -232,41 +223,19 @@ async function main() {
   ok("skipping tells the plan to infer them", answers()[PLAN_SUB_SERVICE_OPTION.servicesFieldId] === PLAN_INFER_SUB_SERVICES);
   ok("a skip files nothing", filed.length === 1);
 
-  ok("a successful discovery raises no notice", useUiStore.getState().providerNotice === null);
-  const done = useUiStore.getState().ahrefsActivity;
-  ok(
-    "the Ahrefs chip finishes with what it measured",
-    done?.phase === "done" && done.count === 3 && done.unit === "keywords measured" && done.extra === "3 sub-services",
-    JSON.stringify(done),
-  );
-  useUiStore.getState().clearAhrefsActivity();
-
-  // ---------- the Ahrefs chip renders both states ----------
-  const working = useUiStore.getState().startAhrefsActivity("Mapping search demand…");
-  const workingHtml = renderActivity();
-  ok("the working chip names Ahrefs and what it is doing", workingHtml.includes("Ahrefs") && workingHtml.includes("Mapping search demand…"), workingHtml.slice(0, 400));
-  useUiStore.getState().finishAhrefsActivity(working, { label: "Search demand for Meta Ads", count: 213, unit: "keywords", extra: "6 clusters" });
-  const doneHtml = renderActivity();
-  ok("the done chip shows the result", doneHtml.includes("keywords") && doneHtml.includes("6 clusters") && doneHtml.includes("Search demand for Meta Ads"), doneHtml.slice(0, 500));
-  const stale = useUiStore.getState().startAhrefsActivity("second call");
-  useUiStore.getState().finishAhrefsActivity(working, { label: "old", count: 1, unit: "keyword" });
-  ok("an older call cannot finish a newer one", useUiStore.getState().ahrefsActivity?.phase === "working");
-  useUiStore.getState().clearAhrefsActivity(stale);
-  ok("clearing removes the chip", renderActivity() === "");
-
-  // ---------- an Ahrefs failure is told to the operator ----------
-  volumeError = "Ahrefs could not fetch search volumes: Ahrefs rejected the API key (401). The plan will label every volume as an estimate.";
+  // ---------- a provider failure stays on the card, with no notice raised elsewhere ----------
+  volumeError = "DataForSEO could not fetch search volumes: DataForSEO rejected the login (401). The plan will label every volume as an estimate.";
+  const before = usePipelineStore.getState().messages.length;
   seedPlanIntake();
   usePipelineStore.getState().submitAnswer("https://trafficradius.com.au/social-media-marketing/");
   await flush();
   const failed = last("service-choice");
   ok("the card keeps the reason", failed?.serviceScan?.plan?.volumeError === volumeError, JSON.stringify(failed?.serviceScan?.plan?.volumeError));
-  const notice = useUiStore.getState().providerNotice;
-  ok("a notification is raised", notice?.title === "Ahrefs search volumes unavailable" && notice.detail === volumeError, JSON.stringify(notice));
   ok("the list still stands", failed?.serviceScan?.status === "ready" && (failed.serviceScan.plan?.candidates.length ?? 0) === 3);
-  useUiStore.getState().dismissProviderNotice();
-  ok("the notice can be dismissed", useUiStore.getState().providerNotice === null);
-  ok("a failed lookup leaves no Ahrefs chip behind", useUiStore.getState().ahrefsActivity === null);
+  ok(
+    "no provider message is posted to the transcript",
+    !usePipelineStore.getState().messages.slice(before).some((m) => m.kind === "text" && /could not fetch|unavailable/i.test(m.text ?? "")),
+  );
   volumeError = "";
 
   // ---------- Phase 2 opens on the planned sub-services ----------

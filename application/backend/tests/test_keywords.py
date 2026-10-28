@@ -23,7 +23,7 @@ import asyncio
 import pytest
 
 from app.routers.pipeline import PHASE_SCOPED_CONTEXT_KEYS
-from app.services import ahrefs_client
+from app.services import dataforseo_client
 from app.services import keywords as K
 
 PROFILE = {
@@ -71,7 +71,7 @@ def test_keyword_context_keys_are_phase_scoped() -> None:
 def test_fingerprint_changes_with_region_and_service() -> None:
     """What decides whether a stored report is reused.
 
-    Region is in here because Ahrefs volumes are per-country: the same service in a different
+    Region is in here because keyword volumes are per-country: the same service in a different
     market is a different keyword set, and reusing one for the other would be invisible.
     """
     base = K.config_from_profile(PROFILE, "phase1").fingerprint()
@@ -239,28 +239,33 @@ def test_validation_never_invents_metrics_for_an_ungrounded_keyword() -> None:
 @pytest.mark.parametrize("value", ["stub", "STUB", " stub "])
 def test_provider_can_be_forced_to_stub(monkeypatch: pytest.MonkeyPatch, value: str) -> None:
     monkeypatch.setenv("KEYWORDS_PROVIDER", value)
-    monkeypatch.setenv("AHREFS_API_KEY", "x")
+    monkeypatch.setattr(dataforseo_client, "is_configured", lambda: True)
     assert K.provider_name() == "stub"
 
 
-def test_provider_is_ahrefs_when_the_key_is_set(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_provider_is_dataforseo_when_the_login_is_set(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("KEYWORDS_PROVIDER", raising=False)
-    monkeypatch.setenv("AHREFS_API_KEY", "x")
-    assert K.provider_name() == "ahrefs"
+    monkeypatch.setattr(dataforseo_client, "is_configured", lambda: True)
+    assert K.provider_name() == "dataforseo"
 
 
-def test_provider_falls_back_to_stub_without_a_key(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A developer with no Ahrefs key gets a working pipeline, not a 500."""
+def _no_login(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in (*dataforseo_client.LOGIN_ENVS, *dataforseo_client.PASSWORD_ENVS):
+        monkeypatch.delenv(name, raising=False)
+
+
+def test_provider_falls_back_to_stub_without_a_login(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A developer with no DataForSEO login gets a working pipeline, not a 500."""
     monkeypatch.delenv("KEYWORDS_PROVIDER", raising=False)
-    monkeypatch.delenv("AHREFS_API_KEY", raising=False)
+    _no_login(monkeypatch)
     assert K.provider_name() == "stub"
 
 
-def test_forcing_ahrefs_without_a_key_is_an_actionable_error(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("KEYWORDS_PROVIDER", "ahrefs")
-    monkeypatch.delenv("AHREFS_API_KEY", raising=False)
+def test_forcing_dataforseo_without_a_login_is_an_actionable_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("KEYWORDS_PROVIDER", "dataforseo")
+    _no_login(monkeypatch)
     config = K.config_from_profile(PROFILE, "phase1")
-    with pytest.raises(K.KeywordProviderError, match="AHREFS_API_KEY"):
+    with pytest.raises(K.KeywordProviderError, match="DATAFORSEO_LOGIN"):
         asyncio.run(K.build_keyword_report(config))
 
 
@@ -284,7 +289,7 @@ def test_a_seed_only_result_is_rejected_rather_than_clustered() -> None:
     """
     config = K.config_from_profile(PROFILE, "phase1")
     seeds_only = [
-        K.RawKeyword(seed, 320, 24, "exact", seed, "Social Media Marketing", "ahrefs")
+        K.RawKeyword(seed, 320, 24, "exact", seed, "Social Media Marketing", "dataforseo")
         for seed in config.services["Social Media Marketing"]
     ]
 
@@ -303,24 +308,24 @@ def test_a_seed_only_result_is_rejected_rather_than_clustered() -> None:
     # "no results" alone sends the operator nowhere.
     message = str(excinfo.value)
     assert config.location_name in message
-    assert "API units" in message
+    assert "balance" in message
 
 
 def test_the_providers_own_error_leads_the_message() -> None:
     """When every call failed for the same stated reason, that sentence IS the diagnosis.
 
-    A rejected key or an account out of units is the common case, and burying Ahrefs' own sentence
+    A rejected login or an account out of balance is the common case, and burying the provider's own sentence
     in the log while telling the operator something generic sends them the wrong way.
     """
     config = K.config_from_profile(PROFILE, "phase1")
     seeds_only = [
-        K.RawKeyword(seed, None, None, "exact", seed, "Social Media Marketing", "ahrefs")
+        K.RawKeyword(seed, None, None, "exact", seed, "Social Media Marketing", "dataforseo")
         for seed in config.services["Social Media Marketing"]
     ]
 
     async def fake_fetch(_config, _dfs, errors=None):
         if errors is not None:
-            errors.append("phrase for 'social media marketing': Ahrefs rejected the API key (401).")
+            errors.append("phrase for 'social media marketing': DataForSEO rejected the login (401).")
         return seeds_only
 
     original = K.fetch_keywords
@@ -332,7 +337,7 @@ def test_the_providers_own_error_leads_the_message() -> None:
         K.fetch_keywords = original  # type: ignore[assignment]
 
     message = str(excinfo.value)
-    assert "Ahrefs rejected the API key (401)." in message
+    assert "DataForSEO rejected the login (401)." in message
     assert config.location_name in message
 
 
@@ -346,9 +351,9 @@ def test_a_normal_result_passes_the_seed_only_guard() -> None:
 # --------------------------------------------------------------------------------------
 # Location resolution
 #
-# `location_name` is filled from the ICP intake's free-text "region" answer. Verified against the
-# live API: Ahrefs Keywords Explorer takes a two-letter **country** code and nothing else — there is no
-# Melbourne, no Victoria, no California, at any spelling (`ahrefs_client.COUNTRIES`).
+# `location_name` is filled from the ICP intake's free-text "region" answer. Keyword data is asked
+# for by **country** and nothing else — there is no Melbourne, no Victoria, no California, at any
+# spelling (`dataforseo_client.COUNTRIES`).
 #
 # That is why this is a lookup and not string surgery. The first version here split on commas and
 # broadened outwards, which rescues "Melbourne,Victoria,Australia" and does nothing at all for
@@ -356,7 +361,7 @@ def test_a_normal_result_passes_the_seed_only_guard() -> None:
 # identical provider errors and a run holding nothing but its seeds.
 # --------------------------------------------------------------------------------------
 
-SUPPORTED = tuple(ahrefs_client.COUNTRIES)
+SUPPORTED = tuple(dataforseo_client.COUNTRIES)
 
 
 @pytest.mark.parametrize(
@@ -434,7 +439,7 @@ def test_resolution_substitutes_the_country() -> None:
 
 
 def test_an_unresolvable_region_is_an_actionable_error() -> None:
-    """Ahrefs only takes a country code, so a region naming no country cannot be sent at all."""
+    """Keyword data is by country only, so a region naming no country cannot be sent at all."""
     config = K.KeywordRunConfig("Acme", "", "Sydney NSW", "English", {"SMM": ["smm"]})
     with pytest.raises(K.KeywordProviderError, match="Melbourne, Australia"):
         K.resolve_location(config)

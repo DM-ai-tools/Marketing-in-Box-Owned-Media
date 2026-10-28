@@ -24,8 +24,8 @@ competitor_type:
   service as a distinct line of business
   If missing or empty, include both types.
 
-service: the target's own core services/products, inferred from {TARGET_URL} — what the target
-actually sells, and therefore what a competitor must also sell.
+service: {SERVICE} — the target's own core services/products, inferred from {TARGET_URL} if not
+specified. What the target actually sells, and therefore what a competitor must also sell.
 
 niche: {NICHE} — leave open if not specified. Where given, it describes the target's own
 industry and the buyers it serves; competitors must be in it.

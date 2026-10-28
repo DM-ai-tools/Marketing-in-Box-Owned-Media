@@ -23,13 +23,14 @@ Everything below is drawn from the code as it stands:
 
 ## 1. The idea in one paragraph
 
-A competitor analysis here is **not** a general "who are our rivals" report. Each of the ten
-analyses asks a different, narrow question tied to the one asset it feeds: *who in this market has
-actually built the thing we are about to build, and what does theirs look like?* The CRO analysis
-looks only for companies with a real CRO offering; the Offers analysis looks only for companies with
-published pricing; the Podcast analysis looks only for companies running their own show. A
+A competitor analysis here is **not** a search for companies that sell the stage. Each of the
+eleven analyses finds businesses that sell the **same service as the client**, then asks a
+narrow question tied to the asset it feeds: *how do these rivals do the thing we are about to
+build, and what does theirs look like?* The CRO analysis finds other AI-SEO (or mortgage, or
+roofing) firms whose service page converts better; the Offers analysis finds those same-service
+rivals who publish pricing; the Podcast analysis finds those who run their own show. A
 competitor that qualifies for one analysis routinely fails another, and that is by design — the
-qualifying artefact **is** the comparison basis.
+qualifying artefact is the **lens**, never the market.
 
 Each stage returns **up to 10** verified competitors plus a prose `notes` section explaining any
 shortfall. That listing is reviewed by a human, persisted relationally, rendered to prose, and
@@ -44,7 +45,7 @@ competitor's own page for them to be included at all.
 
 | # | Stage `asset_id` | Feeds main asset | Qualifying artefact (the basis of comparison) | URL captured | Extra classifier | Highest-weighted score factor |
 |---|---|---|---|---|---|---|
-| 1 | `competitor_analysis_cro` | `cro` | Genuine CRO offering: dedicated CRO page, described process (audits, A/B testing, funnel analysis), or case studies with conversion-lift numbers | `cro_page_url` | — | Service match (CRO specifically) |
+| 1 | `competitor_analysis_cro` | `cro` | Same-service rival whose **service page** converts better than the client's (proposition, proof, offer, CTA). Not a CRO agency unless the client sells CRO | `service_page_url` | conversion mechanism | Service match (the client's own service) |
 | 2 | `competitor_analysis_offers` | `offers` | Published, comparable **offer**: pricing/packages page with visible tiers, a stated starting price, or itemised inclusions | `offer_page_url` | — (carries `starting_price`) | Offer clarity/strength |
 | 3 | `competitor_analysis_lead_magnet` | `lead_magnet` | A distinct **gated asset**: ebook, checklist, template, white paper, quantified free audit, or free workshop used top-of-funnel | `lead_magnet_url` | `lead_magnet_type` | Lead-magnet strength/specificity |
 | 4 | `competitor_analysis_blog` | `blog` | An actively-maintained **blog / content hub** with real depth on the topic — not one orphan article | `blog_url` | `content_focus` | Blog depth on the target topic |

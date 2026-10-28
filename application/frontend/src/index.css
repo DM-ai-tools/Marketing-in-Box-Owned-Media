@@ -428,6 +428,45 @@ body {
   .bc-beam { display: none; }
 }
 
+/* "Fix with Refine" applying to a card (`FixingBanner.tsx`): a shimmer across the banner, a beam
+   passing down the dimmed draft, and dots after the current step. Decoration only: the banner says
+   in words what is happening, so all of it stops when motion is reduced. */
+@keyframes fx-shimmer {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(100%); }
+}
+@keyframes fx-scan {
+  0% { top: 0; opacity: 0; }
+  10% { opacity: 1; }
+  90% { opacity: 1; }
+  100% { top: calc(100% - 4rem); opacity: 0; }
+}
+@keyframes fx-dots {
+  0% { content: ""; }
+  25% { content: "."; }
+  50% { content: ".."; }
+  75%, 100% { content: "..."; }
+}
+.fx-banner { background-color: color-mix(in srgb, var(--color-electric-blue) 6%, var(--bg-sunken)); }
+.fx-banner::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(100deg, transparent 20%, color-mix(in srgb, var(--color-electric-blue) 14%, transparent) 50%, transparent 80%);
+  animation: fx-shimmer 1.8s ease-in-out infinite;
+}
+.fx-draft > :first-child { opacity: 0.72; transition: opacity 0.3s ease; }
+.fx-scan {
+  background: linear-gradient(180deg, transparent, color-mix(in srgb, var(--color-electric-blue) 16%, transparent), transparent);
+  animation: fx-scan 2.4s ease-in-out infinite;
+}
+.fx-dots::after { content: "..."; animation: fx-dots 1.2s steps(1) infinite; }
+
+@media (prefers-reduced-motion: reduce) {
+  .fx-banner::before, .fx-scan { animation: none !important; display: none; }
+  .fx-dots::after { animation: none; content: "…"; }
+}
+
 /* With motion off, the skeleton must still read as "pending" rather than as empty rows that look
    like a rendering bug. The sweep goes; a visible resting surface stays. */
 @media (prefers-reduced-motion: reduce) {

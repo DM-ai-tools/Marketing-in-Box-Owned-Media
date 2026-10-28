@@ -25,6 +25,9 @@ any industry (not just digital marketing agencies).
 - {LOCATION} — city/region/state to prioritise (optional; defaults to Australia-wide)
 
 ## Shared design principles across all 11 prompts
+- `{SERVICE}` is always the client's own service (or Phase 2's sub-service). The stage is the
+  *lens* (better CRO on their service page, their lead magnet, their blog), never the market
+  the search is run in. An AI SEO agency's CRO listing is other SEO agencies, not CRO agencies.
 - Every prompt asks for UP TO 10 competitors, not exactly 10 — if fewer genuine, verified
   matches exist, the prompt explicitly instructs returning fewer rather than padding the
   list with weak matches.

@@ -134,6 +134,8 @@ const ctx = (
   sub_key: opts.sub_key,
   overridable: opts.overridable,
   ...(opts.context_keys ? { context_keys: opts.context_keys } : {}),
+  ...(opts.context_excerpt_chars ? { context_excerpt_chars: opts.context_excerpt_chars } : {}),
+  ...(opts.default !== undefined ? { default: opts.default } : {}),
 });
 
 /** The competitor listings a Phase 1 run approves that describe competitors' service pages. The
@@ -228,6 +230,7 @@ const file = (field_id: string, label: string, opts: Partial<FieldDef> = {}): Fi
   source: "user_input",
   helpText: opts.helpText ?? "Paste the content here, or type \"skip\".",
   placeholder: opts.placeholder,
+  conditional_on: opts.conditional_on,
 });
 
 /** Context keys the *server* composes at save time, rather than the model writing them.
@@ -625,6 +628,28 @@ export const ASSET_CATALOG: AssetDefinition[] = [
       choice("component_fallback_preference", "Component Fallback Preference", ["STRICT", "ADAPTIVE"], { default: "ADAPTIVE" }),
       choice("accessibility_requirement", "Accessibility Requirement", ["STANDARD WCAG AA", "CLIENT-SPECIFIED", "NOT REQUIRED"], { default: "STANDARD WCAG AA" }),
       choice("output_format", "Output Format", ["Full HTML + CSS", "HTML sections only", "React component", "Figma-ready component brief", "WordPress block structure"]),
+      // The page is drafted as variants (`lib/pageVariants.ts`); these two add the skill and
+      // framework variants. Each document reaches only its own variant's prompt.
+      bool("use_skill_document", "Should the pillar page also be built using a skill?", {
+        conditional_children: ["skill_document"],
+        helpText: "Yes adds a variant that follows a skill you supply: a writing or page-building method.",
+      }),
+      file("skill_document", "Skill Document", {
+        required: false,
+        conditional_on: { field: "use_skill_document", equals: true },
+        helpText: "Attach the skill with the clip (PDF, Word, Markdown or text), or paste it.",
+        placeholder: "Paste the skill, or attach a file with the clip",
+      }),
+      bool("use_framework_document", "Should the pillar page also be built using a framework?", {
+        conditional_children: ["framework_document"],
+        helpText: "Yes adds a variant structured by a framework you supply: AIDA, StoryBrand, PAS or your own.",
+      }),
+      file("framework_document", "Framework Document", {
+        required: false,
+        conditional_on: { field: "use_framework_document", equals: true },
+        helpText: "Attach the framework with the clip (PDF, Word, Markdown or text), or paste it.",
+        placeholder: "Paste the framework, or attach a file with the clip",
+      }),
       notesField("additional_notes_constraints_optional", "Additional Notes / Constraints (optional)"),
     ],
   },
@@ -960,15 +985,34 @@ export const ASSET_CATALOG: AssetDefinition[] = [
         helpText: "The one hub page the whole programme feeds. Everything produced links back to it.",
         placeholder: "e.g. Social Media Marketing — /social-media-marketing",
       }),
+      // Stage 09: the funnel, hub, ladder, lead magnet and blog it asks about were approved earlier
+      // in this run, so they are gathered rather than asked for. Excerpts, because the prompt only
+      // needs to know what exists to fold it in, and the hub alone runs to tens of thousands of
+      // characters. Nothing built yet is the prompt's own "greenfield", not a question.
       ctx("existing_content_assets_optional", "Existing Content Assets (optional)", "unresolved_context_key", {
         required: false,
-        helpText: 'Any Plan of Action, funnel, lead magnet, ROI calculator, or ICP doc already built. If nothing exists, say "greenfield".',
+        context_keys: ["funnel_stages", "funnel_hub_media", "offer_ladder", "lead_magnet", "blog"],
+        context_excerpt_chars: 2500,
+        fallback: "treat_as_empty_if_missing",
+        default: "greenfield",
+        helpText: 'The funnel, lead magnet, offers and blog already approved in this run. If nothing exists, "greenfield".',
         placeholder: "e.g. 14 blog posts, one lead magnet, no calculator — or just: greenfield",
       }),
       ctx("icp_buyer_personas", "ICP / Buyer Personas", "icp_*"),
       ctx("cro_brand_voice_framework_optional", "CRO / Brand Voice Framework (optional)", "cro_rewritten_copy", { required: false }),
       ctx("competitor_list", "Competitor List", "competitor_analysis_content_marketing"),
-      file("keyword_search_volume_data_source_optional", "Keyword / Search Volume Data Source (optional)", { required: false }),
+      // Never asked: the server fills it from DataForSEO for the pillar service in the client's
+      // country before generating (`app/services/content_keywords.py`). "N/A" is what it fills.
+      {
+        ...file("keyword_search_volume_data_source_optional", "Keyword / Search Volume Data Source (optional)", {
+          required: false,
+          helpText: "Measured by DataForSEO for the pillar service when the stage generates.",
+        }),
+        source: "auto_from_context",
+        context_key: "unresolved_context_key",
+        fallback: "treat_as_empty_if_missing",
+        default: "N/A",
+      },
       txt("regulated_field_advertising_compliance_body", "Regulated Field / Advertising Compliance Body", {
         helpText: 'e.g. ACCC (Australia), FTC (US), ASA (UK), or "None".',
       }),
@@ -1079,6 +1123,9 @@ export const ASSET_CATALOG: AssetDefinition[] = [
           "The promise, not the final title — what makes someone give up an hour. Pick every webinar you want built; each one becomes its own package with a script, slide brief, registration page and email sequence. Around three is a quarter's programme.",
         placeholder: "e.g. What agencies don't tell you about pricing, lock-in contracts, and reporting",
       }),
+      // Before the sources, because the sources are read from it: the research finds competitors that
+      // run their own webinars, with each one's page, and `WEBINAR_SOURCES_OPTION` reads those pages.
+      ctx("competitor_analysis_webinars", "Competitor Analysis — Webinars", "competitor_analysis_webinars", { required: false }),
       file("competitor_webinar_sources", "Competitor Webinar Sources", {
         helpText: "Transcripts, slide content, or URLs of 2-5 competitor webinars.",
         placeholder: "e.g. paste 2-5 transcripts or slide outlines, or their registration-page URLs",
@@ -1109,7 +1156,6 @@ export const ASSET_CATALOG: AssetDefinition[] = [
       ctx("icp_document", "ICP Document", "icp_*"),
       ctx("cro_rewritten_copy", "Brand Voice / Proof Points (from CRO)", "cro_rewritten_copy"),
       ctx("design_tokens", "Design Tokens", "design_tokens", { required: false }),
-      ctx("competitor_analysis_webinars", "Competitor Analysis — Webinars", "competitor_analysis_webinars", { required: false }),
     ],
   },
   {
@@ -1292,7 +1338,7 @@ export const ASSET_CATALOG: AssetDefinition[] = [
       },
       /* Answered on a `service-choice` card rather than typed (`SERVICE_SCAN_OPTIONS.plan_of_action`):
        * the server reads the client's menu for the sub-services it already has, suggests the missing
-       * ones from the approved competitor research and the ICP, and puts an Ahrefs volume on every
+       * ones from the approved competitor research and the ICP, and puts a DataForSEO volume on every
        * keyword (`app/services/sub_service_discovery.py`). The operator confirms the list. */
       txt("sub_services_to_expand_into_phase_2", "Sub-Services to Expand Into (Phase 2)", {
         helpText: "Read from the client's site and the competitor research, then confirmed by you.",

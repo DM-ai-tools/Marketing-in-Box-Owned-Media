@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { motion } from "framer-motion";
 import { inputPlaceholderFor } from "../data/fieldHints";
+import { withAttachedText } from "../lib/attachedFile";
+import { AttachFileButton } from "./AttachFileButton";
 import { fieldBeingAsked, usePipelineStore } from "./pipelineStore";
 
 /** Free-text answer bar for whichever field the intake flow is currently asking — mirrors
@@ -15,6 +17,9 @@ export function PipelineInputBar() {
   // a good answer isn't obvious (Pricing Facts), showing it here puts the example in the box the
   // operator is about to type into, not only in the hint above.
   const fieldPlaceholder = usePipelineStore((s) => inputPlaceholderFor(fieldBeingAsked(s)));
+  // File questions get the clip button: the file's text lands in the box, to read before sending.
+  const acceptsFile = usePipelineStore((s) => fieldBeingAsked(s)?.kind === "file_attach");
+  const [attachError, setAttachError] = useState<string | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   // When the operator is editing an earlier answer, start from what they said before rather than
   // from an empty box — fixing a typo in a URL shouldn't mean retyping it. Keyed on the field so a
@@ -23,6 +28,7 @@ export function PipelineInputBar() {
   const seed = usePipelineStore((s) => (s.editSeed?.fieldId === awaitingFieldId ? s.editSeed.value : null));
   useEffect(() => {
     setValue(seed ?? "");
+    setAttachError(null);
     const el = textareaRef.current;
     if (!el) return;
     el.style.height = "auto";
@@ -33,12 +39,35 @@ export function PipelineInputBar() {
     if (!value.trim()) return;
     submitFreeform(value);
     setValue("");
+    setAttachError(null);
     if (textareaRef.current) textareaRef.current.style.height = "auto";
+  }
+
+  function grow() {
+    const el = textareaRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = `${Math.min(el.scrollHeight, 160)}px`;
   }
 
   return (
     <div className="border-t border-[var(--border)] bg-[var(--bg)] px-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] pt-3 sm:px-6 lg:px-8">
+      {attachError && (
+        <p role="alert" className="mx-auto mb-1.5 max-w-[55rem] px-1 text-[0.78rem] text-[var(--color-signal-amber)]">
+          {attachError}
+        </p>
+      )}
       <div className="mx-auto flex max-w-[55rem] items-end gap-2 rounded-2xl border border-[var(--border-strong)] bg-[var(--bg-raised)] px-2.5 py-2 sm:px-3">
+        {acceptsFile && (
+          <AttachFileButton
+            onError={setAttachError}
+            onText={(file) => {
+              setValue((current) => withAttachedText(current, file));
+              requestAnimationFrame(grow);
+              textareaRef.current?.focus();
+            }}
+          />
+        )}
         <textarea
           ref={textareaRef}
           rows={1}

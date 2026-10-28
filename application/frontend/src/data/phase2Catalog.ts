@@ -54,9 +54,8 @@ interface Phase2Delta {
   fromSubService?: readonly string[];
   /** field_id -> the upstream outputs to gather into it. For the two inputs whose prompts ask for a
    * *set* of documents rather than one ("any Plan of Action, funnel, lead magnet or ROI calculator
-   * already built"; "the folder containing this client's existing strategy docs"). In Phase 1 both
-   * are plain questions, because nothing upstream of them has been built when they are asked; in
-   * Phase 2 they sit at stages 06 and 07, after the documents they are asking about exist. */
+   * already built"; "the folder containing this client's existing strategy docs"). Phase 2 builds a
+   * different set of stages before them than Phase 1 does, so the list of documents differs. */
   gatherContext?: Readonly<Record<string, readonly string[]>>;
   /** field_id -> the Phase 2 helpText for an input that keeps its Phase 1 behaviour but not its
    * Phase 1 explanation.
@@ -228,10 +227,10 @@ const DELTAS: Record<string, Phase2Delta> = {
   content_marketing_strategy: {
     relabel: { primary_service_pillar_page_being_supported: "Primary Sub-Service / Pillar Page Being Supported" },
     fromSubService: ["primary_service_pillar_page_being_supported"],
-    // Stage 06, so the funnel (02) and lead magnet (03) it is asking about were built earlier in
-    // this same run. Offered together rather than described in prose: the prompt folds these into
-    // the cluster architecture instead of re-briefing them, which it can only do if it has them.
-    gatherContext: { existing_content_assets_optional: ["funnel_stages", "lead_magnet"] },
+    // The funnel, lead magnet and blog it is asking about were built earlier in this same run.
+    // Offered together rather than described in prose: the prompt folds these into the cluster
+    // architecture instead of re-briefing them, which it can only do if it has them.
+    gatherContext: { existing_content_assets_optional: ["funnel_stages", "lead_magnet", "blog"] },
   },
   funnel_hub_media: {
     relabel: { service_or_product_line_being_funnel_mapped: "sub-service or product line being funnel-mapped" },

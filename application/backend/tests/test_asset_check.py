@@ -487,3 +487,17 @@ async def test_a_missing_previous_score_is_not_shown_to_the_judge_as_na(monkeypa
 
 def test_the_social_audit_is_not_scored_for_virality() -> None:
     assert "virality" not in A.CHECKS_BY_ASSET["social_content_strategy_audit"]
+
+
+def test_a_recheck_cannot_lower_a_score_for_the_same_unfixed_findings() -> None:
+    """The same findings scored again a few points lower is noise; only a new problem can lower it."""
+    from app.services.asset_check import CheckResult, Finding, _hold_unexplained_drops
+
+    previous = [CheckResult("offer_relevance", 35, "", [Finding("offer_relevance", "error", "We also offer Local SEO", "not on the ladder", "", "judge")])]
+    same = {"offer_relevance": CheckResult("offer_relevance", 30, "", [Finding("offer_relevance", "error", "also offer Local SEO", "not on the ladder", "", "judge")])}
+    _hold_unexplained_drops(same, previous)
+    assert same["offer_relevance"].score == 35
+
+    new = {"offer_relevance": CheckResult("offer_relevance", 30, "", [Finding("offer_relevance", "error", "Packages from $99", "price not on record", "", "judge")])}
+    _hold_unexplained_drops(new, previous)
+    assert new["offer_relevance"].score == 30

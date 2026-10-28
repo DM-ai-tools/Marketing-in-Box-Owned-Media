@@ -32,6 +32,8 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
   }
   // The intake's own context reads (ICP, CRO copy …): nothing stored for this test run.
   if (url.includes("/context/")) return new Response("{}", { status: 404 });
+  // Suggested answers (`smoke/contextSearch.tsx` covers them): none, so the intake asks as usual.
+  if (url.includes("/prefill/")) return new Response("{}", { status: 404 });
   // Every other request (the competitor search itself) stays pending: what is checked is that it
   // was made, and with what.
   return new Promise<Response>(() => {});

@@ -1,0 +1,36 @@
+name: Feature request
+description: Suggest a new skill, command, or improvement
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What SEO problem are you trying to solve?
+      description: Describe the task, not the solution — it helps us judge whether this belongs in an existing skill or a new one.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What would you like the toolkit to do?
+    validations:
+      required: true
+
+  - type: dropdown
+    id: shape
+    attributes:
+      label: What shape should it take?
+      options:
+        - "Improve an existing skill"
+        - "New skill (activates automatically)"
+        - "New command (explicit slash command)"
+        - "New agent"
+        - "Not sure"
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: What are you doing today instead?

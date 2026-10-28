@@ -18,6 +18,7 @@ import { topicPreambleFor, withTopicSuggestions } from "../lib/topicSuggestions"
 import { useUiStore } from "../store/uiStore";
 import { stagesFor } from "./pipelineData";
 import { usePipelineStore } from "./pipelineStore";
+import { SummaryView } from "./SummaryView";
 
 /**
  * The reading surface, as a centred dialog over the working panes (full-screen on a phone).
@@ -88,6 +89,7 @@ export function AssetReader() {
             transition={reduceMotion ? { duration: 0 } : { type: "spring", stiffness: 420, damping: 34, mass: 0.8 }}
           >
             <ReaderContents
+              messageId={message.id}
               text={upgradePlainOutline(stripPromptEchoes(message.text ?? ""))}
               // The stage's words as saved. Every file built from the document — the Markdown, the
               // plan map, the slide deck — starts here, never from the display text above.
@@ -110,6 +112,7 @@ export function AssetReader() {
 }
 
 function ReaderContents({
+  messageId,
   text,
   rawText,
   assetId,
@@ -118,6 +121,7 @@ function ReaderContents({
   appendix,
   onClose,
 }: {
+  messageId: string;
   text: string;
   rawText: string;
   assetId?: string;
@@ -192,10 +196,23 @@ function ReaderContents({
     return () => observer.disconnect();
   }, [doc.sections]);
 
+  // The Summary view draws no sections, so a jump from it (a point, or the outline) switches to
+  // Visual first and scrolls once the sections are mounted.
+  const [pendingJump, setPendingJump] = useState<string | null>(null);
   const jump = (id: string) => {
     setActiveId(id);
+    if (view === "summary") {
+      setPendingJump(id);
+      setView("visual");
+      return;
+    }
     sectionRefs.current.get(id)?.scrollIntoView({ behavior: "smooth", block: "start" });
   };
+  useEffect(() => {
+    if (!pendingJump || view === "summary") return;
+    sectionRefs.current.get(pendingJump)?.scrollIntoView({ block: "start" });
+    setPendingJump(null);
+  }, [pendingJump, view]);
 
   return (
     <>
@@ -209,9 +226,10 @@ function ReaderContents({
         )}
         <span className="flex-1" />
 
-        {/* Visual first. Text is the document exactly as exported, one click away. */}
+        {/* Visual first. Text is the document exactly as exported, one click away. Summary is the
+            only view that is not the document itself, and says so. */}
         <div role="group" aria-label="View" className="flex rounded-full border border-[var(--border-strong)] p-0.5 text-[0.72rem] font-semibold">
-          {(["visual", "text"] as const).map((v) => (
+          {(["visual", "text", "summary"] as const).map((v) => (
             <button
               key={v}
               type="button"
@@ -220,7 +238,7 @@ function ReaderContents({
               className="min-h-8 cursor-pointer rounded-full px-2.5 py-0.5 sm:min-h-0"
               style={view === v ? { backgroundColor: "var(--accent)", color: "var(--accent-fg)" } : undefined}
             >
-              {v === "visual" ? "Visual" : "Text"}
+              {v === "visual" ? "Visual" : v === "text" ? "Text" : "Summary"}
             </button>
           ))}
         </div>
@@ -316,6 +334,9 @@ function ReaderContents({
             // Cards, flows and timelines need more room than a line of prose does.
             style={view === "visual" ? ({ "--doc-measure": "62rem" } as React.CSSProperties) : undefined}
           >
+            {view === "summary" ? (
+              <SummaryView messageId={messageId} label={label} sections={doc.sections} onJump={jump} />
+            ) : (
             <VisualOptionsContext.Provider value={{ expandProse: !!template.longForm, staticHtml: false }}>
             {view === "visual" && (
               <ReportHero
@@ -355,6 +376,7 @@ function ReaderContents({
               view === "visual" ? <VisualSectionBody body={shown} label={label} /> : <Markdown text={shown} />
             )}
             </VisualOptionsContext.Provider>
+            )}
             <div className="mt-8 flex flex-wrap items-center gap-2 border-t border-[var(--border)] pt-4">
               <AssetExportButtons text={rawText} label={label} stageNumber={stage?.stageNumber} preamble={preamble} assetId={assetId} appendix={appendix} />
               {/* The same two files the generation card's menu offers, under the same rule: each

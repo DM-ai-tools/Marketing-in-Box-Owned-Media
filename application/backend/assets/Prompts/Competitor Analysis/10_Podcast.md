@@ -6,6 +6,12 @@ If fewer than 10 genuinely qualifying competitors can be found and verified, ret
 than padding the list with weak or unverified matches — flag any lower-confidence entries instead
 of silently including them.
 
+WHO COUNTS AS A COMPETITOR HERE: a business that competes with the target for the same buyers —
+it sells the same or a substitutable service to the same kind of customer, in the same market.
+The podcast is the lens this listing is judged through, never the service the competitor has to
+sell. Do NOT include podcast-production studios, media companies or show-hosting agencies
+unless that is what the target itself sells.
+
 Additional inputs (all optional unless stated):
 
 competitor_type:
@@ -15,8 +21,8 @@ competitor_type:
   the company's own podcast, with the target service among its listed offerings
   If missing or empty, include both types.
 
-service: "podcast for {SERVICE}" (the target's core service/topic, inferred from {TARGET_URL} if
-not specified) — a genuine, ongoing, self-hosted PODCAST produced and hosted by the company or
+service: {SERVICE} — the service the target sells (inferred from {TARGET_URL} if not specified).
+  The qualifying artefact is a genuine, ongoing, self-hosted PODCAST produced and hosted by the company or
 its founder/principal, distinct from guest appearances on someone else's show.
   (Only include companies where: (1) the company CURRENTLY operates as a service provider for
   the target service — not a business that has pivoted entirely into courses, coaching, or

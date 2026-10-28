@@ -36,9 +36,11 @@ export function CompetitorConsentCard({ message }: { message: PipelineMessage })
       </p>
 
       <p className="mt-1.5 text-[0.8rem] leading-relaxed text-[var(--fg-muted)]">
-        I'll find up to 10 competitors{consent.location ? ` in ${consent.location}` : ""} with a genuine, qualifying
-        example on this topic — each one checked by opening the page, not trusted from a search snippet — and report what
-        it actually is. You'll review the list, and the notes explaining anything that couldn't be found, before it's used.
+        I'll find up to 10 competitors who sell the same service as you
+        {consent.location ? ` in ${consent.location}` : ""}, with a genuine, qualifying
+        {consent.subject} on this topic — each one checked by opening the page, not trusted from a
+        search snippet. You'll review the list, and the notes explaining anything that couldn't be
+        found, before it's used.
       </p>
 
       {/* Shown because a wrong topic here is the expensive mistake: the whole benchmark follows from

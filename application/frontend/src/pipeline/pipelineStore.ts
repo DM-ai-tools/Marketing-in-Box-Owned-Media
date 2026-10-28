@@ -12,6 +12,7 @@ import {
   createRun,
   fetchAssetReadiness,
   fetchCompetitorBriefing,
+  fetchBlogKeywords,
   fetchFunnelBuild,
   fetchFunnelBuildReady,
   fetchRunContext,
@@ -24,6 +25,7 @@ import {
   listSourceRuns,
   runCompetitorAnalysis,
   saveCompetitorAnalysis,
+  validateCompetitors,
   saveHeadlineSelection,
   saveRunIndustry,
   saveRunSubService,
@@ -42,6 +44,8 @@ import {
 } from "./pipelineApi";
 import { ApiFaultError, StreamTruncatedError, checkAsset } from "./pipelineApi";
 import type {
+  BlogKeywordOpportunity,
+  BlogKeywordSuggestions,
   FunnelBuildEngine,
   FunnelBuildEvent,
   FunnelManusEvent,
@@ -60,6 +64,7 @@ import type {
   AssetReadiness,
   CheckFinding,
   CompetitorAnalysisResult,
+  CompetitorValidation,
   HeadlineCandidate,
   IndustryProfileResult,
   KeywordReportResult,
@@ -68,7 +73,17 @@ import type {
   ScannedService,
   SourceRunSummary,
   StreamCompletion,
+  WebinarSourcesResult,
 } from "./pipelineApi";
+import { KEYWORD_DATA_PREPASS_ID, fetchBuyerLanguage, fetchWebinarSources, prefillSuggestions } from "./pipelineApi";
+import type { BuyerLanguageResult } from "./pipelineApi";
+import type { ContextRetrievalReport, FieldSuggestion, KeywordTargets, SummaryPoint } from "./pipelineApi";
+import { summariseDocument } from "./pipelineApi";
+import { comparePageVariants } from "./pipelineApi";
+import type { PageVariantId, PageVariantMeasure, VariantPageRow } from "./pipelineApi";
+import { VARIANT_LABEL, beatSheetTopics, variantOptions, type VariantOption } from "../lib/pageVariants";
+import { upgradePlainOutline } from "../lib/plainOutline";
+import { prefillCandidates } from "../lib/contextSearch";
 import {
   CLIENT_PROFILE_SOURCES,
   COMPETITOR_BRIEFING_STAGES,
@@ -87,6 +102,13 @@ import {
   PLAN_SUB_SERVICES_KEY,
   PLAN_SUB_SERVICE_OPTION,
   SECONDARY_KEYWORD_OPTION,
+  BLOG_KEYWORD_OPTION,
+  WEBINAR_SOURCES_OPTION,
+  BUYER_LANGUAGE_OPTION,
+  composeOutcomeWordsAnswer,
+  composeWordsToAvoidAnswer,
+  composeWebinarSourcesAnswer,
+  composeBlogSecondaryAnswer,
   composeSecondaryTermsAnswer,
   type PickedSecondaryTerm,
   PHASE2_AUDIENCE_INDUSTRY_FACT,
@@ -113,6 +135,7 @@ import { useUiStore } from "../store/uiStore";
 import { PLAN_COMPOSED_KEYS, SERVER_COMPOSED_CONTEXT_KEYS } from "../data/assetCatalog";
 import { INDUSTRY_PROFILES, isIndustryBucket, notRecommendedReason } from "../data/industryProfiles";
 import { specifyPrefix } from "../lib/specifyChoice";
+import { defaultPicks, validationMarkdownFor } from "../lib/competitorValidation";
 
 export type NavStatus = "Ready" | "Awaiting Input" | "Generating…" | "Awaiting Review";
 export type ActiveStatus = "running" | "hitl" | null;
@@ -141,7 +164,34 @@ export type PipelineMessageKind =
   /** The services (Phase 1) or sub-services (Phase 2) found on the reference page, to pick from. */
   | "service-choice"
   /** Once Funnel and Funnel Hub & Media are approved: build the funnel as deployable files. */
-  | "funnel-build";
+  | "funnel-build"
+  /** The Pillar Page's variants: which takes on the page to draft (`lib/pageVariants.ts`). */
+  | "page-variants"
+  /** The drafted variants side by side, measured, with Approve on each. */
+  | "variant-compare";
+
+/** The Pillar Page's variant picker. `drafts` maps each started variant to its generation card. */
+export interface PageVariantsState {
+  status: "choosing" | "building" | "built";
+  answers: Record<string, string>;
+  options: VariantOption[];
+  chosen: PageVariantId[];
+  drafts: Partial<Record<PageVariantId, string>>;
+}
+
+/** The comparison card. Counted off each draft by the server; nothing is judged. */
+export interface VariantCompareState {
+  status: "loading" | "done" | "error";
+  /** The variant cards compared, in column order. */
+  messageIds: string[];
+  pages?: VariantPageRow[];
+  /** The client's hosted page, as the reference variant measured it. */
+  current?: VariantPageRow | null;
+  competitorMedianWords?: number | null;
+  error?: string;
+  /** The drafts' texts this was measured on, so a fix to one re-measures and nothing else does. */
+  measuredOn?: string;
+}
 
 /** The deployable funnel card (`FunnelBuildCard`). Summaries only — the HTML stays on the server
  * and is fetched for a preview, so a chat's saved state does not carry every page. */
@@ -200,9 +250,56 @@ export interface ServiceScanState {
    * sub-services rather than only listing the site's. Its picks are keyed by name, since a
    * suggested sub-service has no page URL yet. */
   plan?: PlanDiscoveryState;
-  /** Set on the Pillar Page's secondary-terms picker (`SECONDARY_KEYWORD_OPTION`): Ahrefs and
-   * DataForSEO suggestions for the head term, side by side. */
+  /** Set on the Pillar Page's secondary-terms picker (`SECONDARY_KEYWORD_OPTION`): DataForSEO's
+   * suggestions for the head term. */
   secondary?: SecondaryKeywordState;
+  /** Set on the Blog's keyword card (`BLOG_KEYWORD_OPTION`): better keywords than the current one,
+   * measured against the client's page and the competing pages. */
+  blog?: BlogKeywordState;
+  /** Set on the Webinar's sources card (`WEBINAR_SOURCES_OPTION`): the competitor webinar pages read. */
+  webinar?: WebinarSourcesState;
+  /** Set on CRO's buyer-language cards (`BUYER_LANGUAGE_OPTION`): outcome words or words to avoid. */
+  buyerLanguage?: BuyerLanguageState;
+}
+
+/** CRO's buyer-language suggestions, carried on its `service-choice` card. */
+export interface BuyerLanguageState {
+  mode: "outcome" | "avoid";
+  /** What was searched around, for the card and for a retry. */
+  services: string[];
+  landingUrl: string;
+  region: string;
+  industry: string;
+  /** Null until the suggestions arrive. */
+  result: BuyerLanguageResult | null;
+  /** What was used, for the history view: cluster names or terms. */
+  picked?: string[];
+}
+
+/** The Webinar's competitor sources, carried on its `service-choice` card. */
+export interface WebinarSourcesState {
+  /** The approved competitor listing the pages are read from. */
+  listing: string;
+  /** Null until the pages have been read. */
+  result: WebinarSourcesResult | null;
+  /** How many pages were used, for the history view. */
+  usedCount?: number;
+  /** Whether the operator added sources of their own, for the history view. */
+  addedOwn?: boolean;
+}
+
+/** The Blog's keyword card, carried on its `service-choice` card. */
+export interface BlogKeywordState {
+  /** What was searched around: the chosen topic's own keyword. */
+  seed: string;
+  /** The keyword the operator has now, shown for comparison. */
+  current: string;
+  region: string;
+  /** Null until the suggestions arrive. */
+  result: BlogKeywordSuggestions | null;
+  /** What was submitted, for the history view. */
+  chosenPrimary?: string;
+  pickedSecondary?: string[];
 }
 
 /** The secondary-terms picker, carried on its `service-choice` card. */
@@ -220,10 +317,10 @@ export interface PlanDiscoveryState {
   primaryService: string;
   region: string;
   candidates: PlanSubServiceCandidate[];
-  /** "ahrefs" when the volumes are measured. */
+  /** "dataforseo" when the volumes are measured. */
   volumeSource: string;
   location: string;
-  /** Why the volumes are missing (Ahrefs unconfigured or failing), shown as a warning on the card. */
+  /** Why the volumes are missing (DataForSEO unconfigured or failing), shown as a warning on the card. */
   volumeError?: string;
   /** Names confirmed, for the history view. */
   chosenNames?: string[];
@@ -429,6 +526,15 @@ export interface PipelineMessage {
   /** Populated on `kind: "competitor"` messages — the parsed listing the operator reviews. */
   competitor?: CompetitorAnalysisResult;
   competitorError?: string;
+  /** The listing scored for this client (`POST /competitor/{id}/validate`): proof, fit, feasibility
+   * and a verdict per competitor. Advisory: it never blocks approving the listing. */
+  competitorValidation?: {
+    status: "loading" | "ready" | "error";
+    report?: CompetitorValidation;
+    error?: string;
+    /** Domains of the plays the operator ticked to apply; they reach the stage as its reference. */
+    picks?: string[];
+  };
   /** What that listing was searched for, so "Re-run" repeats the same search. */
   competitorInputs?: CompetitorRunInputs;
   /** Set when this analysis is filling an intake field mid-stage rather than gating the stage:
@@ -488,8 +594,18 @@ export interface PipelineMessage {
   funnelBuild?: FunnelBuildState;
   /** On a generation card: the check of this draft against the client's business. */
   check?: AssetCheckState;
-  /** On the keyword prepass's announcement: what it mapped, so every later asset's "Ahrefs keyword
-   * data" section can say what search demand it was written against (`lib/ahrefsUsage.ts`). */
+  /** "Fix with Refine" is editing this card in place: the draft stays readable until the fixed one
+   * replaces it. Only meaningful while its request is in flight (`isFixing`). */
+  fixing?: boolean;
+  /** The check report this card had before its last in-place fix: the panel's "was N" and the
+   * re-check's `previous` (`earlierCheckReport`). */
+  priorCheck?: AssetCheckReport;
+  /** What the last in-place fix did, when it could not change the draft. */
+  fixNote?: string;
+  /** When the last in-place fix replaced the draft (ms), for the card's "Fixes applied". */
+  fixedAt?: number;
+  /** On the keyword prepass's announcement: what it mapped, so every later asset's "Keyword data"
+   * section can say what search demand it was written against (`lib/keywordUsage.ts`). */
   keywordReport?: KeywordReportResult;
   /** On a CRO card that rebuilt the client's real page: where the assembly got to. Absent for every
    * stage that does not assemble (the pillar page, copy-only CRO). See `ReplicaPanel`. */
@@ -497,8 +613,41 @@ export interface PipelineMessage {
   /** Image generation that failed for this stage, as the server reported it. The stage ran without
    * those images; the card says so rather than leaving the operator to find a missing picture. */
   imageNotes?: string[];
+  /** On a question card: an answer found in a document this run already approved, offered for one
+   * click. Advisory; the operator can type over it. See `lib/contextSearch.ts`. */
+  suggestion?: FieldSuggestion;
+  /** On a generation card: upstream documents this stage read as their relevant sections rather
+   * than whole (`vector_context.RETRIEVAL_FIELDS`). */
+  contextRetrieval?: ContextRetrievalReport;
+  /** On a generation card: the primary and secondary keywords this stage was told to write with.
+   * The deliverable's "Keyword data" section lists them and checks which the text uses. */
+  keywordTargets?: KeywordTargets;
+  /** The reader's Summary tab, kept with the deliverable so reopening it costs nothing. `textHash`
+   * is the text it was made from: an edited or refined document is summarised again. */
+  docSummary?: {
+    status: "loading" | "done" | "error";
+    textHash: string;
+    points?: SummaryPoint[];
+    error?: string;
+  };
   /** On a Pillar Page card built by Manus: the build's latest state and its task link. */
   manus?: ManusBuildEvent;
+  /** On a Pillar Page draft: which variant it is (`lib/pageVariants.ts`). */
+  variant?: PageVariantId;
+  /** What that variant measured before writing (the hosted page, the beat sheet). */
+  pageVariant?: PageVariantMeasure;
+  /** Another variant was approved as the run's pillar page: this draft is kept in Deliverables
+   * (`savePhase: "saved"`) but is not the Context Store version later stages read. Older chats may
+   * still carry `variantNotChosen` + `superseded` for the same case. */
+  variantAlternate?: boolean;
+  /** @deprecated Prefer `variantAlternate`. Kept so older chats still render the note. */
+  variantNotChosen?: boolean;
+  /** This variant was rebuilt with Manus as a new draft below. */
+  manusRebuilt?: boolean;
+  /** Populated on `kind: "page-variants"`. */
+  pageVariants?: PageVariantsState;
+  /** Populated on `kind: "variant-compare"`. */
+  variantCompare?: VariantCompareState;
   /** On a Refine of a built page: how many of the requested edits landed, and why any did not. The
    * page is edited in place rather than retyped, so an edit that could not be placed is said here
    * instead of the whole page being rewritten around it. */
@@ -671,7 +820,18 @@ interface PipelineState {
   confirmSecondaryKeywords: (messageId: string, picked: PickedSecondaryTerm[], other: string) => void;
   /** Ask both providers again about a different search term (two requests each). */
   researchSecondaryKeywords: (messageId: string, term: string) => void;
+  /** Answer a CRO buyer-language card: the ticked clusters (outcome) or terms (avoid), by name, plus
+   * typed words. */
+  confirmBuyerLanguage: (messageId: string, picked: string[], typed: string) => void;
+  /** Answer the Blog's primary keyword (and its supporting keywords) from the keyword card. */
+  confirmBlogKeywords: (messageId: string, primary: string, secondary: BlogKeywordOpportunity[], other: string) => void;
+  /** Search the keyword card again around another seed. */
+  researchBlogKeywords: (messageId: string, seed: string) => void;
+  /** Answer the Webinar's competitor sources with the pages read, plus anything the operator adds. */
+  confirmWebinarSources: (messageId: string, own: string) => void;
   retryServiceScan: (messageId: string) => void;
+  /** Ask for fresh buyer-language suggestions on an open card (a new set of outcome searches). */
+  regenerateBuyerLanguage: (messageId: string) => void;
   submitFreeform: (raw: string) => void;
   skipField: () => void;
   requestRefine: (messageId: string) => void;
@@ -698,6 +858,9 @@ interface PipelineState {
    * search result, or their own list; omitted, the whole search result is saved. */
   saveCompetitorStep: (messageId: string, approved?: CompetitorAnalysisResult) => Promise<void>;
   retryCompetitorStep: (messageId: string) => Promise<void>;
+  /** Run the competitor validation again (after an error, or on a listing that never had one). */
+  validateCompetitorStep: (messageId: string) => void;
+  togglePlayPick: (messageId: string, domain: string) => void;
   /** Re-read the page for a scrape that failed, while its field is still the one being asked. */
   retryPageScrape: (messageId: string) => Promise<void>;
   /** Run the competitor research the consent card offered. */
@@ -765,6 +928,9 @@ interface PipelineState {
   startAtStage: (assetId: string) => void;
   /** Re-read readiness for a gate that failed to load, or that a reopened chat left mid-load. */
   retryStageGate: (messageId: string) => Promise<void>;
+  /** Summarise a deliverable for the reader's Summary tab, unless it already has a summary of this
+   * exact text (or one is on its way). `force` asks again after an error. */
+  loadDocSummary: (messageId: string, force?: boolean) => Promise<void>;
   /** Open the paste box for one missing document. */
   provideDependency: (messageId: string, contextKey: string) => void;
   /** Close it again without supplying anything. */
@@ -801,6 +967,14 @@ interface PipelineState {
   declineFunnelBuild: (messageId: string) => void;
   /** Approve the built funnel into Deliverables and move on to the next stage. */
   saveFunnelBuild: (messageId: string) => void;
+  /** On to the next stage still to build (a "stopped" card whose stage is already approved). */
+  continueToNextStage: () => void;
+  /** Draft the ticked Pillar Page variants side by side. */
+  startPageVariants: (messageId: string, chosen: PageVariantId[]) => Promise<void>;
+  /** Measure the variant drafts again (after a Refine, or a failed comparison). */
+  remeasureVariants: (messageId: string) => Promise<void>;
+  /** Build the chosen variant with Manus, as a new draft beside the Claude one. */
+  buildVariantWithManus: (messageId: string) => Promise<void>;
   rebuildFunnelBuildItem: (messageId: string, key: string) => Promise<void>;
   /** Apply the operator's requested change to one built page or email, as exact edits only. */
   reviseFunnelBuildItem: (messageId: string, key: string, note: string) => Promise<boolean>;
@@ -809,6 +983,9 @@ interface PipelineState {
    * Context Store version would outlive its card. Deleting a refined draft also removes the note that
    * asked for it and reopens review on the draft it came from. */
   deleteGeneration: (messageId: string) => void;
+  /** Remove one of the operator's own chat bubbles from the transcript. The answer it gave stays
+   * with the stage: this tidies the chat, it does not un-answer a question. */
+  deleteUserMessage: (messageId: string) => void;
 }
 
 /** `IntakeFlow` with its asset collapsed to an id, which is how it is both persisted and parked —
@@ -977,6 +1154,10 @@ function repairInterruptedMessages(messages: PipelineMessage[]): PipelineMessage
       return { ...m, prepass, streaming: false, competitorError: INTERRUPTED_COMPETITOR };
     }
 
+    if (m.kind === "competitor" && m.competitorValidation?.status === "loading") {
+      return { ...m, prepass, competitorValidation: { status: "error" as const, error: "The check was still running when the chat was closed." } };
+    }
+
     // A check still running when the tab closed: the request is gone, so offer the retry.
     if (m.kind === "generation" && m.check?.status === "running") {
       return { ...m, prepass, check: { status: "error" as const, error: "The check was still running when the chat was closed." } };
@@ -1125,6 +1306,7 @@ function deriveResumeActivity(
     // else. Counted so a reopened chat does not report itself as mid-run.
     if (m.kind === "stage-stopped") return awaitingInput;
     if (m.kind === "stage-advisory" && m.advisory?.status === "pending") return awaitingInput;
+    if (m.kind === "page-variants" && m.pageVariants?.status === "choosing") return awaitingInput;
     if (m.kind === "question" && !m.answered && intake?.awaitingFieldId === m.field?.field_id) return awaitingInput;
     if (m.kind === "competitor" && m.savePhase !== "saved") return awaitingReview;
     if (m.kind === "generation" && !m.refineSubmitted && m.savePhase !== "saved") return awaitingReview;
@@ -1162,6 +1344,7 @@ export function selectNeedsResume(s: PipelineState): boolean {
     if (m.kind === "competitor") return m.savePhase !== "saved";
     if (m.kind === "generation") return !m.refineSubmitted && m.savePhase !== "saved";
     if (m.kind === "funnel-build") return funnelBuildAwaitsOperator(m);
+    if (m.kind === "page-variants") return m.pageVariants?.status === "choosing";
     return false;
   });
   return !actionable;
@@ -1328,6 +1511,21 @@ function liveMessage(state: PipelineState, messageId: string): PipelineMessage |
   const message = state.messages.find((m) => m.id === messageId);
   if (!message) return undefined;
   return messagesInCurrentTrack(state).some((candidate) => candidate.id === message.id) ? message : undefined;
+}
+
+/** Summary requests running in this tab, by message id. */
+const summariesInFlight = new Set<string>();
+
+/** The text a deliverable is summarised from: what the reader shows, before any appendix. */
+function summaryText(raw: string): string {
+  return upgradePlainOutline(stripPromptEchoes(raw));
+}
+
+/** A short fingerprint of a text, so a stored summary can tell it was made from this exact draft. */
+function hashText(text: string): string {
+  let h = 5381;
+  for (let i = 0; i < text.length; i++) h = ((h << 5) + h + text.charCodeAt(i)) | 0;
+  return `${text.length}:${(h >>> 0).toString(36)}`;
 }
 
 function patchMessage(
@@ -1511,6 +1709,9 @@ export function selectCanStop(s: PipelineState): boolean {
     return false;
   }
 
+  // Only when there is a stage to name. A leftover `activeStatus` with nothing in progress used to
+  // offer Stop anyway, naming whatever approved stage the cursor sat on.
+  if (!selectStoppableStage(s)) return false;
   if (s.intake || s.subStep) return true;
   if (s.activeStatus !== null) return true;
   return own.some((m) => !m.superseded && m.kind === "generation" && m.savePhase !== "saved");
@@ -1555,11 +1756,23 @@ export function selectDeleteGeneration(s: PipelineState, messageId: string): { o
 export function selectStoppableStage(s: PipelineState): { assetId: string; label: string } | undefined {
   const own = messagesInCurrentTrack(s);
   const streaming = own.find((m) => m.streaming && m.assetId);
+  // A gated competitor search under review is its own stage's work: Offers' search is Offers, not
+  // the stage before it that the cursor may still name.
+  const pendingCompetitor = own.filter((m) => !m.superseded && m.kind === "competitor" && m.savePhase !== "saved").pop();
+  const competitorOwner = pendingCompetitor?.assetId
+    ? stagesFor(s.phase).find((st) => competitorStageFor(s.phase, st.asset.asset_id)?.assetId === pendingCompetitor.assetId)
+    : undefined;
+  const cursorStage = stageAt(s.phase, Math.min(s.currentIndex, totalStagesFor(s.phase) - 1)).asset.asset_id;
   const assetId =
     streaming?.assetId ??
     s.intake?.asset.asset_id ??
     own.filter((m) => !m.superseded && m.kind === "generation" && m.savePhase !== "saved").pop()?.assetId ??
-    stageAt(s.phase, Math.min(s.currentIndex, totalStagesFor(s.phase) - 1)).asset.asset_id;
+    competitorOwner?.asset.asset_id ??
+    // The cursor's stage only when it is not already approved: stopping a finished stage abandons
+    // nothing and leaves a "Start it again" card for a stage that is done.
+    (approvedAssetIds(s.messages, s.phase, s.phase === "phase2" ? s.activePhase2TrackId : null).has(cursorStage)
+      ? undefined
+      : cursorStage);
   if (!assetId) return undefined;
   // Phase 2's opening sub-service question belongs to the run, not to a stage — there is no asset
   // to abandon there, and the stage list has no entry to name.
@@ -1732,6 +1945,232 @@ function startCreepingProgress(get: () => PipelineState, set: (partial: Partial<
  * `append` is for a continuation: the draft is already in `text` and the stream adds to the end of
  * it, rather than the default of replacing it.
  */
+const PILLAR_PAGE_ASSET_ID = "pillar_page";
+
+/** Where a Pillar Page variant finds competitor pages: this stage's search, else CRO's (Phase 2). */
+const PAGE_VARIANT_LISTING_KEYS = ["competitor_analysis_seo_pillar_page", "competitor_analysis_cro"];
+
+function offerPageVariants(
+  get: () => PipelineState,
+  set: (partial: Partial<PipelineState>) => void,
+  answers: Record<string, string>,
+): void {
+  const context = get().context;
+  const hasListing = PAGE_VARIANT_LISTING_KEYS.some((key) => Boolean(context[key]?.text?.trim()));
+  push(get, set, {
+    role: "assistant",
+    kind: "page-variants",
+    assetId: PILLAR_PAGE_ASSET_ID,
+    pageVariants: { status: "choosing", answers, options: variantOptions(answers, hasListing), chosen: [], drafts: {} },
+  });
+  set({ activeStatus: "hitl", navStatus: "Awaiting Input" });
+}
+
+/** Draft the chosen variants side by side, then compare them.
+ *
+ * One rule shapes the order: in Phase 1 the Pillar Page's competitor search runs inside the stream
+ * when its field is empty, so four streams started at once would pay for four searches. The first
+ * variant (the competitor one when chosen, since it needs the listing) runs alone until its search
+ * reports, and the rest start with the listing already filled in, so they skip it. */
+async function startPageVariants(
+  get: () => PipelineState,
+  set: (partial: Partial<PipelineState>) => void,
+  messageId: string,
+  chosen: PageVariantId[],
+): Promise<void> {
+  const card = liveMessage(get(), messageId);
+  const picker = card?.pageVariants;
+  if (!card || !picker || picker.status !== "choosing" || !chosen.length) return;
+  const order = [...chosen].sort((a, b) => Number(b === "competitor") - Number(a === "competitor"));
+  let answers = picker.answers;
+  const drafts: Partial<Record<PageVariantId, string>> = {};
+  patchMessage(get, set, messageId, { pageVariants: { ...picker, status: "building", chosen: order, drafts } });
+
+  const startOne = (variant: PageVariantId, withAnswers: Record<string, string>, onSearched?: (e: PrepassEvent) => void) => {
+    const draft = push(get, set, {
+      role: "assistant",
+      kind: "generation",
+      assetId: PILLAR_PAGE_ASSET_ID,
+      text: "",
+      streaming: true,
+      savePhase: "idle",
+      answers: withAnswers,
+      variant,
+    });
+    drafts[variant] = draft.id;
+    const live = liveMessage(get(), messageId)?.pageVariants;
+    if (live) patchMessage(get, set, messageId, { pageVariants: { ...live, drafts: { ...drafts } } });
+    const base = prepassOptions(get, set, draft.id, PILLAR_PAGE_ASSET_ID);
+    return streamIntoMessage(get, set, draft.id, (onChunk, signal, hooks) =>
+      streamGenerateStage(PILLAR_PAGE_ASSET_ID, withAnswers, onChunk, {
+        ...base,
+        onPrepass: (event) => {
+          base.onPrepass(event);
+          onSearched?.(event);
+        },
+        ...hooks,
+        variant,
+        signal,
+      }),
+    );
+  };
+
+  const [first, ...rest] = order;
+  const paired = PREPASS_BY_MAIN_ASSET_BY_PHASE[get().phase][PILLAR_PAGE_ASSET_ID];
+  const searchField = "competitor_analysis_pillar_page";
+  const searches = Boolean(paired) && !answers[searchField]?.trim() && rest.length > 0;
+  let streams: Promise<void>[];
+  if (searches) {
+    let searched: (event: PrepassEvent | null) => void = () => {};
+    const listing = new Promise<PrepassEvent | null>((resolve) => (searched = resolve));
+    const firstStream = startOne(first, answers, (event) => {
+      if (event.asset_id === paired?.assetId) searched(event);
+    }).finally(() => searched(null));
+    const event = await listing;
+    if (event && !event.skipped && event.content) answers = { ...answers, [event.target_field_id]: event.content };
+    streams = [firstStream, ...rest.map((variant) => startOne(variant, answers))];
+  } else {
+    streams = order.map((variant) => startOne(variant, answers));
+  }
+  await Promise.all(streams);
+
+  const done = liveMessage(get(), messageId)?.pageVariants;
+  if (done) patchMessage(get, set, messageId, { pageVariants: { ...done, status: "built" } });
+  // Several streams each set the run's status as they finished; the stage now awaits review.
+  set({ activeStatus: "hitl", progress: 100, navStatus: "Awaiting Review" });
+  void maybeCompareVariants(get, set);
+}
+
+/** The current draft of each Pillar Page variant in this leg: the newest card per variant that is
+ * still on offer (a Refine supersedes the card it refined). */
+function currentVariantDrafts(state: PipelineState): PipelineMessage[] {
+  const latest = new Map<PageVariantId, PipelineMessage>();
+  for (const m of messagesInCurrentTrack(state)) {
+    if (m.kind === "generation" && m.assetId === PILLAR_PAGE_ASSET_ID && m.variant && !m.superseded) latest.set(m.variant, m);
+  }
+  return [...latest.values()];
+}
+
+/** A variant draft is final once it is written, any fix to it has landed and its business check has
+ * finished. A draft still streaming, being fixed or being checked is not. */
+function variantDraftFinal(m: PipelineMessage): boolean {
+  if (m.streaming || isFixing(m) || m.check?.status === "running") return false;
+  return Boolean(m.text?.trim()) || Boolean(m.generationError);
+}
+
+/** Open the comparison once every variant is final, or re-measure it when a draft has changed since.
+ *
+ * Called whenever a variant stream, check or fix finishes. Nothing happens while any variant is still
+ * in progress, so the card never shows numbers for a half-written or about-to-be-fixed draft. A card
+ * already measured on exactly these texts is left alone. */
+async function maybeCompareVariants(get: () => PipelineState, set: (partial: Partial<PipelineState>) => void): Promise<void> {
+  const state = get();
+  const own = messagesInCurrentTrack(state);
+  const picker = [...own].reverse().find((m) => m.kind === "page-variants" && !m.superseded)?.pageVariants;
+  if (!picker || picker.status !== "built") return;
+  const drafts = currentVariantDrafts(state);
+  if (!drafts.length || !drafts.every(variantDraftFinal)) return;
+  const ready = drafts.filter((m) => m.text?.trim() && !m.generationError);
+  if (ready.length < 2) return;
+  const ids = ready.map((m) => m.id);
+  const measuredOn = ready.map((m) => `${m.id}:${hashText(m.text ?? "")}`).join("|");
+  const card = [...own].reverse().find((m) => m.kind === "variant-compare" && !m.superseded);
+  if (card?.variantCompare) {
+    if (card.variantCompare.measuredOn === measuredOn || card.variantCompare.status === "loading") return;
+    patchMessage(get, set, card.id, { variantCompare: { ...card.variantCompare, messageIds: ids } });
+    await measureVariantComparison(get, set, card.id);
+    return;
+  }
+  const created = push(get, set, {
+    role: "assistant",
+    kind: "variant-compare",
+    assetId: PILLAR_PAGE_ASSET_ID,
+    variantCompare: { status: "loading", messageIds: ids },
+  });
+  await measureVariantComparison(get, set, created.id);
+}
+
+async function measureVariantComparison(
+  get: () => PipelineState,
+  set: (partial: Partial<PipelineState>) => void,
+  cardId: string,
+): Promise<void> {
+  const state = get().messages.find((m) => m.id === cardId)?.variantCompare;
+  if (!state) return;
+  patchMessage(get, set, cardId, { variantCompare: { ...state, status: "loading", error: undefined } });
+  const drafts = state.messageIds
+    .map((id) => get().messages.find((m) => m.id === id))
+    .filter((m): m is PipelineMessage => Boolean(m?.text && m.variant));
+  const measures = drafts.map((m) => m.pageVariant).filter((m): m is PageVariantMeasure => Boolean(m));
+  const sheet = measures.find((m) => m.beat_sheet)?.beat_sheet ?? null;
+  // The live page as the reference variant read it. Without one (that variant was not run, or the
+  // site walled the read off) the server reads it for the comparison itself.
+  const reference = measures.find((m) => m.reference && !m.reference.error)?.reference ?? null;
+  const measuredOn = drafts.map((m) => `${m.id}:${hashText(m.text ?? "")}`).join("|");
+  const keywords = (drafts.find((m) => m.keywordTargets)?.keywordTargets?.groups ?? []).flatMap((g) => [
+    g.primary.keyword,
+    ...g.secondary.slice(0, 2).map((k) => k.keyword),
+  ]);
+  try {
+    const { pages, current } = await comparePageVariants(
+      drafts.map((m) => ({ variant: m.variant as string, label: VARIANT_LABEL[m.variant as PageVariantId], text: m.text ?? "" })),
+      { topics: beatSheetTopics(sheet), keywords: keywords.slice(0, 20), current: reference, answers: drafts[0]?.answers ?? {} },
+    );
+    const latest = get().messages.find((m) => m.id === cardId)?.variantCompare ?? state;
+    patchMessage(get, set, cardId, {
+      variantCompare: {
+        ...latest,
+        status: "done",
+        pages,
+        current,
+        competitorMedianWords: sheet?.median_words ?? null,
+        measuredOn,
+      },
+    });
+  } catch (err) {
+    patchMessage(get, set, cardId, {
+      variantCompare: { ...state, status: "error", error: err instanceof Error ? err.message : String(err) },
+    });
+  }
+}
+
+/** Approving one variant files that draft as the run's pillar page; every other finished sibling
+ * stays in Deliverables as an alternate. Only the approved one is written to the Context Store
+ * (`saveStage` already did that). Alternates are marked saved so the Deliverables tab keeps them,
+ * and so the stage walk does not wait on them as open drafts. */
+function keepSiblingVariants(get: () => PipelineState, set: (partial: Partial<PipelineState>) => void, approved: PipelineMessage) {
+  if (!approved.variant) return;
+  const phase = get().phase;
+  const trackId = approved.trackId ?? null;
+  set({
+    messages: get().messages.map((m) => {
+      if (
+        m.id === approved.id ||
+        m.kind !== "generation" ||
+        m.assetId !== approved.assetId ||
+        !m.variant ||
+        m.savePhase === "saved" ||
+        (m.phase ?? phase) !== phase ||
+        (m.trackId ?? null) !== trackId
+      ) {
+        return m;
+      }
+      // A failed or empty draft is not a deliverable — leave it as history without saving.
+      if (!m.text?.trim() || m.generationError) {
+        return { ...m, superseded: true, variantNotChosen: true, refining: false };
+      }
+      return {
+        ...m,
+        savePhase: "saved" as const,
+        variantAlternate: true,
+        refining: false,
+        interrupted: false,
+        truncated: false,
+      };
+    }),
+  });
+}
+
 async function streamIntoMessage(
   get: () => PipelineState,
   set: (partial: Partial<PipelineState>) => void,
@@ -1768,6 +2207,8 @@ async function streamIntoMessage(
       patchMessage(get, set, messageId, { imageNotes: merged });
     },
     onRevisionEdits: (report) => patchMessage(get, set, messageId, { revisionReport: report }),
+    onContextRetrieval: (report) => patchMessage(get, set, messageId, { contextRetrieval: report }),
+    onKeywordTargets: (targets) => patchMessage(get, set, messageId, { keywordTargets: targets }),
     onManus: (event) => {
       const current = get().messages.find((m) => m.id === messageId)?.manus;
       // Progress events carry no fallback message; keep the task link once one has arrived.
@@ -1775,11 +2216,19 @@ async function streamIntoMessage(
         manus: { ...event, task_url: event.task_url ?? current?.task_url, brief: event.brief || current?.brief },
       });
     },
+    onPageVariant: (event) => patchMessage(get, set, messageId, { pageVariant: event }),
   };
   // A fresh generation or retry starts from no assembly and no image notes; a continuation keeps
   // what the first part of the stream reported.
   if (!opts.append)
-    patchMessage(get, set, messageId, { replica: undefined, imageNotes: undefined, revisionReport: undefined, manus: undefined });
+    patchMessage(get, set, messageId, {
+      replica: undefined,
+      imageNotes: undefined,
+      revisionReport: undefined,
+      manus: undefined,
+      contextRetrieval: undefined,
+      keywordTargets: undefined,
+    });
 
   try {
     await run(
@@ -1875,6 +2324,8 @@ async function runAssetCheck(get: () => PipelineState, set: (partial: Partial<Pi
     patchMessage(get, set, messageId, {
       check: { status: "error", error: err instanceof Error ? err.message : String(err) },
     });
+  } finally {
+    if (message.variant) void maybeCompareVariants(get, set);
   }
 }
 
@@ -1882,6 +2333,8 @@ async function runAssetCheck(get: () => PipelineState, set: (partial: Partial<Pi
  * "was N" and the re-check sends it to the judge — one rule, so the two cannot disagree about
  * which draft came before. */
 export function earlierCheckReport(messages: PipelineMessage[], message: PipelineMessage): AssetCheckReport | undefined {
+  // Fixed in place: the report before the fix is on the card itself.
+  if (message.priorCheck) return message.priorCheck;
   const at = messages.findIndex((m) => m.id === message.id);
   for (let i = at - 1; i >= 0; i--) {
     const m = messages[i];
@@ -1890,6 +2343,102 @@ export function earlierCheckReport(messages: PipelineMessage[], message: Pipelin
     return m.refineSubmitted ? m.check?.report : undefined;
   }
   return undefined;
+}
+
+/** A "Fix with Refine" is running on this card right now. A `fixing` flag saved by a closed tab is
+ * not: its request died with the tab, so the card is an ordinary draft again. */
+export function isFixing(message: PipelineMessage): boolean {
+  return Boolean(message.fixing) && generationRequests.has(message.id);
+}
+
+/** "Fix with Refine", applied to the card itself rather than to a new one.
+ *
+ * The operator asked for these findings fixed on this draft, so the draft is edited where it is: no
+ * note is posted to the transcript and no second card appears. The current text stays on screen
+ * while the revision streams into a buffer, and replaces it only when the stream finishes cleanly.
+ * A revision that fails or is cut off leaves the draft exactly as it was, with a note. The report
+ * the draft had is kept as `priorCheck`, so the re-check scores against it and the panel's "was N"
+ * still reads. */
+async function fixInPlace(
+  get: () => PipelineState,
+  set: (partial: Partial<PipelineState>) => void,
+  messageId: string,
+  note: string,
+): Promise<void> {
+  const message = liveMessage(get(), messageId);
+  if (!message?.assetId || !message.text || generationRequests.has(messageId)) return;
+  const assetId = message.assetId;
+  const previousDraft = message.text;
+  const sourceCopy = message.answers?.improved_page_content || undefined;
+  const controller = new AbortController();
+  generationRequests.set(messageId, controller);
+  patchMessage(get, set, messageId, {
+    fixing: true,
+    refining: false,
+    fixNote: undefined,
+    priorCheck: message.check?.report ?? message.priorCheck,
+  });
+  set({ activeStatus: "running", navStatus: "Generating…" });
+  let buffer = "";
+  let truncated = false;
+  try {
+    await streamRefineStage(
+      assetId,
+      previousDraft,
+      note,
+      (chunk) => {
+        buffer += chunk;
+      },
+      controller.signal,
+      get().phase,
+      attribution(get),
+      { clientProfile: get().clientProfile },
+      {
+        onDone: (completion) => {
+          truncated = completion.truncated;
+        },
+        onRevisionEdits: (report) => patchMessage(get, set, messageId, { revisionReport: report }),
+        sourceCopy,
+        variant: message.variant,
+      },
+    );
+    const fixed = stripPromptEchoes(buffer);
+    const report = liveMessage(get(), messageId)?.revisionReport;
+    if (!truncated && fixed.trim() && report && report.applied === 0) {
+      // Every edit was refused (or none was proposed): the draft is unchanged, so re-scoring it would
+      // only show the judge's run-to-run noise as if the fix had made it worse.
+      const why = report.rejected[0]?.[1] ?? report.skipped[0]?.[1] ?? "";
+      patchMessage(get, set, messageId, {
+        fixing: false,
+        fixNote: `None of the fixes could be applied, so the draft is unchanged and was not re-checked.${why ? ` ${why}` : ""}`,
+      });
+      return;
+    }
+    if (truncated || !fixed.trim()) {
+      patchMessage(get, set, messageId, {
+        fixing: false,
+        fixNote: truncated
+          ? "The fix was cut off before it finished, so the draft is unchanged. Try Fix with Refine again."
+          : "The fix came back empty, so the draft is unchanged.",
+      });
+    } else {
+      patchMessage(get, set, messageId, { fixing: false, text: fixed, check: undefined, docSummary: undefined, fixedAt: Date.now() });
+      void runAssetCheck(get, set, messageId);
+    }
+  } catch (err) {
+    if (controller.signal.aborted) {
+      patchMessage(get, set, messageId, { fixing: false });
+      return;
+    }
+    patchMessage(get, set, messageId, {
+      fixing: false,
+      fixNote: `The fix could not be applied, so the draft is unchanged: ${err instanceof Error ? err.message : String(err)}`,
+    });
+  } finally {
+    if (generationRequests.get(messageId) === controller) generationRequests.delete(messageId);
+    set({ activeStatus: "hitl", progress: 100, navStatus: "Awaiting Review" });
+    schedulePersist();
+  }
 }
 
 /** The Refine note for the findings the operator chose to fix: each one quoted, with why and how. */
@@ -1946,13 +2495,51 @@ interface StreamHooks {
   onRetry: (attempt: number, of: number) => void;
   onReplica: (event: ReplicaStreamEvent) => void;
   onImageNotes: (notes: string[]) => void;
+  onContextRetrieval: (report: ContextRetrievalReport) => void;
+  onKeywordTargets: (targets: KeywordTargets) => void;
   onRevisionEdits: (report: RevisionEditReport) => void;
   onManus: (event: ManusBuildEvent) => void;
+  onPageVariant: (event: PageVariantMeasure) => void;
 }
 
 /** Who to bill the next API call to. Read at call time rather than closed over, because a chat's
  * session row and its run are both created lazily — a call made ten seconds later may be
  * attributable when this one was not. */
+/** Score a competitor listing for this client, on its card. One DataForSEO request per competitor
+ * plus one judge call, so it runs once per listing found, never for a stored listing reopened. */
+async function loadCompetitorValidation(
+  get: () => PipelineState,
+  set: (partial: Partial<PipelineState>) => void,
+  messageId: string,
+) {
+  const message = get().messages.find((m) => m.id === messageId);
+  const listing = message?.competitor;
+  if (!message?.assetId || !listing?.competitors?.length) return;
+  patchMessage(get, set, messageId, { competitorValidation: { status: "loading" } });
+  const profile = get().clientProfile;
+  const phase = get().phase;
+  try {
+    const report = await validateCompetitors(message.assetId, {
+      run_id: get().runId,
+      phase,
+      chat_session_id: get().sessionId,
+      target_url: listing.target_url || String(profile.website_url ?? ""),
+      location: listing.location || String(profile.region ?? ""),
+      service: listing.service || (phase === "phase2" ? String(profile[SUB_SERVICE_FACT] ?? "") : serviceScanFocus(get())) || "",
+      client_profile: Object.fromEntries(Object.entries(profile).map(([k, v]) => [k, String(v ?? "")])),
+      competitors: listing.competitors,
+    });
+    // A re-run replaced the listing meanwhile: this report scores competitors no longer on the card.
+    if (get().messages.find((m) => m.id === messageId)?.competitor !== listing) return;
+    patchMessage(get, set, messageId, { competitorValidation: { status: "ready", report, picks: defaultPicks(report) } });
+  } catch (err) {
+    if (get().messages.find((m) => m.id === messageId)?.competitor !== listing) return;
+    patchMessage(get, set, messageId, {
+      competitorValidation: { status: "error", error: err instanceof Error ? err.message : String(err) },
+    });
+  }
+}
+
 function attribution(get: () => PipelineState): { chatSessionId: string | null; runId: string | null } {
   const s = get();
   return { chatSessionId: s.sessionId, runId: s.runId };
@@ -1993,7 +2580,8 @@ function prepassOptions(
       // is not the competitor prepass the chip reports on — so it is recorded for replay and
       // nothing else. Overwriting `prepass` with it would relabel the chip "Competitor Analysis"
       // over a social fetch.
-      if (event.asset_id === "social_post_data") {
+      // The DataForSEO keyword fetch likewise.
+      if (event.asset_id === "social_post_data" || event.asset_id === KEYWORD_DATA_PREPASS_ID) {
         patchMessage(get, set, messageId, { prefilled });
         return;
       }
@@ -2114,6 +2702,12 @@ async function runStage(
 ): Promise<void> {
   const stage = stagesFor(get().phase)[index];
   set({ currentIndex: index });
+
+  // The Pillar Page is drafted as several variants and one is approved: ask which first.
+  if (stage.asset.asset_id === PILLAR_PAGE_ASSET_ID) {
+    offerPageVariants(get, set, answers);
+    return;
+  }
 
   const message = push(get, set, {
     role: "assistant",
@@ -2236,7 +2830,7 @@ const KEYWORD_PREPASS_AFTER: Partial<Record<PipelinePhase, string>> = { phase1: 
 
 /** Build this run's keyword cluster report, if it has not already got a current one.
  *
- * Fire-and-forget by design. Failure is announced, not raised: without a keyword report the
+ * Fire-and-forget by design. Failure is logged, not announced or raised: without a keyword report the
  * headline gates still work — they fall back to framework-only grounding and say so on the card —
  * so a keyword provider outage costs evidence, not the run.
  */
@@ -2248,26 +2842,13 @@ async function runKeywordPrepass(
   const phase = get().phase;
   if (!runId) return;
 
-  // The Ahrefs chip runs while the request is out. It finishes with the count only when Ahrefs
-  // actually answered; a skipped run or the stub provider clears it without claiming anything.
-  const ui = useUiStore.getState();
-  const activity = ui.startAhrefsActivity("Mapping search demand…");
   try {
     const result = await buildRunKeywords(runId, get().clientProfile, phase, {
       chatSessionId: get().sessionId,
     });
-    if (result.status === "skipped" || result.provider !== "ahrefs") ui.clearAhrefsActivity(activity);
     if (result.status === "skipped") return; // no service anchored yet — nothing to say
 
     const clusters = result.clusters.length;
-    if (result.provider === "ahrefs") {
-      ui.finishAhrefsActivity(activity, {
-        label: result.status === "reused" ? `Search demand for ${result.service} (already measured)` : `Search demand for ${result.service}`,
-        count: result.total_keywords,
-        unit: result.total_keywords === 1 ? "keyword" : "keywords",
-        extra: `${clusters} ${clusters === 1 ? "cluster" : "clusters"}`,
-      });
-    }
     push(get, set, {
       role: "assistant",
       kind: "text",
@@ -2278,19 +2859,9 @@ async function runKeywordPrepass(
       keywordReport: result,
     });
   } catch (err) {
-    ui.clearAhrefsActivity(activity);
-    const reason = err instanceof Error ? err.message : String(err);
-    push(get, set, {
-      role: "assistant",
-      kind: "text",
-      text:
-        "Couldn't map search demand for this run — topic suggestions will still work, but they " +
-        `won't carry search volumes. (${reason})`,
-    });
-    useUiStore.getState().notifyProvider({
-      title: "Ahrefs keyword data unavailable",
-      detail: `${reason} Topic suggestions carry on without search volumes.`,
-    });
+    // Not posted to the transcript: the topic cards already say when a suggestion carries no
+    // search volume, and a provider error in the chat reads as the run failing when it has not.
+    console.warn("Keyword prepass failed; topic suggestions carry on without search volumes.", err);
   }
 }
 
@@ -2747,22 +3318,8 @@ async function loadPlanDiscovery(get: () => PipelineState, set: (partial: Partia
     });
     return;
   }
-  const ui = useUiStore.getState();
-  const activity = ui.startAhrefsActivity(`Sizing ${plan.primaryService} sub-services…`);
   try {
     const result = await discoverSubServices(plan.primaryService, { url: scan.url, region: plan.region, ...attribution(get) });
-    // Finished with a count only when Ahrefs measured something; otherwise the chip just leaves.
-    const measured = result.candidates.flatMap((c) => c.keywords).filter((k) => k.volume !== null).length;
-    if (result.volume_source === "ahrefs") {
-      ui.finishAhrefsActivity(activity, {
-        label: `${plan.primaryService} sub-services${result.location ? `, ${result.location}` : ""}`,
-        count: measured,
-        unit: measured === 1 ? "keyword measured" : "keywords measured",
-        extra: `${result.candidates.length} sub-services`,
-      });
-    } else {
-      ui.clearAhrefsActivity(activity);
-    }
     const current = get().messages.find((m) => m.id === messageId)?.serviceScan;
     if (!current?.plan || current.status !== "loading") return;
     patchMessage(get, set, messageId, {
@@ -2783,12 +3340,135 @@ async function loadPlanDiscovery(get: () => PipelineState, set: (partial: Partia
         },
       },
     });
-    // The list stands without volumes, but the operator has to know why the numbers are missing.
-    if (result.volume_error) {
-      useUiStore.getState().notifyProvider({ title: "Ahrefs search volumes unavailable", detail: result.volume_error });
-    }
   } catch (err) {
-    ui.clearAhrefsActivity(activity);
+    const current = get().messages.find((m) => m.id === messageId)?.serviceScan;
+    if (!current) return;
+    patchMessage(get, set, messageId, {
+      serviceScan: { ...current, status: "error", error: err instanceof Error ? err.message : String(err) },
+    });
+  }
+}
+
+/** Whether the walk has reached the Blog's primary keyword. */
+function isBlogKeywordField(asset: AssetDefinition, field: FieldDef): boolean {
+  return asset.asset_id === BLOG_KEYWORD_OPTION.assetId && field.field_id === BLOG_KEYWORD_OPTION.fieldId;
+}
+
+/** The blog topic's own keyword: the search seed, and the "current" keyword the card compares with.
+ * The topic gate suggests headlines, and each carries the keyword it was built on; a typed topic is
+ * used only when it is short enough to be a search term. Falls back to the run's service. */
+function blogKeywordSeed(state: PipelineState, answers: Record<string, unknown>): string {
+  const gate = [...state.messages]
+    .reverse()
+    .find(
+      (m) =>
+        m.kind === "headline-choice" &&
+        m.assetId === BLOG_KEYWORD_OPTION.assetId &&
+        m.field?.field_id === BLOG_KEYWORD_OPTION.topicFieldId &&
+        m.headlines?.status === "chosen",
+    )?.headlines;
+  if (gate && !gate.ownHeadline) {
+    const chosen = (gate.candidates ?? []).find((c) => (gate.chosenIds ?? []).includes(c.id));
+    const keyword = chosen?.primary_keyword?.trim();
+    if (keyword) return keyword;
+  }
+  const typed = String(answers[BLOG_KEYWORD_OPTION.topicFieldId] ?? "")
+    .split("\n")
+    .map((l) => l.replace(/^\s*\d+[.)]\s*/, "").trim())
+    .find(Boolean);
+  if (typed && typed.split(/\s+/).length <= 5) return typed;
+  return (serviceScanFocus(state) || "").trim();
+}
+
+/** The keyword card, opened loading. With no seed there is nothing to compare, so the plain question
+ * is asked instead. Returns whether a card was opened. */
+function openBlogKeywords(
+  get: () => PipelineState,
+  set: (partial: Partial<PipelineState>) => void,
+  asset: AssetDefinition,
+  field: FieldDef,
+  answers: Record<string, unknown>,
+): boolean {
+  const seed = blogKeywordSeed(get(), answers);
+  if (!seed) return false;
+  const region = typeof get().clientProfile.region === "string" ? get().clientProfile.region.trim() : "";
+  const card = push(get, set, {
+    role: "assistant",
+    kind: "service-choice",
+    assetId: asset.asset_id,
+    field,
+    serviceScan: {
+      status: "loading",
+      url: null,
+      services: [],
+      preselected: [],
+      notes: [],
+      blog: { seed, current: seed, region, result: null },
+    },
+  });
+  void loadBlogKeywords(get, set, card.id);
+  return true;
+}
+
+async function loadBlogKeywords(get: () => PipelineState, set: (partial: Partial<PipelineState>) => void, messageId: string) {
+  const scan = get().messages.find((m) => m.id === messageId)?.serviceScan;
+  const blog = scan?.blog;
+  if (!scan || !blog) return;
+  try {
+    const result = await fetchBlogKeywords({
+      seed: blog.seed,
+      region: blog.region,
+      current_keyword: blog.current,
+      run_id: get().runId,
+      website_url: String(get().clientProfile.website_url ?? ""),
+    });
+    const current = get().messages.find((m) => m.id === messageId)?.serviceScan;
+    if (!current?.blog || current.status !== "loading") return;
+    patchMessage(get, set, messageId, { serviceScan: { ...current, status: "ready", blog: { ...current.blog, result } } });
+  } catch (err) {
+    const current = get().messages.find((m) => m.id === messageId)?.serviceScan;
+    if (!current) return;
+    patchMessage(get, set, messageId, {
+      serviceScan: { ...current, status: "error", error: err instanceof Error ? err.message : String(err) },
+    });
+  }
+}
+
+/** The Webinar's sources card, opened loading, when the competitor research produced a listing to
+ * read pages from. A declined or empty research asks the plain question. Returns whether it opened. */
+function openWebinarSources(
+  get: () => PipelineState,
+  set: (partial: Partial<PipelineState>) => void,
+  asset: AssetDefinition,
+  field: FieldDef,
+  answers: Record<string, unknown>,
+): boolean {
+  if (asset.asset_id !== WEBINAR_SOURCES_OPTION.assetId || field.field_id !== WEBINAR_SOURCES_OPTION.fieldId) return false;
+  const answered = String(answers[WEBINAR_SOURCES_OPTION.listingFieldId] ?? "").trim();
+  const listing = answered.startsWith("[[context:")
+    ? get().context[WEBINAR_SOURCES_OPTION.listingFieldId]?.text?.trim() ?? ""
+    : answered;
+  if (!listing || /^n\/?a$/i.test(listing)) return false;
+  const card = push(get, set, {
+    role: "assistant",
+    kind: "service-choice",
+    assetId: asset.asset_id,
+    field,
+    serviceScan: { status: "loading", url: null, services: [], preselected: [], notes: [], webinar: { listing, result: null } },
+  });
+  void loadWebinarSources(get, set, card.id);
+  return true;
+}
+
+async function loadWebinarSources(get: () => PipelineState, set: (partial: Partial<PipelineState>) => void, messageId: string) {
+  const scan = get().messages.find((m) => m.id === messageId)?.serviceScan;
+  if (!scan?.webinar) return;
+  try {
+    const result = await fetchWebinarSources(scan.webinar.listing);
+    const current = get().messages.find((m) => m.id === messageId)?.serviceScan;
+    if (!current?.webinar || current.status !== "loading") return;
+    patchMessage(get, set, messageId, { serviceScan: { ...current, status: "ready", webinar: { ...current.webinar, result } } });
+  } catch (err) {
     const current = get().messages.find((m) => m.id === messageId)?.serviceScan;
     if (!current) return;
     patchMessage(get, set, messageId, {
@@ -2829,6 +3509,98 @@ function headTermSeed(state: PipelineState, asset: AssetDefinition, answer: unkn
   return first.length > 80 ? "" : first;
 }
 
+/** The services this chat session is about, for searching around: the CRO answer for the service,
+ * the run's service (Phase 1's headline service, Phase 2's sub-service) and the profile's target
+ * service. Deduplicated, in that order. */
+function sessionServices(state: PipelineState, answers: Record<string, unknown>): string[] {
+  const profile = state.clientProfile;
+  const candidates = [
+    answers.target_service_or_sub_service,
+    state.phase === "phase2" ? profile.sub_service : undefined,
+    profile.target_service,
+    state.phase === "phase1" ? profile.industry : undefined,
+  ];
+  const out: string[] = [];
+  for (const value of candidates) {
+    if (typeof value !== "string") continue;
+    const name = value.replace(/\s+/g, " ").trim();
+    if (!name || name.startsWith("[[") || name.length > 80) continue;
+    if (!out.some((s) => s.toLowerCase() === name.toLowerCase())) out.push(name);
+  }
+  return out;
+}
+
+/** CRO's buyer-language card, opened loading, when the walk reaches either of its fields. Opened
+ * whatever the session knows: with no service or region the server says what is missing, and the
+ * card still takes typed words. Returns whether a card was opened. */
+function openBuyerLanguage(
+  get: () => PipelineState,
+  set: (partial: Partial<PipelineState>) => void,
+  asset: AssetDefinition,
+  field: FieldDef,
+  answers: Record<string, unknown>,
+): boolean {
+  if (asset.asset_id !== BUYER_LANGUAGE_OPTION.assetId) return false;
+  const mode =
+    field.field_id === BUYER_LANGUAGE_OPTION.outcomeFieldId
+      ? "outcome"
+      : field.field_id === BUYER_LANGUAGE_OPTION.avoidFieldId
+        ? "avoid"
+        : null;
+  if (!mode) return false;
+  const profile = get().clientProfile;
+  const card = push(get, set, {
+    role: "assistant",
+    kind: "service-choice",
+    assetId: asset.asset_id,
+    field,
+    serviceScan: {
+      status: "loading",
+      url: null,
+      services: [],
+      preselected: [],
+      notes: [],
+      buyerLanguage: {
+        mode,
+        services: sessionServices(get(), answers),
+        landingUrl: pageUrlFromAnswer(answers.existing_page_url) ?? pageUrlFromAnswer(profile.website_url) ?? "",
+        region: (profile.region ?? "").trim(),
+        industry: (profile[INDUSTRY_LABEL_FACT] ?? "").trim(),
+        result: null,
+      },
+    },
+  });
+  void loadBuyerLanguage(get, set, card.id);
+  return true;
+}
+
+async function loadBuyerLanguage(get: () => PipelineState, set: (partial: Partial<PipelineState>) => void, messageId: string) {
+  const scan = get().messages.find((m) => m.id === messageId)?.serviceScan;
+  const buyer = scan?.buyerLanguage;
+  if (!scan || !buyer) return;
+  try {
+    const result = await fetchBuyerLanguage({
+      mode: buyer.mode,
+      services: buyer.services,
+      region: buyer.region,
+      landing_url: buyer.landingUrl,
+      industry: buyer.industry,
+      run_id: get().runId,
+      phase: get().phase,
+      chat_session_id: get().sessionId,
+    });
+    const current = get().messages.find((m) => m.id === messageId)?.serviceScan;
+    if (!current?.buyerLanguage || current.status !== "loading") return;
+    patchMessage(get, set, messageId, { serviceScan: { ...current, status: "ready", buyerLanguage: { ...current.buyerLanguage, result } } });
+  } catch (err) {
+    const current = get().messages.find((m) => m.id === messageId)?.serviceScan;
+    if (!current) return;
+    patchMessage(get, set, messageId, {
+      serviceScan: { ...current, status: "error", error: err instanceof Error ? err.message : String(err) },
+    });
+  }
+}
+
 /** The secondary-terms card, opened loading. With no usable head term there is nothing to seed
  * either provider, so the plain question is asked instead. Returns whether a card was opened. */
 function openSecondaryKeywords(
@@ -2863,33 +3635,12 @@ async function loadSecondaryKeywords(get: () => PipelineState, set: (partial: Pa
   const scan = get().messages.find((m) => m.id === messageId)?.serviceScan;
   const secondary = scan?.secondary;
   if (!scan || !secondary) return;
-  const ui = useUiStore.getState();
-  const activity = ui.startAhrefsActivity(`Finding terms around "${secondary.headTerm}"…`);
   try {
     const result = await fetchSecondaryKeywords(secondary.headTerm, secondary.region);
-    if (result.ahrefs.status === "ok") {
-      const count = result.ahrefs.keywords.length;
-      ui.finishAhrefsActivity(activity, {
-        label: `Secondary terms${result.location ? `, ${result.location}` : ""}`,
-        count,
-        unit: count === 1 ? "term from Ahrefs" : "terms from Ahrefs",
-        extra: result.dataforseo.status === "ok" ? `${result.dataforseo.keywords.length} from DataForSEO` : undefined,
-      });
-    } else {
-      ui.clearAhrefsActivity(activity);
-    }
     const current = get().messages.find((m) => m.id === messageId)?.serviceScan;
     if (!current?.secondary || current.status !== "loading") return;
     patchMessage(get, set, messageId, { serviceScan: { ...current, status: "ready", secondary: { ...current.secondary, result } } });
-    // A provider that failed (not one that is simply unconfigured) is worth a notice: its column is
-    // empty for a reason the operator can fix.
-    const failed = [result.ahrefs, result.dataforseo].filter((p) => p.status === "error");
-    if (failed.length && failed.length < 2) {
-      const p = failed[0];
-      ui.notifyProvider({ title: `${p.provider === "ahrefs" ? "Ahrefs" : "DataForSEO"} keywords unavailable`, detail: p.error });
-    }
   } catch (err) {
-    ui.clearAhrefsActivity(activity);
     const current = get().messages.find((m) => m.id === messageId)?.serviceScan;
     if (!current) return;
     patchMessage(get, set, messageId, {
@@ -3004,11 +3755,26 @@ function advanceIntake(
       return;
     }
 
-    // The Pillar Page's secondary terms: suggested from the head term by Ahrefs and DataForSEO, side
-    // by side. See `SECONDARY_KEYWORD_OPTION`. Without a head term it is asked as a plain question.
+    // The Pillar Page's secondary terms: suggested from the head term by DataForSEO, as a
+    // checklist. See `SECONDARY_KEYWORD_OPTION`. Without a head term it is asked as a plain question.
     if (isSecondaryKeywordField(asset, result.field) && openSecondaryKeywords(get, set, asset, result.field, answers)) {
       return;
     }
+
+    // CRO's buyer words and words to avoid: suggested from search data and the landing page, as a
+    // checklist the operator picks from. See `BUYER_LANGUAGE_OPTION`.
+    if (openBuyerLanguage(get, set, asset, result.field, answers)) return;
+
+    // The Blog's primary keyword: better keywords than the topic's own, measured against the client's
+    // page and the competing pages. One card answers the supporting keywords too. See
+    // `BLOG_KEYWORD_OPTION`. Without a seed it is asked as a plain question.
+    if (isBlogKeywordField(asset, result.field) && openBlogKeywords(get, set, asset, result.field, answers)) {
+      return;
+    }
+
+    // The Webinar's competitor sources: the webinar pages the research just found, read and shown
+    // with why each was chosen. See `WEBINAR_SOURCES_OPTION`.
+    if (openWebinarSources(get, set, asset, result.field, answers)) return;
 
     // A topic the operator would otherwise type cold: offer suggestions first. The gate sits here
     // rather than inside the question card because it has to be able to *not* appear — a field with
@@ -3061,6 +3827,7 @@ function advanceIntake(
       field: result.field,
       pageSource,
       referenceSource,
+      suggestion: suggestionFor(get, asset.asset_id, result.field.field_id),
     });
     return;
   }
@@ -3428,13 +4195,67 @@ async function hydrateContextFromDb(
   }
 }
 
+/** Suggested answers per stage, keyed `runId:assetId`, from `loadPrefill`. Module-level rather than
+ * state: they are read once each, when the walk pushes the question they belong to, and the card
+ * keeps its own copy (`message.suggestion`) from then on. */
+const prefillByStage = new Map<string, Record<string, FieldSuggestion>>();
+
+/** Longest a stage's intake waits for suggestions before asking without them. */
+const PREFILL_TIMEOUT_MS = 12_000;
+
+/** Search this run's approved documents for answers to the questions this stage is about to ask
+ * (`lib/contextSearch.ts`). One request per stage, never one per question. Any failure or timeout
+ * leaves the stage asking as it always has. */
+async function loadPrefill(
+  get: () => PipelineState,
+  asset: AssetDefinition,
+): Promise<void> {
+  const { runId, phase, sessionId } = get();
+  if (!runId) return; // nothing approved yet, so nothing to search
+  const fields = prefillCandidates(
+    asset,
+    get().context,
+    { values: knownFactValues(get()), fieldToFact: FIELD_TO_FACT_BY_PHASE[phase] },
+    producerAssetIdFor,
+  );
+  const key = `${runId}:${asset.asset_id}`;
+  prefillByStage.delete(key);
+  if (!fields.length) return;
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), PREFILL_TIMEOUT_MS);
+  try {
+    const result = await prefillSuggestions(
+      runId,
+      asset.asset_id,
+      { fields, phase, chat_session_id: sessionId },
+      controller.signal,
+    );
+    if (result?.suggestions.length) {
+      prefillByStage.set(key, Object.fromEntries(result.suggestions.map((s) => [s.field_id, s])));
+    }
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** The suggestion for this field, if the stage's prefill found one. */
+function suggestionFor(get: () => PipelineState, assetId: string, fieldId: string): FieldSuggestion | undefined {
+  const runId = get().runId;
+  return runId ? prefillByStage.get(`${runId}:${assetId}`)?.[fieldId] : undefined;
+}
+
 /** Start a stage's own intake + generation (the part that produces the main deliverable). */
 function beginMainIntake(get: () => PipelineState, set: (partial: Partial<PipelineState>) => void, index: number) {
   const stage = stagesFor(get().phase)[index];
   set({ currentIndex: index, subStep: null, activeStatus: "running", progress: 5, navStatus: "Awaiting Input" });
-  void hydrateContextFromDb(get, set, stage.asset).finally(() => {
-    advanceIntake(get, set, index, stage.asset, {}, 0);
-  });
+  // Hydrated first, so the search knows which context fields really are unresolved.
+  void hydrateContextFromDb(get, set, stage.asset)
+    .then(() => loadPrefill(get, stage.asset))
+    .catch((err) => console.warn("Suggested answers unavailable", err))
+    .finally(() => {
+      advanceIntake(get, set, index, stage.asset, {}, 0);
+    });
 }
 
 /** Run a gated competitor sub-step and park it for review.
@@ -3457,9 +4278,6 @@ function recordFailure(set: (partial: Partial<PipelineState>) => void, err: unkn
   return err instanceof Error ? err.message : String(err);
 }
 
-/** Competitor searches that run on the run's own service in both phases. */
-const SERVICE_SCOPED_COMPETITOR_IDS = new Set(["competitor_analysis_funnel"]);
-
 async function runCompetitorStep(
   get: () => PipelineState,
   set: (partial: Partial<PipelineState>) => void,
@@ -3472,15 +4290,11 @@ async function runCompetitorStep(
       target_url: profile.website_url,
       niche: competitorNiche(get()),
       location: profile.region,
-      // `service` is what the competitor prompt searches on. In Phase 2 that is the sub-service the
-      // run is for, and it is the entire difference between this search and the Phase 1 one: without
-      // it the backend has nothing to put in `{SERVICE}` and returns the client's whole-market
-      // competitors instead of the ones competing on this sub-service.
-      // A funnel is built for one service, so its search is scoped to the run's service in Phase 1
-      // too (`target_service`, from CRO); the other Phase 1 searches keep their whole-market scope.
-      service: SERVICE_SCOPED_COMPETITOR_IDS.has(competitor.assetId)
-        ? serviceScanFocus(get()) || undefined
-        : profile[SUB_SERVICE_FACT],
+      // `{SERVICE}` is always the client's own service (Phase 2: the sub-service). The stage is the
+      // lens the listing is judged through — better CRO on their service page, their lead magnet —
+      // never the market the search is run in. Sending the stage name (CRO, content marketing)
+      // here is what used to return CRO agencies for an AI SEO client.
+      service: serviceScanFocus(get()) || profile[SUB_SERVICE_FACT] || undefined,
     };
 
   const message = push(get, set, {
@@ -3498,6 +4312,7 @@ async function runCompetitorStep(
     const result = await runCompetitorAnalysis(competitor.assetId, inputs, get().phase, attribution(get));
     patchMessage(get, set, message.id, { competitor: result, competitorError: undefined });
     set({ activeStatus: "hitl", progress: 100, navStatus: "Awaiting Review" });
+    void loadCompetitorValidation(get, set, message.id);
   } catch (err) {
     const msg = recordFailure(set, err);
     patchMessage(get, set, message.id, { competitorError: msg });
@@ -4030,9 +4845,29 @@ export function funnelBuildAwaitsOperator(m: PipelineMessage): boolean {
   return build.status === "offer" || build.status === "building" || (build.status === "done" && !build.saved);
 }
 
-/** After the funnel-build card is saved or declined: on to the next stage still to build, or back to
- * the stage already in progress. With nothing left in the phase, a 3-second notice says so. */
-function continueAfterFunnelBuild(get: () => PipelineState, set: (partial: Partial<PipelineState>) => void) {
+/** Whether the leg has a stage genuinely mid-way: a question waiting, a stream running, a draft or a
+ * competitor listing awaiting review. A "stopped" card or an unentered gate is not work in progress —
+ * it is history the operator has moved past. */
+function legWorkInProgress(s: PipelineState): boolean {
+  if (s.intake?.awaitingFieldId || s.subStep) return true;
+  return messagesInCurrentTrack(s).some(
+    (m) =>
+      !m.superseded &&
+      (m.streaming ||
+        (m.kind === "generation" && m.savePhase !== "saved" && !m.refineSubmitted) ||
+        (m.kind === "page-variants" && m.pageVariants?.status === "choosing") ||
+        (m.kind === "competitor" && m.savePhase !== "saved" && !m.competitorError) ||
+        (m.kind === "competitor-consent" && m.consent?.status === "pending") ||
+        (m.kind === "headline-choice" && m.headlines?.status !== "chosen") ||
+        (m.kind === "service-choice" && isServiceScanOpen(m))),
+  );
+}
+
+/** On to the next stage still to build. Used after the deployable funnel is saved or declined, and by
+ * a "stopped" card whose stage is already approved. A stage genuinely mid-way is brought back into
+ * view instead of being started over; stale "stopped" cards and unentered gates are retired. With
+ * nothing left in the phase, a 3-second notice says so. */
+function continueToNextStage(get: () => PipelineState, set: (partial: Partial<PipelineState>) => void) {
   const phase = get().phase;
   const total = totalStagesFor(phase);
   const target = nextUnexecutedIndex(get());
@@ -4041,14 +4876,25 @@ function continueAfterFunnelBuild(get: () => PipelineState, set: (partial: Parti
     useUiStore.getState().showToast(`There are no more assets to run in ${PHASE_META[phase].label}.`);
     return;
   }
-  if (selectNeedsResume(get())) {
-    proceedToStage(get, set, target);
-  } else {
-    // A stage is already under way (the card was opened from a menu mid-stage): bring its pending
-    // question back into view rather than starting another.
+  if (legWorkInProgress(get())) {
     resurfacePendingCard(get, set, get().currentIndex);
+    return;
   }
+  const state = get();
+  const leg = new Set(messagesInCurrentTrack(state).map((m) => m.id));
+  set({
+    messages: state.messages.map((m) =>
+      leg.has(m.id) && !m.superseded && (m.kind === "stage-stopped" || (m.kind === "stage-gate" && m.gate?.status !== "entered"))
+        ? { ...m, superseded: true }
+        : m,
+    ),
+    intake: null,
+    subStep: null,
+  });
+  proceedToStage(get, set, target);
 }
+
+const continueAfterFunnelBuild = continueToNextStage;
 
 function patchFunnelBuild(
   get: () => PipelineState,
@@ -4496,7 +5342,11 @@ export const usePipelineStore = create<PipelineState>((set, get) => ({
     // sub-services to brief rather than none.
     const isPlan = Boolean(scan.plan);
     const isSecondary = Boolean(scan.secondary);
+    // Only "words to avoid" is optional; the outcome words are required and its card has no Skip.
+    const isAvoid = scan.buyerLanguage?.mode === "avoid";
+    if (scan.buyerLanguage && !isAvoid) return;
     // The secondary terms are optional: skipped is the same answer the plain question's Skip gives.
+    // "NONE" is the field's own wording for words to avoid, and what the business check reads as none.
     intake.answers[message.field.field_id] = isPlan ? PLAN_INFER_SUB_SERVICES : isSecondary ? "N/A" : "NONE";
     patchMessage(get, set, messageId, { serviceScan: { ...scan, status: "skipped" } });
     push(get, set, {
@@ -4506,7 +5356,9 @@ export const usePipelineStore = create<PipelineState>((set, get) => ({
         ? "Let the plan infer the sub-services."
         : isSecondary
           ? "No secondary terms."
-          : "No specific services: cover what the page copy covers.",
+          : isAvoid
+            ? "No words to avoid."
+            : "No specific services: cover what the page copy covers.",
     });
     set({ editSeed: null });
     applyAnswerAndAdvance(get, set, intake, message.field);
@@ -4566,6 +5418,101 @@ export const usePipelineStore = create<PipelineState>((set, get) => ({
     applyAnswerAndAdvance(get, set, intake, message.field);
   },
 
+  confirmBuyerLanguage: (messageId, picked, typed) => {
+    const state = get();
+    const message = liveMessage(state, messageId);
+    const intake = state.intake;
+    const scan = message?.serviceScan;
+    const buyer = scan?.buyerLanguage;
+    if (!message || !scan || !buyer || !isServiceScanOpen(message) || !intake || !message.field) return;
+    if (intake.awaitingFieldId !== message.field.field_id) return;
+
+    const result = buyer.result;
+    const answer =
+      buyer.mode === "outcome"
+        ? composeOutcomeWordsAnswer((result?.clusters ?? []).filter((c) => picked.includes(c.name)), typed)
+        : composeWordsToAvoidAnswer(
+            (result?.avoid ?? []).filter((a) => picked.includes(a.term)).map((a) => a.term),
+            typed,
+          );
+    if (!answer) return;
+    intake.answers[message.field.field_id] = answer;
+    patchMessage(get, set, messageId, {
+      serviceScan: { ...scan, status: "done", other: typed, buyerLanguage: { ...buyer, picked } },
+    });
+    push(get, set, {
+      role: "user",
+      kind: "text",
+      text: `${buyer.mode === "outcome" ? "Buyer's words for the outcome" : "Words to avoid"}: ${answer}`,
+    });
+    set({ editSeed: null });
+    applyAnswerAndAdvance(get, set, intake, message.field);
+  },
+
+  confirmBlogKeywords: (messageId, primary, secondary, other) => {
+    const state = get();
+    const message = liveMessage(state, messageId);
+    const intake = state.intake;
+    const scan = message?.serviceScan;
+    const blog = scan?.blog;
+    const keyword = primary.trim();
+    if (!message || !scan || !blog || !isServiceScanOpen(message) || !intake || !message.field || !keyword) return;
+    if (intake.awaitingFieldId !== BLOG_KEYWORD_OPTION.fieldId) return;
+
+    intake.answers[BLOG_KEYWORD_OPTION.fieldId] = keyword;
+    // Answered here, so the walk passes over the supporting-keywords question as already answered.
+    intake.answers[BLOG_KEYWORD_OPTION.secondaryFieldId] = composeBlogSecondaryAnswer(secondary, other, blog.result?.location ?? "");
+    patchMessage(get, set, messageId, {
+      serviceScan: { ...scan, status: "done", other, blog: { ...blog, chosenPrimary: keyword, pickedSecondary: secondary.map((k) => k.keyword) } },
+    });
+    const typed = other.split(/[,;\n]/).map((s) => s.trim()).filter(Boolean);
+    const supporting = [...secondary.map((k) => k.keyword), ...typed];
+    push(get, set, {
+      role: "user",
+      kind: "text",
+      text: `Primary keyword: ${keyword}${supporting.length ? `. Supporting: ${supporting.join(", ")}` : ""}`,
+    });
+    set({ editSeed: null });
+    applyAnswerAndAdvance(get, set, intake, message.field);
+  },
+
+  confirmWebinarSources: (messageId, own) => {
+    const state = get();
+    const message = liveMessage(state, messageId);
+    const intake = state.intake;
+    const scan = message?.serviceScan;
+    const webinar = scan?.webinar;
+    if (!message || !scan || !webinar || !isServiceScanOpen(message) || !intake || !message.field) return;
+    if (intake.awaitingFieldId !== WEBINAR_SOURCES_OPTION.fieldId) return;
+    const answer = composeWebinarSourcesAnswer(webinar.result?.block ?? "", own);
+    if (!answer) return;
+
+    const used = (webinar.result?.sources ?? []).filter((s) => s.status === "read");
+    intake.answers[WEBINAR_SOURCES_OPTION.fieldId] = answer;
+    patchMessage(get, set, messageId, {
+      serviceScan: { ...scan, status: "done", webinar: { ...webinar, usedCount: used.length, addedOwn: Boolean(own.trim()) } },
+    });
+    const names = used.map((s) => s.name).join(", ");
+    push(get, set, {
+      role: "user",
+      kind: "text",
+      text: `Competitor webinar sources: ${used.length ? `${used.length} page${used.length === 1 ? "" : "s"} read (${names})` : "none read"}${own.trim() ? ", plus my own" : ""}`,
+    });
+    set({ editSeed: null });
+    applyAnswerAndAdvance(get, set, intake, message.field);
+  },
+
+  researchBlogKeywords: (messageId, seed) => {
+    const message = liveMessage(get(), messageId);
+    const scan = message?.serviceScan;
+    const term = seed.trim();
+    if (!message || !scan?.blog || !term || scan.status === "loading" || !isServiceScanOpen(message)) return;
+    patchMessage(get, set, messageId, {
+      serviceScan: { ...scan, status: "loading", error: undefined, blog: { ...scan.blog, seed: term, result: null } },
+    });
+    void loadBlogKeywords(get, set, messageId);
+  },
+
   researchSecondaryKeywords: (messageId, term) => {
     const message = liveMessage(get(), messageId);
     const scan = message?.serviceScan;
@@ -4583,7 +5530,21 @@ export const usePipelineStore = create<PipelineState>((set, get) => ({
     patchMessage(get, set, messageId, { serviceScan: { ...message.serviceScan, status: "loading", error: undefined } });
     if (message.serviceScan.plan) void loadPlanDiscovery(get, set, messageId);
     else if (message.serviceScan.secondary) void loadSecondaryKeywords(get, set, messageId);
+    else if (message.serviceScan.blog) void loadBlogKeywords(get, set, messageId);
+    else if (message.serviceScan.webinar) void loadWebinarSources(get, set, messageId);
+    else if (message.serviceScan.buyerLanguage) void loadBuyerLanguage(get, set, messageId);
     else void loadServiceScan(get, set, messageId);
+  },
+
+  regenerateBuyerLanguage: (messageId) => {
+    const message = liveMessage(get(), messageId);
+    const scan = message?.serviceScan;
+    // Only an open card: once its answer is given (done, skipped) or it is superseded, it is history.
+    if (!scan?.buyerLanguage || message?.superseded || (scan.status !== "ready" && scan.status !== "error")) return;
+    patchMessage(get, set, messageId, {
+      serviceScan: { ...scan, status: "loading", error: undefined, buyerLanguage: { ...scan.buyerLanguage, result: null } },
+    });
+    void loadBuyerLanguage(get, set, messageId);
   },
 
   submitFreeform: (raw) => {
@@ -4640,6 +5601,7 @@ export const usePipelineStore = create<PipelineState>((set, get) => ({
       streaming: true,
       savePhase: "idle",
       answers: message.answers,
+      variant: message.variant,
     });
 
     const assetId = message.assetId;
@@ -4658,7 +5620,7 @@ export const usePipelineStore = create<PipelineState>((set, get) => ({
         get().phase,
         attribution(get),
         opts?.businessFix ? { clientProfile: get().clientProfile } : undefined,
-        { ...hooks, sourceCopy },
+        { ...hooks, sourceCopy, variant: message.variant },
       ),
     );
   },
@@ -4769,6 +5731,7 @@ export const usePipelineStore = create<PipelineState>((set, get) => ({
       streamGenerateStage(assetId, answers, onChunk, {
         ...prepassOptions(get, set, messageId, assetId),
         ...hooks,
+        variant: message.variant,
         signal,
       }),
     );
@@ -4810,6 +5773,7 @@ export const usePipelineStore = create<PipelineState>((set, get) => ({
           // the document against different inputs than the half already written.
           prefilled: message.prefilled,
           ...hooks,
+          variant: message.variant,
           signal,
         }),
       { append: true },
@@ -4847,7 +5811,8 @@ export const usePipelineStore = create<PipelineState>((set, get) => ({
       }
 
       await saveStageOutput(runId, message.assetId, message.text, message.answers);
-      patchMessage(get, set, messageId, { savePhase: "saved", interrupted: false, truncated: false });
+      patchMessage(get, set, messageId, { savePhase: "saved", interrupted: false, truncated: false, variantAlternate: false });
+      keepSiblingVariants(get, set, { ...message, savePhase: "saved", variantAlternate: false });
 
       const entry: ContextEntry = { assetId: stage.asset.asset_id, label: stage.asset.label, text: message.text };
       set({
@@ -5002,13 +5967,14 @@ export const usePipelineStore = create<PipelineState>((set, get) => ({
       set,
       { assetId: consent.competitorAssetId, label: consent.label },
       {
-        // `service` is what the competitor prompt searches on ({SERVICE} in 05_SEO_Pillar_Page.md),
-        // so the pillar page's own topic goes here — that is the whole point of asking first.
+        // `{SERVICE}` is the client's own service. The topic the operator just named (head term,
+        // blog title, webinar topic) constrains the artefact via `{NICHE}` so the search still
+        // finds a pillar page / blog / webinar on that subject, but among same-service rivals.
         inputs: {
           target_url: consent.targetUrl,
-          niche: consent.niche,
+          niche: consent.topic || consent.niche,
           location: consent.location,
-          service: consent.topic,
+          service: serviceScanFocus(get()) || consent.topic,
         },
         fillsFieldId: consent.fieldId,
       },
@@ -5308,7 +6274,13 @@ chooseHeadlines: async (messageId, ids) => {
     patchMessage(get, set, messageId, { savePhase: "saving", saveError: undefined });
     try {
       const runId = await ensureRun(get, set);
-      const saved = await saveCompetitorAnalysis(runId, assetId, { ...result, asset_id: assetId });
+      const validation = message.competitorValidation?.status === "ready" ? message.competitorValidation.report : undefined;
+      const saved = await saveCompetitorAnalysis(
+        runId,
+        assetId,
+        { ...result, asset_id: assetId },
+        validation ? validationMarkdownFor(validation, result.competitors, message.competitorValidation?.picks ?? defaultPicks(validation)) : "",
+      );
       // The card then shows the listing that was actually saved, not the one that was offered — and
       // so does the transcript on reload, which persists this message rather than the card's state.
       patchMessage(get, set, messageId, { savePhase: "saved", competitor: result, competitorError: undefined });
@@ -5409,6 +6381,21 @@ chooseHeadlines: async (messageId, ids) => {
     }
   },
 
+  validateCompetitorStep: (messageId) => {
+    const message = liveMessage(get(), messageId);
+    if (!message?.competitor || message.savePhase === "saved" || message.competitorValidation?.status === "loading") return;
+    void loadCompetitorValidation(get, set, messageId);
+  },
+
+  togglePlayPick: (messageId, domain) => {
+    const message = liveMessage(get(), messageId);
+    const state = message?.competitorValidation;
+    if (!state?.report || message?.savePhase === "saved") return;
+    const picks = state.picks ?? defaultPicks(state.report);
+    const next = picks.includes(domain) ? picks.filter((d) => d !== domain) : [...picks, domain];
+    patchMessage(get, set, messageId, { competitorValidation: { ...state, picks: next } });
+  },
+
   retryCompetitorStep: async (messageId) => {
     const message = liveMessage(get(), messageId);
     if (!message?.assetId) return;
@@ -5422,12 +6409,18 @@ chooseHeadlines: async (messageId, ids) => {
       location: profile.region,
     };
 
-    patchMessage(get, set, messageId, { competitorError: undefined, competitor: undefined, savePhase: "idle" });
+    patchMessage(get, set, messageId, {
+      competitorError: undefined,
+      competitor: undefined,
+      competitorValidation: undefined,
+      savePhase: "idle",
+    });
     set({ activeStatus: "running", navStatus: "Generating…" });
     const stop = startCreepingProgress(get, set);
     try {
       const result = await runCompetitorAnalysis(assetId, inputs, get().phase, attribution(get));
       patchMessage(get, set, messageId, { competitor: result });
+      void loadCompetitorValidation(get, set, messageId);
     } catch (err) {
       const msg = recordFailure(set, err);
       patchMessage(get, set, messageId, { competitorError: msg });
@@ -5766,6 +6759,37 @@ chooseHeadlines: async (messageId, ids) => {
     void openStageGate(get, set, assetId);
   },
 
+  loadDocSummary: async (messageId, force = false) => {
+    const message = get().messages.find((m) => m.id === messageId);
+    if (!message || message.kind !== "generation" || !message.text?.trim()) return;
+    const text = summaryText(message.text);
+    const textHash = hashText(text);
+    const current = message.docSummary;
+    if (current?.textHash === textHash) {
+      if (current.status === "done") return;
+      if (current.status === "error" && !force) return;
+      // "loading" saved by a tab that closed mid-request is not in flight here: ask again.
+      if (current.status === "loading" && summariesInFlight.has(messageId)) return;
+    }
+
+    summariesInFlight.add(messageId);
+    patchMessage(get, set, messageId, { docSummary: { status: "loading", textHash } });
+    const stage = stagesFor(message.phase ?? get().phase).find((s) => s.asset.asset_id === message.assetId);
+    try {
+      const { points } = await summariseDocument(message.assetId ?? "asset", text, {
+        label: stage?.asset.label,
+        phase: message.phase ?? get().phase,
+        ...attribution(get),
+      });
+      patchMessage(get, set, messageId, { docSummary: { status: "done", textHash, points } });
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      patchMessage(get, set, messageId, { docSummary: { status: "error", textHash, error: reason } });
+    } finally {
+      summariesInFlight.delete(messageId);
+    }
+  },
+
   retryStageGate: async (messageId) => {
     await loadStageReadiness(get, set, messageId);
   },
@@ -5916,7 +6940,7 @@ chooseHeadlines: async (messageId, ids) => {
 
   fixCheckFindings: async (messageId, findings) => {
     if (!findings.length) return;
-    await get().submitRefine(messageId, composeFixNote(findings), { businessFix: true });
+    await fixInPlace(get, set, messageId, composeFixNote(findings));
   },
 
   skipAdvisedStage: (messageId) => {
@@ -6023,6 +7047,53 @@ chooseHeadlines: async (messageId, ids) => {
     if (!liveMessage(get(), messageId)?.funnelBuild) return;
     patchFunnelBuild(get, set, messageId, () => ({ status: "declined" }));
     continueAfterFunnelBuild(get, set);
+  },
+
+  continueToNextStage: () => continueToNextStage(get, set),
+
+  startPageVariants: (messageId, chosen) => startPageVariants(get, set, messageId, chosen),
+
+  remeasureVariants: async (messageId) => {
+    const card = liveMessage(get(), messageId);
+    if (!card?.variantCompare) return;
+    if (!currentVariantDrafts(get()).every(variantDraftFinal)) return;
+    // The newest unsuperseded draft of each variant: a Refine replaces the card it refined.
+    const latest = new Map<PageVariantId, string>();
+    for (const m of messagesInCurrentTrack(get())) {
+      if (m.kind === "generation" && m.assetId === PILLAR_PAGE_ASSET_ID && m.variant && !m.superseded && m.text?.trim() && !m.streaming)
+        latest.set(m.variant, m.id);
+    }
+    const ids = [...latest.values()];
+    patchMessage(get, set, messageId, { variantCompare: { ...card.variantCompare, messageIds: ids.length ? ids : card.variantCompare.messageIds } });
+    await measureVariantComparison(get, set, messageId);
+  },
+
+  buildVariantWithManus: async (messageId) => {
+    const message = liveMessage(get(), messageId);
+    if (!message?.variant || !message.answers || message.assetId !== PILLAR_PAGE_ASSET_ID) return;
+    const variant = message.variant;
+    const answers = message.answers;
+    const draft = push(get, set, {
+      role: "assistant",
+      kind: "generation",
+      assetId: PILLAR_PAGE_ASSET_ID,
+      text: "",
+      streaming: true,
+      savePhase: "idle",
+      answers,
+      variant,
+    });
+    // The Claude draft it replaces stays readable but is no longer the one to approve.
+    patchMessage(get, set, messageId, { superseded: true, manusRebuilt: true, refining: false });
+    await streamIntoMessage(get, set, draft.id, (onChunk, signal, hooks) =>
+      streamGenerateStage(PILLAR_PAGE_ASSET_ID, answers, onChunk, {
+        ...prepassOptions(get, set, draft.id, PILLAR_PAGE_ASSET_ID),
+        ...hooks,
+        variant,
+        useManus: true,
+        signal,
+      }),
+    );
   },
 
   saveFunnelBuild: (messageId) => {
@@ -6146,6 +7217,13 @@ chooseHeadlines: async (messageId, ids) => {
       assetId: target.assetId,
       stopped: { assetId: target.assetId, label: target.label, wasGenerating },
     });
+  },
+
+  deleteUserMessage: (messageId) => {
+    const message = liveMessage(get(), messageId);
+    if (!message || message.role !== "user" || message.kind !== "text") return;
+    set({ messages: get().messages.filter((m) => m.id !== messageId) });
+    schedulePersist();
   },
 
   deleteGeneration: (messageId) => {

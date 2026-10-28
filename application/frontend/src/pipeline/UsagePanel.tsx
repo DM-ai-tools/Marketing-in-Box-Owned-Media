@@ -50,6 +50,8 @@ const KIND_LABEL: Record<string, string> = {
   competitor: "Competitor search",
   briefing: "Briefing",
   check: "Business check",
+  prefill: "Suggested answers",
+  summary: "Summary",
 };
 
 /** One headline number. */

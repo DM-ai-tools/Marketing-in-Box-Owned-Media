@@ -301,3 +301,48 @@ def test_curly_and_straight_quotes_match_either_way() -> None:
     page = "<p>We&rsquo;re based in Melbourne.</p>" + _FILLER
     revised, report = R.apply_edits(page, [R.Edit("<p>We're based in Melbourne.</p>", "<p>Melbourne-based.</p>")])
     assert report.applied == 1 and revised == "<p>Melbourne-based.</p>" + _FILLER
+
+
+_SERVICES_PAGE = """```html
+<html><body><header><img class="logo" src="https://x.com/logo.png" alt="X"></header>
+<main><section class="services"><h2>Services</h2>
+<div class="card"><h3>AI SEO</h3><p>We do AI SEO.</p></div>
+<div class="card"><h3>Local SEO</h3><p>We do local SEO.</p></div>
+<div class="card"><h3>Off-Page SEO</h3><p>We do off-page SEO.</p></div>
+</section></main><footer><p>X Pty Ltd</p></footer></body></html>
+```"""
+
+
+def test_a_business_fix_may_remove_a_whole_card_for_a_service_the_client_does_not_sell() -> None:
+    edits = [R.Edit(find='<div class="card"><h3>Local SEO</h3><p>We do local SEO.</p></div>', replace="")]
+    revised, report = R.apply_edits(_SERVICES_PAGE, edits, lock_layout=True)
+    assert report.applied == 1 and not report.rejected
+    assert "Local SEO" not in revised and "AI SEO" in revised and "Off-Page SEO" in revised
+
+
+def test_a_business_fix_may_remove_a_markdown_section() -> None:
+    body = "We review every page against what buyers search for and what the client can prove. " * 12
+    draft = f"# Page\n\n## AI SEO\n{body}\n\n### Local SEO\nWe do local SEO.\n\n## Contact\n{body}\n"
+    revised, report = R.apply_edits(draft, [R.Edit(find="### Local SEO\nWe do local SEO.\n\n", replace="")], lock_layout=True)
+    assert report.applied == 1 and "Local SEO" not in revised
+
+
+@pytest.mark.parametrize(
+    "find",
+    [
+        '<header><img class="logo" src="https://x.com/logo.png" alt="X"></header>',
+        "<footer><p>X Pty Ltd</p></footer>",
+    ],
+)
+def test_removal_never_takes_the_logo_or_the_frame(find: str) -> None:
+    _, report = R.apply_edits(_SERVICES_PAGE, [R.Edit(find=find, replace="")], lock_layout=True)
+    assert report.applied == 0 and report.rejected
+
+
+def test_removal_does_not_open_the_door_to_moving_a_section() -> None:
+    card = '<div class="card"><h3>Local SEO</h3><p>We do local SEO.</p></div>'
+    moved = _SERVICES_PAGE.replace(card, "").replace("<h2>Services</h2>", "<h2>Services</h2>" + card)
+    start = _SERVICES_PAGE.index("<h2>Services</h2>")
+    end = _SERVICES_PAGE.index("</section>")
+    _, report = R.apply_edits(_SERVICES_PAGE, [R.Edit(find=_SERVICES_PAGE[start:end], replace=moved[start:moved.index("</section>")])], lock_layout=True)
+    assert report.applied == 0 and report.rejected

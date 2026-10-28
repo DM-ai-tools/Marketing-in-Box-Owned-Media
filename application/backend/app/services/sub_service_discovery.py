@@ -19,15 +19,15 @@ Measure, then judge, then measure again — the order `service_scan.py` and `ass
    suggests the missing ones competitors cover. Each comes with a 4-6 keyword cluster. An "existing"
    item must carry a URL the scan found (`_parse_reply` drops it otherwise), so a page the site does
    not link to can never be reported as already built.
-3. **Measure, one Ahrefs call.** Keywords Explorer's `overview` returns the real monthly volume for
-   every keyword at once (`ahrefs_client.py`). With no key, or any Ahrefs failure, the volumes stay
+3. **Measure, one DataForSEO call.** `keyword_overview` returns the real monthly volume for every
+   keyword at once (`dataforseo_client.py`). With no login, or any failure, the volumes stay
    `None` and `volume_error` says why, which the card shows as a warning —
    never a stub number, because a plan built on an invented volume reads exactly like one built on a
    real one.
 
 Credits
 -------
-Two Haiku calls and one Ahrefs overview request, whatever the size of the site. The competitor
+Two Haiku calls and one DataForSEO overview request, whatever the size of the site. The competitor
 listings are read from the run, never searched again. `MAX_CANDIDATES` and `MAX_KEYWORDS_PER_CANDIDATE`
 bound the provider request.
 
@@ -46,9 +46,9 @@ import time
 from dataclasses import asdict, dataclass, field
 from urllib.parse import urlparse
 
-from app.services import ahrefs_client
+from app.services import dataforseo_client
 from app.services import keywords as keyword_service
-from app.services import service_scan
+from app.services import keyword_rank, service_scan, service_synonyms
 from app.services.claude_client import get_client
 from app.services.generation import HAIKU, OnUsage
 from app.services.usage import CallUsage
@@ -60,6 +60,8 @@ _SUGGEST_MAX_TOKENS = 4000
 #: Candidates on the card, existing and suggested together. The reference plan had eight.
 MAX_CANDIDATES = 12
 MAX_KEYWORDS_PER_CANDIDATE = 6
+#: Alternate names kept per candidate, measured alongside its keywords in the same request.
+MAX_SYNONYMS_PER_CANDIDATE = 3
 #: Characters of each competitor listing and of the ICP handed to the judge.
 _LISTING_CHARS = 2500
 _ICP_CHARS = 2500
@@ -88,9 +90,16 @@ class DiscoveryError(Exception):
 @dataclass
 class KeywordVolume:
     keyword: str
-    #: Monthly searches from Ahrefs. None when the provider is not configured or had no data —
+    #: Monthly searches from DataForSEO. None when the provider is not configured or had no data —
     #: never 0, which would claim a measured absence of demand.
     volume: int | None = None
+    #: `keyword`, or `synonym`: another name people use for the sub-service (`service_synonyms`).
+    kind: str = "keyword"
+    difficulty: int | None = None
+    #: Search momentum, % change. None when DataForSEO gave none.
+    trend: int | None = None
+    #: `keyword_rank.score_of`: searches, estimated traffic and momentum. None without a volume.
+    score: int | None = None
 
 
 @dataclass
@@ -119,9 +128,9 @@ class Discovery:
     source_url: str
     primary_service: str
     candidates: list[SubServiceCandidate] = field(default_factory=list)
-    #: `ahrefs` when the volumes are real, `unavailable` when they could not be fetched.
+    #: `dataforseo` when the volumes are real, `unavailable` when they could not be fetched.
     volume_source: str = "unavailable"
-    #: The country the volumes are for. Ahrefs only has countries.
+    #: The country the volumes are for (countries only).
     location: str = ""
     #: Why the volumes are missing, when they are: shown to the operator as a warning on the card.
     volume_error: str = ""
@@ -190,10 +199,13 @@ def _suggest_prompt(
         f"4. For each, {MAX_KEYWORDS_PER_CANDIDATE - 2}-{MAX_KEYWORDS_PER_CANDIDATE} keywords a buyer in {region or 'the region'} "
         "would type to find it: lowercase, no brand names, the head term first.\n"
         "5. `why`: one sentence on why it belongs in the plan, naming the competitor or ICP need it comes from "
-        "where there is one. Never invent a statistic.\n\n"
+        "where there is one. Never invent a statistic.\n"
+        f"6. `synonyms`: 2-{MAX_SYNONYMS_PER_CANDIDATE} alternate names for the sub-service itself, following the "
+        "guidance below, so every way buyers search for it is measured.\n\n"
+        f"ALTERNATE NAMES — GUIDANCE:\n{service_synonyms.GUIDANCE}\n\n"
         'Reply with ONLY a JSON object, no prose, no code fence: {"sub_services": [{"name": "...", '
         '"status": "existing|new", "url": "...", "slug": "...", "parent": "...", "why": "...", '
-        '"keywords": ["...", "..."]}]}'
+        '"keywords": ["...", "..."], "synonyms": ["...", "..."]}]}'
     )
 
 
@@ -235,6 +247,11 @@ def _parse_reply(raw: str, scanned: list[service_scan.ScannedService]) -> tuple[
                 words.append(kw)
         if not words:
             words = [name.lower()]
+        names = [
+            n
+            for n in service_synonyms.clean_synonyms(name, [str(x) for x in item.get("synonyms") or []])
+            if n not in words
+        ][:MAX_SYNONYMS_PER_CANDIDATE]
         candidate = SubServiceCandidate(
             name=name,
             status=status,
@@ -242,7 +259,8 @@ def _parse_reply(raw: str, scanned: list[service_scan.ScannedService]) -> tuple[
             slug=_path(found.url) if found else (str(item.get("slug") or "").strip() or _slug(name)),
             parent=(found.parent if found else str(item.get("parent") or "").strip()),
             why=str(item.get("why") or "").strip(),
-            keywords=[KeywordVolume(k) for k in words[:MAX_KEYWORDS_PER_CANDIDATE]],
+            keywords=[KeywordVolume(k) for k in words[:MAX_KEYWORDS_PER_CANDIDATE]]
+            + [KeywordVolume(n, kind="synonym") for n in names],
         )
         out.append(candidate)
         if len(out) >= MAX_CANDIDATES:
@@ -273,19 +291,19 @@ async def _ask(prompt: str, on_usage: OnUsage | None) -> str:
 
 
 async def _fill_volumes(discovery: Discovery, region: str) -> None:
-    """One Ahrefs `overview` request for every keyword on the card. Never the stub provider.
+    """One DataForSEO `keyword_overview` request for every keyword on the card. Never the stub provider.
 
-    Any failure — no key, a rejected key, no API units left, a region with no country, a network
+    Any failure — no login, a rejected login, no balance left, a region with no country, a network
     error — leaves the volumes `None` and sets `volume_error` to one sentence. The card shows it as a
     warning, so the operator knows the plan's volumes will be estimates and why, rather than finding
     a list with no numbers on it."""
     keywords = list(dict.fromkeys(k.keyword for c in discovery.candidates for k in c.keywords))
     if not keywords:
         return
-    if not ahrefs_client.is_configured():
+    if not dataforseo_client.is_configured():
         discovery.volume_error = (
-            "Ahrefs is not configured on this server (AHREFS_API_KEY is empty), so search volumes "
-            "could not be fetched. The plan will label every volume as an estimate."
+            "DataForSEO is not configured on this server (DATAFORSEO_LOGIN / DATAFORSEO_PASSWORD), so "
+            "search volumes could not be fetched. The plan will label every volume as an estimate."
         )
         return
     config = keyword_service.KeywordRunConfig(
@@ -295,15 +313,15 @@ async def _fill_volumes(discovery: Discovery, region: str) -> None:
         language_name=keyword_service.DEFAULT_LANGUAGE,
         services={},
     )
-    client: ahrefs_client.AhrefsClient | None = None
+    client: dataforseo_client.DataForSEOClient | None = None
     try:
         country = keyword_service.resolve_location(config)
-        client = ahrefs_client.AhrefsClient()
-        metrics = await client.overview(keywords, ahrefs_client.country_code(country))
+        client = dataforseo_client.DataForSEOClient()
+        metrics = await client.overview(keywords, country)
     except Exception as exc:  # noqa: BLE001 — the list still stands without volumes
         logger.warning("Sub-service volumes failed: %s", exc)
         discovery.volume_error = (
-            f"Ahrefs could not fetch search volumes: {exc} The plan will label every volume as an estimate."
+            f"DataForSEO could not fetch search volumes: {exc} The plan will label every volume as an estimate."
         )
         return
     finally:
@@ -314,7 +332,12 @@ async def _fill_volumes(discovery: Discovery, region: str) -> None:
         for kw in candidate.keywords:
             found = metrics.get(kw.keyword.lower())
             kw.volume = found.volume if found else None
-    discovery.volume_source = "ahrefs"
+            kw.difficulty = found.difficulty if found else None
+            kw.trend = found.trend if found else None
+            kw.score = keyword_rank.score_of(kw.volume, kw.difficulty, kw.trend)
+        # Best-ranked first (searches, estimated traffic, momentum); unmeasured ones last.
+        candidate.keywords.sort(key=lambda k: (k.score is None, -(k.score or 0), -(k.volume or 0)))
+    discovery.volume_source = "dataforseo"
     discovery.location = country
 
 

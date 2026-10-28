@@ -6,6 +6,12 @@ If fewer than 10 genuinely qualifying competitors can be found and verified, ret
 than padding the list with weak or unverified matches — flag any lower-confidence entries instead
 of silently including them.
 
+WHO COUNTS AS A COMPETITOR HERE: a business that competes with the target for the same buyers —
+it sells the same or a substitutable service to the same kind of customer, in the same market.
+The founder's book is the lens this listing is judged through, never the service the competitor
+has to sell. Do NOT include publishers, ghostwriters or book-coaching businesses unless that is
+what the target itself sells.
+
 Additional inputs (all optional unless stated):
 
 competitor_type:
@@ -15,8 +21,8 @@ competitor_type:
   authored a genuine published book on the topic
   If missing or empty, include both types.
 
-service: "book for {SERVICE}" (the target's core service/topic, inferred from {TARGET_URL} if
-not specified) — a genuine, published, full-length BOOK (paperback and/or ebook sold via Amazon,
+service: {SERVICE} — the service the target sells (inferred from {TARGET_URL} if not specified).
+  The qualifying artefact is a genuine, published, full-length BOOK (paperback and/or ebook sold via Amazon,
 Booktopia, or another retail channel; not a short gated PDF/ebook lead magnet, which is a
 distinct asset category) authored by the company's founder or the company itself.
   (Only include companies where a real book can be verified — ideally with a retail listing

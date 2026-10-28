@@ -6,6 +6,12 @@ If fewer than 10 genuinely qualifying competitors can be found and verified, ret
 than padding the list with weak or unverified matches — flag any lower-confidence entries instead
 of silently including them.
 
+WHO COUNTS AS A COMPETITOR HERE: a business that competes with the target for the same buyers —
+it sells the same or a substitutable service to the same kind of customer, in the same market.
+The pillar page is the lens this listing is judged through, never the service the competitor
+has to sell. Do NOT include companies that sell SEO, content strategy or pillar-page builds
+unless that is what the target itself sells.
+
 Additional inputs (all optional unless stated):
 
 competitor_type:
@@ -47,6 +53,7 @@ CRITICAL REQUIREMENTS:
   linking to supporting cluster content, and demonstrate topical depth beyond generic advice
 - Exclude: directories, marketplaces, freelancer platforms, low-quality or inactive sites, and
   aggregators
+- Exclude SEO and content-strategy agencies unless the target itself sells those
 - Mark verification_confidence for each entry (Verified / Partially verified / Unverified) based
   on whether the pillar page structure was directly confirmed
 

@@ -55,6 +55,11 @@ export default defineConfig({
   server: {
     port: 5173,
     proxy: apiProxy,
+    // Smoke builds write into smoke/out-* under the frontend root. Watching those (especially on
+    // Windows) can EBUSY-crash the dev server mid-run; they are never source for HMR.
+    watch: {
+      ignored: ['**/smoke/out-*/**'],
+    },
   },
   preview: {
     host: true,

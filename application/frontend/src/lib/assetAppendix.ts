@@ -1,4 +1,4 @@
-import { ahrefsAppendixFor } from "./ahrefsUsage";
+import { keywordAppendixFor } from "./keywordUsage";
 import { checkAppliesTo, renderBusinessCheck } from "./businessCheck";
 import { competitorAppendixFor } from "./competitorSources";
 import { earlierCheckReport } from "../pipeline/pipelineStore";
@@ -7,8 +7,8 @@ import type { PipelineMessage } from "../pipeline/pipelineStore";
 /** Everything that follows an asset in the reader and in its exported file, in one place.
  *
  * Three sections, in this order: the competitors it was benchmarked on (the evidence it was written
- * against), the business check (how it held up against the client's own facts), then the Ahrefs
- * keyword data (what search demand it was measured against, and how — `lib/ahrefsUsage.ts`). Each is
+ * against), the business check (how it held up against the client's own facts), then the
+ * keyword data (what search demand it was measured against, and how — `lib/keywordUsage.ts`). Each is
  * Markdown placed after the asset and never written into the saved text, so the next stage still
  * reads only what the stage wrote.
  *
@@ -32,6 +32,6 @@ export function assetAppendixFor(messages: PipelineMessage[], generation: Pipeli
   return generation
     ? competitorAppendixFor(messages, generation) +
         businessCheckAppendixFor(messages, generation) +
-        ahrefsAppendixFor(messages, generation)
+        keywordAppendixFor(messages, generation)
     : "";
 }

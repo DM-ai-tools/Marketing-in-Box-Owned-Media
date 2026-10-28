@@ -49,11 +49,12 @@ import logging
 import os
 import re
 import uuid
+from dataclasses import replace
 from datetime import datetime, timezone
 from typing import Annotated, Literal
 from urllib.parse import urlparse
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, Field, StringConstraints
 from sqlalchemy import select
@@ -88,10 +89,13 @@ from app.services.competitor import (
     to_prompt_text,
 )
 from app.services import (
-    ahrefs_client,
+    blog_keywords as blog_keywords_service,
+    content_keywords as content_keywords_service,
     asset_check as asset_check_service,
     business_facts as business_facts_service,
+    competitor_validation as competitor_validation_service,
     cro_settings,
+    dataforseo_client,
     plan_context,
     design_md as design_md_service,
     design_tokens as design_tokens_service,
@@ -107,6 +111,8 @@ from app.services import (
     openai_image_client,
     runway_image_client,
     page_replica as page_replica_service,
+    page_variants as page_variants_service,
+    scraper as scraper_service,
     page_revision as page_revision_service,
     secondary_keywords as secondary_keywords_service,
     slide_deck as slide_deck_service,
@@ -116,8 +122,13 @@ from app.services import (
     sociavault_client,
     stream_locks,
     usage as usage_service,
+    keyword_rank,
+    service_synonyms,
+    vector_context,
+    webinar_sources as webinar_sources_service,
 )
 from app.services.api_errors import classify as classify_api_error
+from app.services.context_scope import MAX_SOURCE_RUN_HOPS, PHASE_SCOPED_CONTEXT_KEYS
 from app.services.image_briefs import GeneratedImage, ImageBrief
 from app.services.dependencies import (
     UNRESOLVED,
@@ -238,7 +249,9 @@ async def _next_version(session: AsyncSession, run_id: uuid.UUID, context_key: s
 
 
 @router.post("/runs/{run_id}/stages/{asset_id}/save", response_model=SaveStageResponse)
-async def save_stage(run_id: str, asset_id: str, payload: SaveStageRequest) -> SaveStageResponse:
+async def save_stage(
+    run_id: str, asset_id: str, payload: SaveStageRequest, background_tasks: BackgroundTasks
+) -> SaveStageResponse:
     """Persist one stage's approved generation output: new ContextEntry version, RunStage ->
     APPROVED, and an audit log row. This is what the "Save It" button in the chat stream calls."""
     try:
@@ -320,6 +333,9 @@ async def save_stage(run_id: str, asset_id: str, payload: SaveStageRequest) -> S
             asset_id,
             version,
         )
+        # Index the new version for context search after the response is sent. A search indexes
+        # lazily anyway, so this only saves the next stage's intake a second or two.
+        background_tasks.add_task(vector_context.index_run, run_uuid)
         return SaveStageResponse(
             run_id=run_id,
             asset_id=asset_id,
@@ -406,6 +422,9 @@ class SaveCompetitorRequest(BaseModel):
     location: str | None = None
     notes: str | None = None
     competitors: list[CompetitorOut] = []
+    #: The validation's ranking (`competitor_validation.render_md`), appended to the context prose
+    #: so the paired stage builds on what was judged to work for this client. Empty when not run.
+    validation_md: str = ""
 
 
 class SaveCompetitorResponse(BaseModel):
@@ -442,6 +461,9 @@ async def run_competitor_stage(asset_id: str, payload: RunCompetitorRequest) -> 
             "website_url": payload.target_url,
             "industry": payload.niche,
             "region": payload.location,
+            # Phase 1's headline service and Phase 2's sub-service share this field on the
+            # request; `resolve_inputs` prefers `sub_service` then `target_service`.
+            "target_service": payload.service,
             "sub_service": payload.service,
         },
     )
@@ -510,6 +532,47 @@ async def run_competitor_stage(asset_id: str, payload: RunCompetitorRequest) -> 
         ],
         notes=parsed.notes,
     )
+
+
+class ValidateCompetitorsRequest(BaseModel):
+    run_id: str | None = None
+    phase: str = DEFAULT_PHASE
+    chat_session_id: str | None = None
+    target_url: str = ""
+    location: str = ""
+    service: str = ""
+    client_profile: dict[str, str] = {}
+    competitors: list[CompetitorOut] = []
+
+
+@router.post("/competitor/{asset_id}/validate")
+async def validate_competitors_route(asset_id: str, payload: ValidateCompetitorsRequest) -> dict[str, object]:
+    """Score a competitor listing for this client before it is approved: proof (measured traffic,
+    rankings, live page, how common the play is), fit (keyword overlap, judged buyer fit, price
+    band) and feasibility (the client's own settings), then a verdict per competitor and per play.
+    One DataForSEO request per competitor page plus one for the client's site, free page reads and
+    one judge call. Stores nothing; always 200. See `app/services/competitor_validation.py`."""
+    cfg = COMPETITOR_CONFIGS_BY_PHASE.get(payload.phase, {}).get(asset_id)
+    if cfg is None:
+        raise HTTPException(status_code=404, detail=f"Unknown competitor asset_id {asset_id!r} for phase {payload.phase!r}")
+    profile = dict(payload.client_profile)
+    facts = await _business_facts(payload.run_id, profile, cfg.paired_main_asset_id, payload.phase)
+    report = await competitor_validation_service.validate(
+        asset_id,
+        payload.competitors,
+        facts,
+        client_url=payload.target_url or profile.get("website_url", ""),
+        region=payload.location or profile.get("region", ""),
+        service=payload.service or facts.service,
+        on_usage=usage_service.recorder(
+            kind="competitor_validation",
+            chat_session_id=payload.chat_session_id,
+            run_id=payload.run_id,
+            asset_id=asset_id,
+            phase=payload.phase,
+        ),
+    )
+    return report.as_dict()
 
 
 @router.post("/runs/{run_id}/competitor/{asset_id}/save", response_model=SaveCompetitorResponse)
@@ -597,6 +660,8 @@ async def save_competitor_stage(
             ),
             payload.target_url,
         )
+        if payload.validation_md.strip():
+            prose = f"{prose}\n\n{payload.validation_md.strip()}"
 
         version = await _next_version(session, run_uuid, asset_id)
         session.add(
@@ -727,40 +792,11 @@ class RunContextResponse(BaseModel):
 # A Phase-2 run chains to the Phase-1 run it was started from, and in principle that chain could be
 # longer (a sub-sub-service). Bounded so a `source_run_id` cycle — which nothing creates today, but
 # which a bad backfill or a hand-edited row could — cannot spin this request forever.
-_MAX_SOURCE_RUN_HOPS = 4
+_MAX_SOURCE_RUN_HOPS = MAX_SOURCE_RUN_HOPS
 
 
-# Context keys that stop at the run that wrote them, instead of being inherited down the
-# `source_run_id` chain like everything else.
-#
-# Inheritance is the default because what a sub-service run inherits describes the *client* — its
-# brand design, its CRO client settings, its industry — and none of that changes per sub-service.
-# These keys are the exception, and the distinction is about *scope*, not about freshness: each one
-# describes the *service* a run is for, and a sub-service is a different service.
-#
-#   `icp`, `offers`,      — the buyer, and the value ladder priced for that buyer. Phase 1 profiles
-#   `offer_ladder`          the buyer of the headline service; Phase 2 runs its own ICP stage for the
-#                           sub-service, because the person who buys "Meta Ads" is often not the one
-#                           who buys "Social Media Marketing". Inherited, the parent's ICP silently
-#                           answered six Phase 2 stages whenever the run's own had not been built —
-#                           a stage started out of order read the wrong buyer with no sign of it.
-#                           `offers` is here as well as `offer_ladder` because an approved stage is
-#                           stored under its asset id, and readiness looks a document up under both.
-#   `keyword_clusters`    — search demand for the service the run is for. Phase 1's is demand for
-#                           "Social Media Marketing"; Phase 2's is demand for "Meta Ads". They are
-#                           different keyword universes with different volumes and different
-#                           competition, and one is not an approximation of the other.
-#   `selected_headlines`  — the topics the operator picked, which are what every later stage in
-#                           that leg is written about. Inheriting them would put Phase 2's Meta Ads
-#                           blog, lead magnets and SMS sequence under a headline chosen for the
-#                           parent service — the exact topic drift the selection gate exists to
-#                           stop, reintroduced silently one level down.
-#
-# So a Phase-2 run that has not built its own gets a 404 and builds one, rather than quietly
-# working from the parent's. Everything else still inherits.
-PHASE_SCOPED_CONTEXT_KEYS: frozenset[str] = frozenset(
-    {"keyword_clusters", "selected_headlines", "icp", "offers", "offer_ladder"}
-)
+# `PHASE_SCOPED_CONTEXT_KEYS` and the hop limit live in `app/services/context_scope.py` (imported
+# above), so the vector search applies the same rule as `_latest_context_entry`.
 
 
 async def _latest_context_entry(
@@ -986,7 +1022,9 @@ class SeedContextResponse(BaseModel):
 
 
 @router.post("/runs/{run_id}/context", response_model=SeedContextResponse)
-async def seed_run_context(run_id: str, payload: SeedContextRequest) -> SeedContextResponse:
+async def seed_run_context(
+    run_id: str, payload: SeedContextRequest, background_tasks: BackgroundTasks
+) -> SeedContextResponse:
     """File a document under a context key by hand, so a stage that depends on it can run without
     the stage that would normally have produced it.
 
@@ -1052,6 +1090,7 @@ async def seed_run_context(run_id: str, payload: SeedContextRequest) -> SeedCont
         version,
         len(payload.content),
     )
+    background_tasks.add_task(vector_context.index_run, run_uuid)
     return SeedContextResponse(
         run_id=run_id,
         context_key=payload.context_key,
@@ -1448,8 +1487,8 @@ async def get_asset_readiness(
 # every later headline suggestion is grounded in, so it behaves like `_run_competitor_prepass` —
 # it runs, it reports a status, and its output is filed to the Context Store.
 #
-# Deliberately per-run rather than per-stage. One clustering pass costs real money at Ahrefs
-# (three calls per seed) and, more importantly, running it per stage would give the blog and the
+# Deliberately per-run rather than per-stage. One clustering pass costs real money at DataForSEO
+# (three requests per seed) and, more importantly, running it per stage would give the blog and the
 # pillar page *different* keyword universes for the same service — so the topics chosen at one
 # stage would stop lining up with the topics chosen at the next.
 # --------------------------------------------------------------------------------------
@@ -1496,8 +1535,56 @@ class KeywordReportResponse(BaseModel):
     clusters: list[KeywordClusterOut] = []
     warnings: list[str] = []
     reason: str | None = None
-    #: The country the volumes are for — what the asset's "Ahrefs keyword data" section names.
+    #: The country the volumes are for — what the asset's "Keyword data" section names.
     location: str = ""
+    #: The best-ranked keywords (`keyword_rank`), with the signals each was ranked on.
+    ranked: list[dict] = []
+    #: The ranked keywords grouped as primary keywords, each with its secondary keywords
+    #: (`keyword_rank.group_keywords`).
+    groups: list[dict] = []
+    #: Alternate names seeded per service (`service_synonyms`).
+    synonyms: dict[str, list[str]] = {}
+    #: Every seed the demand map was fetched from, synonyms included.
+    seeds: list[str] = []
+
+
+#: Ranked keywords returned to the UI (the deliverable's "Keyword data" section shows them).
+_RANKED_IN_RESPONSE = 25
+
+
+def _ranked_from_stored(stored: dict) -> list[dict]:
+    """The stored ranking, or one made now from the keyword rows of a report stored before ranking
+    existed (no trend on those)."""
+    rows = stored.get("ranked_keywords")
+    if not rows:
+        rows = [
+            k.as_dict()
+            for k in keyword_rank.rank_keywords(
+                r for r in (stored.get("clean_keywords") or []) if isinstance(r, dict) and r.get("volume") is not None
+            )
+        ]
+    return list(rows)[:_RANKED_IN_RESPONSE]
+
+
+def _groups_from_stored(stored: dict, report: dict) -> list[dict]:
+    """The stored primary/secondary grouping, or one made now for a report stored before it existed."""
+    groups = stored.get("keyword_groups")
+    if groups:
+        return list(groups)
+    ranked = keyword_rank.rank_keywords(
+        r for r in (stored.get("ranked_keywords") or stored.get("clean_keywords") or [])
+        if isinstance(r, dict) and r.get("volume") is not None
+    )
+    return [g.as_dict() for g in keyword_rank.group_keywords(ranked, _seeds_of(report))]
+
+
+def _seeds_of(report: dict) -> list[str]:
+    return [
+        str(block.get("seed"))
+        for service in report.get("service_hierarchy") or []
+        for block in service.get("seeds") or []
+        if block.get("seed")
+    ]
 
 
 def _cluster_summaries(report: dict) -> list[KeywordClusterOut]:
@@ -1586,6 +1673,10 @@ async def build_run_keywords(run_id: str, payload: BuildKeywordsRequest) -> Keyw
                     clusters=_cluster_summaries(report),
                     warnings=list(stored.get("warnings") or []),
                     location=str(stored.get("location") or ""),
+                    ranked=_ranked_from_stored(stored),
+                    groups=_groups_from_stored(stored, report),
+                    synonyms=dict(stored.get("service_synonyms") or {}),
+                    seeds=_seeds_of(report),
                 )
 
     async def on_usage(call_usage: usage_service.CallUsage) -> None:
@@ -1597,9 +1688,21 @@ async def build_run_keywords(run_id: str, payload: BuildKeywordsRequest) -> Keyw
             phase=payload.phase,
         )
 
+    # Alternate names for each service, so every way people search for it is seeded. Only on a real
+    # build: a reused report keeps the names it was built with. One Haiku call per service; a
+    # failure leaves the service seeded as before. The stub provider gets none, since it would only
+    # multiply placeholder keywords.
+    if keywords_service.provider_name() == "dataforseo":
+        industry = (payload.profile.get("industry_label") or "").strip()
+        services = list(config.services)
+        found = await asyncio.gather(
+            *(service_synonyms.synonyms_for(s, industry, on_usage, market=config.location_name) for s in services)
+        )
+        config = replace(config, synonyms={s: list(f.synonyms) for s, f in zip(services, found) if f.synonyms})
+
     try:
         result = await keywords_service.build_keyword_report(config, on_usage)
-    except (keywords_service.KeywordProviderError, ahrefs_client.AhrefsError) as exc:
+    except (keywords_service.KeywordProviderError, dataforseo_client.DataForSEOError) as exc:
         # The provider refusing is not a run-blocking fault: headline suggestions degrade to
         # framework-only grounding, which is worse but still works. Surfaced as a 502 so the caller
         # can say so, and so a bad `location_name` is visible rather than silently absorbed.
@@ -1645,6 +1748,10 @@ async def build_run_keywords(run_id: str, payload: BuildKeywordsRequest) -> Keyw
         clusters=_cluster_summaries(result.report),
         warnings=result.warnings,
         location=result.location,
+        ranked=result.ranked[:_RANKED_IN_RESPONSE],
+        groups=result.groups,
+        synonyms=result.synonyms,
+        seeds=_seeds_of(result.report),
     )
 
 
@@ -1676,6 +1783,10 @@ async def get_run_keywords(run_id: str) -> KeywordReportResponse:
         clusters=_cluster_summaries(report),
         warnings=list(stored.get("warnings") or []),
         location=str(stored.get("location") or ""),
+        ranked=_ranked_from_stored(stored),
+        groups=_groups_from_stored(stored, report),
+        synonyms=dict(stored.get("service_synonyms") or {}),
+        seeds=_seeds_of(report),
     )
 
 
@@ -2959,7 +3070,7 @@ async def scan_services_route(payload: ServiceScanRequest) -> ServiceScanRespons
 #
 # Phase 1's last stage suggests the sub-services Phase 2 builds. Discovery reads the client's menu,
 # the competitor listings this run already approved and its ICP, suggests what is missing, and puts
-# a real Ahrefs volume on every keyword. It stores nothing: the operator confirms the list on a
+# a real DataForSEO volume on every keyword. It stores nothing: the operator confirms the list on a
 # card, and the confirmed list is filed with `POST /runs/{id}/plan-sub-services`.
 # --------------------------------------------------------------------------------------
 
@@ -2994,7 +3105,7 @@ class SubServiceDiscoveryResponse(BaseModel):
     candidates: list[SubServiceCandidateOut]
     volume_source: str
     location: str = ""
-    #: Why the volumes are missing (Ahrefs unconfigured, rejected, out of units). The card warns with it.
+    #: Why the volumes are missing (DataForSEO unconfigured, rejected, out of balance). The card warns with it.
     volume_error: str = ""
     notes: list[str] = []
 
@@ -3019,7 +3130,7 @@ async def _discovery_context(run_id: str | None) -> tuple[str, str]:
 @router.post("/plan/sub-services/discover", response_model=SubServiceDiscoveryResponse)
 async def discover_sub_services_route(payload: SubServiceDiscoveryRequest) -> SubServiceDiscoveryResponse:
     """The sub-services the client's site already has under the primary service, the ones it should
-    add, and real search volumes for each. Two Haiku calls and one Ahrefs request."""
+    add, and real search volumes for each. Two Haiku calls and one DataForSEO request."""
     competitors, icp = await _discovery_context(payload.run_id)
     try:
         found = await sub_service_discovery.discover(
@@ -3048,11 +3159,77 @@ class SecondaryKeywordsRequest(BaseModel):
 
 @router.post("/keywords/secondary")
 async def secondary_keywords_route(payload: SecondaryKeywordsRequest) -> dict[str, object]:
-    """Secondary / cluster terms for a Pillar Page head term, from Ahrefs and from DataForSEO side by
-    side. Two requests per provider, stores nothing. Always 200: a provider that failed says why in
-    its own column, so the other column still shows."""
+    """Secondary / cluster terms for a Pillar Page head term, from DataForSEO. Two requests, stores
+    nothing. Always 200: a failure says why on the card, which then offers the text box."""
     result = await secondary_keywords_service.suggest(payload.head_term, payload.region)
     return result.as_dict()
+
+
+class BlogKeywordsRequest(BaseModel):
+    #: The search seed: the chosen topic's own keyword.
+    seed: NonBlankStr
+    region: str = ""
+    #: The keyword the operator has now, measured alongside the suggestions for comparison.
+    current_keyword: str = ""
+    run_id: str | None = None
+    #: The client's site, when the run has no captured design page to compare against.
+    website_url: str = ""
+
+
+async def _blog_keyword_sources(run_id: str | None, website_url: str) -> tuple[str, list[str]]:
+    """The client's reference page (the page the run's design was captured from, else its site) and
+    the Blog's approved competitor pages when this run has them (Phase 2 reviews them before the
+    intake; Phase 1's come later, so the card finds its own)."""
+    reference = website_url.strip()
+    competitors: list[str] = []
+    try:
+        run_uuid = uuid.UUID(run_id) if run_id else None
+    except ValueError:
+        run_uuid = None
+    if run_uuid is None:
+        return reference, competitors
+    async with get_sessionmaker()() as session:
+        stored = await _stored_design_tokens(session, run_uuid)
+        listing = await _entry_text_on_run(session, run_uuid, ("competitor_analysis_blog",))
+    if stored is not None and stored[0].get("source_url"):
+        reference = str(stored[0]["source_url"])
+    if listing.strip():
+        try:
+            parsed = parse_competitor_listing("competitor_analysis_blog", listing)
+            competitors = [c.page_url or f"https://{c.domain}/" for c in parsed.competitors]
+        except CompetitorParseError:
+            pass
+    return reference, competitors
+
+
+@router.post("/keywords/blog")
+async def blog_keywords_route(payload: BlogKeywordsRequest) -> dict[str, object]:
+    """Better keywords for a blog post: what the client's reference page and the competing pages rank
+    for, the seed's related searches, and the current keyword measured the same way for comparison,
+    all from DataForSEO. Stores nothing. Always 200: a
+    provider that failed says why. See `app/services/blog_keywords.py`."""
+    reference, competitors = await _blog_keyword_sources(payload.run_id, payload.website_url)
+    result = await blog_keywords_service.suggest(
+        payload.seed,
+        payload.region,
+        reference_url=reference,
+        competitor_urls=competitors,
+        current_keyword=payload.current_keyword,
+    )
+    return result.as_dict()
+
+
+class WebinarSourcesRequest(BaseModel):
+    #: The approved Competitor Analysis — Webinars listing, as the context store holds it.
+    listing: str = ""
+
+
+@router.post("/webinar/sources")
+async def webinar_sources_route(payload: WebinarSourcesRequest) -> dict[str, object]:
+    """The Webinar's competitor sources: each competitor webinar page the approved research found,
+    read for free, with why it was chosen. Stores nothing. Always 200: a page that could not be read
+    says why on its own row. See `app/services/webinar_sources.py`."""
+    return (await webinar_sources_service.collect(payload.listing)).as_dict()
 
 
 class PlanSubServicesRequest(BaseModel):
@@ -3148,9 +3325,29 @@ class AssetCheckResponse(BaseModel):
     facts_used: list[str]
     facts_missing: list[str]
     judge: str
+    judge_error: str = ""
     dropped_quotes: int = 0
     virality_basis: str = ""
     duration_ms: int = 0
+
+
+async def _keyword_targets(run_id: str | None, asset_id: str) -> keyword_rank.KeywordTargets | None:
+    """This run's own keyword targets for a stage, or None (no run, no report, the stub provider, a
+    stage in `NO_TARGETS`, or a read that failed). `keyword_clusters` is phase-scoped, so a Phase 2
+    run is never handed its parent's keywords."""
+    if not run_id or asset_id in keyword_rank.NO_TARGETS:
+        return None
+    try:
+        run_uuid = uuid.UUID(run_id)
+        async with get_sessionmaker()() as session:
+            found = await _latest_context_entry(session, run_uuid, KEYWORD_CONTEXT_KEY)
+    except Exception:  # noqa: BLE001 — keyword targets improve a draft; they never block one
+        logger.exception("Keyword targets for %s could not be read; generating without them", asset_id)
+        return None
+    if found is None:
+        return None
+    targets = keyword_rank.targets_from_entry(found[0].value)
+    return targets if targets.groups else None
 
 
 async def _business_facts(run_id: str | None, client_profile: dict[str, str], asset_id: str, phase: str = DEFAULT_PHASE):
@@ -4181,6 +4378,11 @@ class GenerateStageRequest(BaseModel):
     # earlier stages. Needed because blog / webinar / podcast collect only a topic, yet their
     # competitor prepass still needs a target URL to benchmark against.
     client_profile: dict[str, str] = {}
+    #: Pillar Page only: which variant this draft is (`page_variants.VARIANTS`). None is the stage
+    #: as it always was, one draft, Manus first.
+    variant: str | None = None
+    #: With a variant: build it with Manus rather than Claude ("Build with Manus" on the chosen one).
+    use_manus: bool = False
 
 
 class RefineStageRequest(BaseModel):
@@ -4197,6 +4399,8 @@ class RefineStageRequest(BaseModel):
     #: then handed the facts those findings were checked against — see `build_revision_prompt`.
     business_fix: bool = False
     client_profile: dict[str, str] = Field(default_factory=dict)
+    #: Which Pillar Page variant is being refined, so two variants refine side by side.
+    variant: str | None = None
     #: The copy the page was built from (the pillar page's `improved_page_content` answer), sent by
     #: the card that holds it. A page Refine takes its wording from this; without it the run's stored
     #: CRO rewrite is used. Ignored for every stage that is not refined by edits.
@@ -4226,6 +4430,8 @@ class ContinueStageRequest(BaseModel):
     #: holding — and would then be finishing the document against a *different* INPUTS block than
     #: the one the partial was written from.
     prefilled: dict[str, str] = Field(default_factory=dict)
+    #: The Pillar Page variant being finished, so it is finished under the same PAGE_VARIANT block.
+    variant: str | None = None
 
 
 # Answers that mean "the operator did not supply a competitor analysis", so the prepass should run.
@@ -4563,6 +4769,38 @@ async def _run_social_data_prepass(
     }
 
 
+async def _run_content_keyword_prepass(
+    asset_id: str, answers: dict[str, str], client_profile: dict[str, str], on_usage=None
+) -> tuple[dict[str, str], dict | None]:
+    """Content Marketing Strategy, both phases: fill `keyword_search_volume_data_source_optional`
+    with DataForSEO's measured keywords for the pillar service, rather than asking the operator for
+    an export. Two DataForSEO requests. An export the operator did supply is kept. A failure leaves
+    the field as it was, so the prompt falls back to labelled estimates, and the event says why.
+    See `app/services/content_keywords.py`."""
+    field_id = content_keywords_service.FIELD_ID
+    if asset_id != content_keywords_service.ASSET_ID or not content_keywords_service.wants_fill(answers.get(field_id)):
+        return answers, None
+    region = (
+        answers.get(content_keywords_service.REGION_FIELD_ID)
+        or client_profile.get("region_country")
+        or client_profile.get("region")
+        or ""
+    ).strip()
+    event: dict = {"type": "keyword_prepass", "asset_id": asset_id, "target_field_id": field_id}
+    try:
+        data = await content_keywords_service.fetch(
+            answers.get(content_keywords_service.SERVICE_FIELD_ID) or "",
+            region,
+            industry=(client_profile.get("industry_label") or "").strip(),
+            on_usage=on_usage,
+        )
+    except content_keywords_service.ContentKeywordError as exc:
+        logger.info("Content keyword prepass skipped: %s", exc)
+        return answers, {**event, "skipped": True, "error": str(exc)}
+    document = content_keywords_service.render_md(data)
+    return {**answers, field_id: document}, {**event, "skipped": False, "content": document}
+
+
 #: The engagement stats of the last fetched social sample — the asset check's virality benchmark.
 SOCIAL_SAMPLE_CONTEXT_KEY = "social_post_sample"
 
@@ -4604,6 +4842,8 @@ async def _generation_sse_stream(
     run_id: str | None = None,
     continue_from: str | None = None,
     prefilled: dict[str, str] | None = None,
+    variant: str | None = None,
+    use_manus: bool = False,
 ):
     """The generation stream, and — with `continue_from` set — the continuation of one that the
     output cap cut off.
@@ -4621,11 +4861,20 @@ async def _generation_sse_stream(
     """
     if prefilled:
         answers = {**answers, **{k: v for k, v in prefilled.items() if v}}
+    # A Pillar Page variant sees only its own document (`page_variants.answers_for`).
+    if variant and asset_id == "pillar_page":
+        answers = page_variants_service.answers_for(variant, answers)
+    # A whole upstream document read here only for its voice, proof and messaging becomes the
+    # sections of it relevant to this input (`vector_context.RETRIEVAL_FIELDS`). Done before the
+    # prepasses and on a continuation alike, so a continued draft reads the same INPUTS as the start.
+    answers, retrieval_event = await vector_context.expand_retrieval(run_id, asset_id, answers)
     # Reported on the terminating `done` event. A list rather than a plain variable because the
     # callback that fills it is handed to `generation.py` and runs in its frame, not this one.
     stop_reason: list[str | None] = [None]
 
     try:
+        if retrieval_event is not None and retrieval_event["fields"]:
+            yield _sse(retrieval_event)
         prepasses = PREPASS_BY_MAIN_ASSET_BY_PHASE.get(phase, {})
         if asset_id in prepasses:
             yield _sse({"type": "prepass_start", "asset_id": prepasses[asset_id].asset_id})
@@ -4657,6 +4906,19 @@ async def _generation_sse_stream(
             if social_stats and run_id:
                 await _store_social_sample(run_id, social_stats)
             yield _sse(social_prepass_event)
+
+        # Content Marketing Strategy: measured keyword volumes from DataForSEO instead of a pasted
+        # export. Skipped when the operator supplied one, or on a continuation that already has it.
+        answers, keyword_prepass_event = await _run_content_keyword_prepass(
+            asset_id,
+            answers,
+            client_profile,
+            on_usage=usage_service.recorder(
+                kind="keywords", chat_session_id=chat_session_id, run_id=run_id, asset_id=asset_id, phase=phase
+            ),
+        )
+        if keyword_prepass_event is not None:
+            yield _sse(keyword_prepass_event)
 
         # Pillar Page, both phases: read each selected service's own page so the sections the CRO
         # copy does not cover are written from what the client actually says about that service.
@@ -4736,11 +4998,32 @@ async def _generation_sse_stream(
         except Exception:  # noqa: BLE001 — the brief improves a draft; it must never block one
             logger.exception("Business brief for %s could not be built; generating without it", asset_id)
 
+        # The run's top-ranked primary and secondary keywords, as words to write with. Rides with the
+        # business brief into every builder (Claude, Manus, a continuation). Reported on the card so
+        # the deliverable's "Keyword data" section can say what was targeted and what was used.
+        keyword_targets = await _keyword_targets(run_id, asset_id)
+        if keyword_targets is not None:
+            business_brief += keyword_rank.targets_block(keyword_targets, asset_id)
+            yield _sse(keyword_targets.as_event())
+
+        # A Pillar Page variant: what it measured (free page reads) and the lens it takes, in the
+        # tail beside the business brief. A variant with nothing to work from fails here, before any
+        # model call, with the sentence saying what to supply.
+        if variant and asset_id == "pillar_page":
+            try:
+                measured = await _measure_page_variant(variant, answers, client_profile, run_id, keyword_targets)
+            except page_variants_service.VariantUnavailable as exc:
+                yield _sse(_variant_unavailable_event(variant, str(exc)))
+                return
+            business_brief += page_variants_service.variant_block(measured)
+            yield _sse(measured.as_event())
+
         # The Pillar Page is built by Manus when a key is set (`manus_page.py`). It gets the same
         # brief Claude would, and hands back the same document shape. A Manus failure is reported
         # and Claude builds the page instead, so the operator still gets one.
         manus_document: str | None = None
-        if not continue_from and manus_page.uses_manus(asset_id):
+        # Variants are drafted by Claude; the chosen one can then be built by Manus (`use_manus`).
+        if not continue_from and (not variant or use_manus) and manus_page.uses_manus(asset_id):
             brief, shots = build_agent_brief(asset_id, answers, phase, page_design, voice, business_brief)
             try:
                 async for item in manus_page.build_page(brief, shots, title=_manus_title(asset_id, answers, client_profile)):
@@ -4842,6 +5125,91 @@ async def _generation_sse_stream(
     # browser so that "what counts as cut off" is decided once. `stop_reason` rides along for the
     # transcript and for a future reason this is not the only non-`end_turn` ending worth naming.
     yield _sse(_done_event(stop_reason[0]))
+
+
+#: Where a Pillar Page variant finds the competitor listing when its own field is blank: this
+#: stage's search, then CRO's (Phase 2 drops the pillar page's search; its CRO search finds the
+#: competitors' pages for the sub-service).
+_VARIANT_LISTING_KEYS = ("competitor_analysis_seo_pillar_page", "competitor_analysis_cro")
+
+
+def _variant_unavailable_event(variant: str, message: str) -> dict:
+    """The stream's error event for a variant with nothing to work from: not retryable as it stands,
+    and about this draft only."""
+    return {
+        "type": "error",
+        "code": "variant_unavailable",
+        "title": f"{page_variants_service.LABELS.get(variant, variant)} can't be built",
+        "message": message,
+        "retryable": False,
+        "blocks_run": False,
+        "detail": message,
+        "action_url": None,
+        "action_label": None,
+    }
+
+
+def _variant_reference_url(answers: dict[str, str]) -> str | None:
+    """The page the reference variant must beat: the client's hosted page for this service. None in
+    no-reference mode unless a parent pillar page is named (Phase 2)."""
+    parent = _as_url((answers.get("parent_pillar_page_url") or "").strip())
+    if parent:
+        return parent
+    reference = (answers.get("reference_design_source") or "").strip()
+    if service_scan_service.is_no_reference(reference):
+        return None
+    return _as_url((answers.get("existing_page_url") or "").strip()) or _as_url(reference)
+
+
+def _listing_urls(listing_asset: str, text: str) -> list[str]:
+    try:
+        parsed = parse_competitor_listing(listing_asset, text)
+    except Exception:  # noqa: BLE001 — an unreadable listing is no pages, which the caller says
+        return []
+    return [c.page_url for c in parsed.competitors if c.page_url]
+
+
+async def _measure_page_variant(
+    variant: str,
+    answers: dict[str, str],
+    client_profile: dict[str, str],
+    run_id: str | None,
+    keyword_targets: keyword_rank.KeywordTargets | None,
+) -> page_variants_service.VariantMeasure:
+    listing = (answers.get("competitor_analysis_pillar_page") or "").strip()
+    listing_asset = "competitor_analysis_seo_pillar_page"
+    audit = ""
+    if run_id:
+        try:
+            run_uuid = uuid.UUID(run_id)
+            async with get_sessionmaker()() as session:
+                if variant == "reference":
+                    audit = await _context_text(session, run_uuid, "cro_audit_findings")
+                if variant == "competitor" and not listing:
+                    for key in _VARIANT_LISTING_KEYS:
+                        listing = await _context_text(session, run_uuid, key)
+                        if listing:
+                            listing_asset = key
+                            break
+        except Exception:  # noqa: BLE001 — a failed read is the same as nothing on record
+            logger.exception("Page variant inputs for run %s could not be read", run_id)
+    keywords: list[str] = []
+    if keyword_targets is not None:
+        for group in keyword_targets.groups:
+            keywords.append(group.primary.keyword)
+            keywords.extend(k.keyword for k in group.secondary[:2])
+    site = _as_url((client_profile or {}).get("website_url") or answers.get("client_website_url") or "")
+    return await page_variants_service.measure(
+        variant,
+        answers,
+        reference_url=_variant_reference_url(answers),
+        listing_text=listing,
+        client_host=urlparse(site).hostname if site else None,
+        audit_findings=audit,
+        keywords=keywords[:20],
+        parse_listing=lambda text: _listing_urls(listing_asset, text),
+        fetch=scraper_service._fetch_html,
+    )
 
 
 async def _chunked(document: str):
@@ -5042,6 +5410,10 @@ async def _revise_page_by_edits(
         len(report.rejected),
         len(report.skipped),
     )
+    for excerpt, why in report.rejected:
+        logger.info("Revision edit rejected stage=%s find=%r: %s", asset_id, excerpt[:80], why)
+    for finding, why in report.skipped:
+        logger.info("Revision finding skipped stage=%s finding=%r: %s", asset_id, finding[:80], why)
     return revised, report
 
 
@@ -5053,7 +5425,9 @@ def _claim_stream(kind: str, asset_id: str, payload: GenerateStageRequest | Refi
     can see and act on. `app/services/stream_locks.py` has the reasoning for guarding this on the
     server at all when the browser store guards it too.
     """
-    key = stream_locks.key_for(kind, asset_id, payload.phase, payload.run_id, payload.chat_session_id)
+    variant = getattr(payload, "variant", None)
+    lock_kind = f"{kind}:{variant}" if variant else kind
+    key = stream_locks.key_for(lock_kind, asset_id, payload.phase, payload.run_id, payload.chat_session_id)
     try:
         stream_locks.acquire(key)
     except stream_locks.StreamBusy as busy:
@@ -5119,6 +5493,8 @@ async def generate_stage_stream_route(asset_id: str, payload: GenerateStageReque
                 payload.phase,
                 payload.chat_session_id,
                 payload.run_id,
+                variant=payload.variant,
+                use_manus=payload.use_manus,
             ),
         ),
         media_type="text/event-stream",
@@ -5158,6 +5534,7 @@ async def continue_stage_stream_route(asset_id: str, payload: ContinueStageReque
                 payload.run_id,
                 continue_from=payload.partial_draft,
                 prefilled=payload.prefilled,
+                variant=payload.variant,
             ),
         ),
         media_type="text/event-stream",

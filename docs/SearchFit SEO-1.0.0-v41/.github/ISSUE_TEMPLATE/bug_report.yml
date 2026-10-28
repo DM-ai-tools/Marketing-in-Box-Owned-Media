@@ -1,0 +1,83 @@
+name: Bug report
+description: A skill, command, or agent behaves incorrectly or doesn't activate
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. The site URL and your Claude Code version are the two things that make a bug reproducible — please fill them in if you can.
+
+  - type: dropdown
+    id: component
+    attributes:
+      label: Which part of the toolkit?
+      options:
+        - "Skill — SEO Audit"
+        - "Skill — Technical SEO"
+        - "Skill — On-Page SEO"
+        - "Skill — Broken Links"
+        - "Skill — Internal Linking"
+        - "Skill — Schema Markup"
+        - "Skill — Content Strategy"
+        - "Skill — Content Brief"
+        - "Skill — Keyword Clustering"
+        - "Skill — AI Visibility"
+        - "Skill — Content Translation"
+        - "Command — /seo-check"
+        - "Command — /create-content"
+        - "Command — /create-topic"
+        - "Command — /generate-schema"
+        - "Command — /keyword-cluster"
+        - "Command — /translate-content"
+        - "Agent — SEO Auditor"
+        - "Agent — Content Strategist"
+        - "Agent — Competitor Analyzer"
+        - "Installation / marketplace"
+        - "Not sure"
+    validations:
+      required: true
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What did you expect, and what did you get instead?
+    validations:
+      required: true
+
+  - type: textarea
+    id: prompt
+    attributes:
+      label: What did you ask Claude?
+      description: Your exact prompt. If a skill failed to activate, this is the single most useful field.
+      render: text
+    validations:
+      required: true
+
+  - type: input
+    id: site-url
+    attributes:
+      label: Site URL you ran against
+      description: Leave blank if not applicable or if you'd rather not share it publicly.
+      placeholder: https://example.com
+
+  - type: input
+    id: cc-version
+    attributes:
+      label: Claude Code version
+      description: Run `claude --version`
+      placeholder: "2.0.0"
+    validations:
+      required: true
+
+  - type: input
+    id: plugin-version
+    attributes:
+      label: Plugin version
+      placeholder: "1.0.0"
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Anything else?
+      description: Relevant output, screenshots, or context.

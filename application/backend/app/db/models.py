@@ -39,9 +39,11 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    cast,
     func,
     text,
 )
+from sqlalchemy.types import UserDefinedType
 from sqlalchemy import Enum as SAEnum
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
@@ -367,6 +369,87 @@ class ContextEntry(Base):
     written_by_asset_id: Mapped[str | None] = mapped_column(
         String(100), ForeignKey("asset_definitions.asset_id", ondelete="RESTRICT"), nullable=True
     )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class Vector(UserDefinedType):
+    """pgvector's `vector(n)` column, without the `pgvector` package (which would pull numpy for
+    one type). Values go over the wire as pgvector's text form, `[0.1,0.2,…]`, cast explicitly so
+    no driver has to guess the parameter's type."""
+
+    cache_ok = True
+
+    def __init__(self, dimensions: int) -> None:
+        self.dimensions = dimensions
+
+    def get_col_spec(self, **_kw: object) -> str:
+        return f"VECTOR({self.dimensions})"
+
+    def bind_processor(self, _dialect):  # type: ignore[no-untyped-def]
+        def process(value):  # type: ignore[no-untyped-def]
+            if value is None:
+                return None
+            return "[" + ",".join(repr(float(x)) for x in value) + "]"
+
+        return process
+
+    def bind_expression(self, bindvalue):  # type: ignore[no-untyped-def]
+        return cast(bindvalue, self)
+
+    def result_processor(self, _dialect, _coltype):  # type: ignore[no-untyped-def]
+        def process(value):  # type: ignore[no-untyped-def]
+            if value is None or isinstance(value, list):
+                return value
+            return [float(x) for x in str(value).strip("[]").split(",") if x.strip()]
+
+        return process
+
+    class comparator_factory(UserDefinedType.Comparator):  # noqa: N801 - SQLAlchemy's name
+        def cosine_distance(self, other):  # type: ignore[no-untyped-def]
+            return self.op("<=>", return_type=Float)(other)
+
+
+class ContextChunk(Base):
+    """One searchable section of a `ContextEntry`, with its embedding. See
+    `app/services/vector_context.py`.
+
+    A derived index, not a record: every row can be rebuilt from `context_entries`, which is why
+    this table, unlike that one, has no append-only trigger. An entry is immutable, so its chunks are
+    written once per embedding model and never updated; `uq_context_chunks_entry_model_index` makes
+    two requests indexing the same entry at once harmless (`ON CONFLICT DO NOTHING`).
+
+    There is deliberately no HNSW/IVFFlat index on `embedding`. Every search is filtered to the
+    handful of entries one run can see (a few hundred chunks at most), and pgvector applies a
+    `WHERE` *after* an approximate index scan, so an ANN index would return fewer than `k` rows
+    for exactly the queries this app makes. The btree on `context_entry_id` gives the planner an
+    exact scan over a small set instead.
+    """
+
+    __tablename__ = "context_chunks"
+    __table_args__ = (
+        UniqueConstraint(
+            "context_entry_id", "embedding_model", "chunk_index", name="uq_context_chunks_entry_model_index"
+        ),
+        Index("ix_context_chunks_entry", "context_entry_id"),
+        Index("ix_context_chunks_run_key", "run_id", "context_key"),
+    )
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    context_entry_id: Mapped[uuid.UUID] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("context_entries.id", ondelete="CASCADE"), nullable=False
+    )
+    run_id: Mapped[uuid.UUID] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("runs.id", ondelete="CASCADE"), nullable=False
+    )
+    context_key: Mapped[str] = mapped_column(String(200), nullable=False)
+    chunk_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    #: The heading chain the chunk sits under, e.g. "PART 2 > Pricing". "" before the first heading.
+    section_path: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
+    text: Mapped[str] = mapped_column(Text, nullable=False)
+    embedding_model: Mapped[str] = mapped_column(String(100), nullable=False)
+    embedding: Mapped[list[float]] = mapped_column(Vector(1536), nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

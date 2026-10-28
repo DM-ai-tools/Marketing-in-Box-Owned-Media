@@ -6,6 +6,7 @@
  * Phase 1 asset — a page for the headline service where the operator asked for one for a sub-service,
  * with nothing in the output to say so. */
 import type { PipelinePhase } from "./pipelineData";
+import type { PrefillFieldIn } from "../lib/contextSearch";
 
 export interface CreateRunResponse {
   run_id: string;
@@ -247,13 +248,93 @@ export interface StreamStageOptions {
   /** Image generation that failed for this stage (a brief rejected, OpenAI unreachable). The stage
    * still runs without that image; these say so on the card. */
   onImageNotes?: (notes: string[]) => void;
+  /** An upstream document sent as its relevant sections rather than whole. */
+  onContextRetrieval?: (report: ContextRetrievalReport) => void;
+  /** The primary and secondary keywords this stage was told to write with. */
+  onKeywordTargets?: (targets: KeywordTargets) => void;
   /** A page Refine's report: the page is changed by exact edits, never retyped, and this says how
    * many landed and why any did not. Only a built pillar page's Refine sends it. */
   onRevisionEdits?: (report: RevisionEditReport) => void;
   /** The Pillar Page being built by Manus: started, progress every poll, done, or a fallback to
    * Claude with the reason. Only the pillar page, and only with a Manus key on the server. */
   onManus?: (event: ManusBuildEvent) => void;
+  /** Pillar Page variants: which take on the page this draft is (`lib/pageVariants.ts`). */
+  variant?: PageVariantId;
+  /** With a variant: build it with Manus rather than Claude ("Build with Manus"). */
+  useManus?: boolean;
+  /** What a Pillar Page variant measured before writing: the hosted page or the beat sheet. */
+  onPageVariant?: (event: PageVariantMeasure) => void;
   signal?: AbortSignal;
+}
+
+/** The four takes on a Pillar Page (`app/services/page_variants.py`). */
+export type PageVariantId = "reference" | "competitor" | "skills" | "framework";
+
+/** One page, measured (`page_compare.PageOutline`). Counted off the page, never judged. */
+export interface PageOutline {
+  label: string;
+  url: string | null;
+  words: number;
+  h1: string;
+  sections: string[];
+  ctas: number;
+  internal_links: number;
+  images: number;
+  faq: boolean;
+  schema_types: string[];
+  proof_mentions: number;
+  keywords_covered: string[];
+  keywords_checked: number;
+  error: string | null;
+}
+
+export interface BeatSheet {
+  competitors: PageOutline[];
+  topics: { topic: string; covered_by: string[] }[];
+  target_words: number | null;
+  max_words: number | null;
+  median_words: number | null;
+  faq_share: string;
+  schema_seen: string[];
+}
+
+/** The `page_variant` stream event. */
+export interface PageVariantMeasure {
+  variant: PageVariantId;
+  label: string;
+  reference: PageOutline | null;
+  beat_sheet: BeatSheet | null;
+  notes: string[];
+}
+
+/** One draft on the comparison card (`POST /pipeline/pillar/variants/compare`). */
+export interface VariantPageRow extends PageOutline {
+  variant: string;
+  has_page: boolean;
+  /** [covered, of] the beat sheet's topics, or null with no beat sheet. */
+  topics_covered: [number, number] | null;
+}
+
+/** `current` is the client's live page: the outline the reference variant measured when there is
+ * one (no read), else read by the server from `answers` (free, then 1 credit if walled off). Null
+ * when the page does not exist yet; a row with `error` when it could not be read. */
+export async function comparePageVariants(
+  drafts: { variant: string; label: string; text: string }[],
+  opts: { topics?: string[]; keywords?: string[]; current?: PageOutline | null; answers?: Record<string, string> } = {},
+): Promise<{ pages: VariantPageRow[]; current: VariantPageRow | null }> {
+  const res = await fetch("/api/pipeline/pillar/variants/compare", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      drafts,
+      topics: opts.topics ?? [],
+      keywords: opts.keywords ?? [],
+      current: opts.current ?? null,
+      answers: opts.answers ?? {},
+    }),
+  });
+  const body = await unwrap<{ pages: VariantPageRow[]; current?: VariantPageRow | null }>(res, "Compare the page variants");
+  return { pages: body.pages, current: body.current ?? null };
 }
 
 /** The `manus` stream event (`app/services/manus_page.py`). `status` is `started` | `resumed` |
@@ -319,15 +400,22 @@ type SseEvent =
   | { type: "prepass_start"; asset_id: string }
   | ({ type: "prepass" } & PrepassEvent)
   | { type: "social_prepass"; skipped?: boolean; content?: string; error?: string }
+  | { type: "keyword_prepass"; target_field_id: string; skipped?: boolean; content?: string; error?: string }
   | ReplicaStreamEvent
   | { type: "image_notes"; notes: string[] }
+  | ({ type: "context_retrieval" } & ContextRetrievalReport)
+  | ({ type: "keyword_targets" } & KeywordTargets)
   | ({ type: "manus" } & ManusBuildEvent)
-  | ({ type: "revision_edits" } & RevisionEditReport);
+  | ({ type: "revision_edits" } & RevisionEditReport)
+  | ({ type: "page_variant" } & PageVariantMeasure);
 
 /** The field `social_prepass` fills, so a continuation can hand back what the first attempt paid
  * for. Named here rather than inferred, because the event — unlike `prepass` — does not say which
  * field it answered: it only ever answers this one (see `_run_social_data_prepass`). */
 export const SOCIAL_POST_DATA_FIELD_ID = "raw_post_data_source";
+
+/** The `asset_id` a `keyword_prepass` is filed under (`app/services/content_keywords.py`). */
+export const KEYWORD_DATA_PREPASS_ID = "content_keyword_data";
 
 /** Mutable progress handed into the reader, so the retry wrapper can tell "nothing arrived" from
  * "it was generating and then broke". Those two need opposite handling and a thrown error cannot
@@ -402,6 +490,17 @@ async function consumeSseStream(
           });
         }
       }
+      else if (event.type === "keyword_prepass") {
+        // Content Marketing Strategy's DataForSEO keyword fetch: kept for replay like the social one.
+        if (!event.skipped && event.content) {
+          opts.onPrepass?.({
+            asset_id: KEYWORD_DATA_PREPASS_ID,
+            target_field_id: event.target_field_id,
+            skipped: false,
+            content: event.content,
+          });
+        }
+      }
       else if (
         event.type === "replica_template" ||
         event.type === "replica_start" ||
@@ -411,6 +510,13 @@ async function consumeSseStream(
         // A `replica_error` is the extra artifact failing, never the stage: the document has
         // already streamed in full. So it is reported, not thrown.
         opts.onReplica?.(event);
+      }
+      else if (event.type === "keyword_targets") {
+        const { type: _t, ...targets } = event;
+        if (targets.groups?.length) opts.onKeywordTargets?.(targets);
+      }
+      else if (event.type === "context_retrieval") {
+        if (event.fields?.length) opts.onContextRetrieval?.({ fields: event.fields, notes: event.notes ?? [] });
       }
       else if (event.type === "image_notes") {
         if (event.notes?.length) opts.onImageNotes?.(event.notes);
@@ -422,6 +528,10 @@ async function consumeSseStream(
       else if (event.type === "revision_edits") {
         const { type: _t, ...report } = event;
         opts.onRevisionEdits?.(report);
+      }
+      else if (event.type === "page_variant") {
+        const { type: _t, ...measure } = event;
+        opts.onPageVariant?.(measure);
       }
       else if (event.type === "error") {
         const fault = faultFromUnknown(event);
@@ -490,6 +600,8 @@ export async function streamGenerateStage(
           phase: opts.phase ?? "phase1",
           chat_session_id: opts.chatSessionId ?? null,
           run_id: opts.runId ?? null,
+          variant: opts.variant ?? null,
+          use_manus: Boolean(opts.useManus),
         }),
         signal: opts.signal,
       }),
@@ -524,6 +636,7 @@ export async function streamContinueStage(
           chat_session_id: opts.chatSessionId ?? null,
           run_id: opts.runId ?? null,
           prefilled: opts.prefilled ?? {},
+          variant: opts.variant ?? null,
         }),
         signal: opts.signal,
       }),
@@ -548,7 +661,7 @@ export async function streamRefineStage(
   /** The same two callbacks a generation gets. A revision is asked for the whole document, so it
    * can be cut off by the ceiling exactly as a generation can. `sourceCopy` is the copy the page was
    * built from; a built page is refined by edits written against it (see `page_revision.py`). */
-  opts: Pick<StreamStageOptions, "onDone" | "onRetry" | "onRevisionEdits"> & { sourceCopy?: string } = {},
+  opts: Pick<StreamStageOptions, "onDone" | "onRetry" | "onRevisionEdits" | "variant"> & { sourceCopy?: string } = {},
 ): Promise<void> {
   await streamWithRetry(
     () =>
@@ -564,6 +677,7 @@ export async function streamRefineStage(
           business_fix: Boolean(businessFix),
           client_profile: businessFix?.clientProfile ?? {},
           source_copy: opts.sourceCopy ?? null,
+          variant: opts.variant ?? null,
         }),
         signal,
       }),
@@ -581,6 +695,67 @@ export interface RunContextResult {
 
 /** Read an approved stage output back from the database. Returns null when nothing is stored yet
  * (a 404 here is an ordinary "not generated" answer, not a failure worth surfacing). */
+/** An answer to an intake question, found in a document this run already approved. Advisory: the
+ * question card offers it, the operator confirms it. See `app/services/vector_context.py`. */
+export interface FieldSuggestion {
+  field_id: string;
+  answer: string;
+  /** The words in the source that state the answer, verbatim. The server drops any answer whose
+   * quote is not in the section it names. */
+  quote: string;
+  context_key: string;
+  source_label: string;
+  section_path: string;
+  score: number;
+}
+
+export interface PrefillResult {
+  status: "ok" | "off" | "unavailable" | "empty" | "error";
+  suggestions: FieldSuggestion[];
+  notes: string[];
+  dropped: number;
+}
+
+/** Suggested answers for the questions a stage is about to ask. Always resolves: a failure is
+ * `null`, and the intake asks as it always has. */
+export async function prefillSuggestions(
+  runId: string,
+  assetId: string,
+  body: { fields: PrefillFieldIn[]; phase: PipelinePhase; chat_session_id: string | null },
+  signal?: AbortSignal,
+): Promise<PrefillResult | null> {
+  try {
+    const res = await fetch(`/api/pipeline/runs/${runId}/prefill/${assetId}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      signal,
+    });
+    if (!res.ok) {
+      console.warn(`Prefill for ${assetId} answered ${res.status}`);
+      return null;
+    }
+    return await res.json();
+  } catch (err) {
+    if (!signal?.aborted) console.warn(`Prefill for ${assetId} failed`, err);
+    return null;
+  }
+}
+
+/** A large upstream document sent to this stage as its relevant sections rather than whole
+ * (`vector_context.RETRIEVAL_FIELDS`). Reported so the card can say so. */
+export interface ContextRetrievalReport {
+  fields: {
+    field_id: string;
+    context_key: string;
+    sections: number;
+    total_sections: number;
+    chars_before: number;
+    chars_after: number;
+  }[];
+  notes: string[];
+}
+
 export async function fetchRunContext(runId: string, contextKey: string): Promise<RunContextResult | null> {
   const res = await fetch(`/api/pipeline/runs/${runId}/context/${contextKey}`);
   if (res.status === 404) return null;
@@ -712,6 +887,8 @@ export async function saveCompetitorAnalysis(
   runId: string,
   assetId: string,
   result: CompetitorAnalysisResult,
+  /** The validation's ranking (`CompetitorValidation.markdown`), carried into the stage's prompt. */
+  validationMd = "",
 ): Promise<SaveCompetitorResponse> {
   const res = await fetch(`/api/pipeline/runs/${runId}/competitor/${assetId}/save`, {
     method: "POST",
@@ -725,9 +902,109 @@ export async function saveCompetitorAnalysis(
       competitors: result.competitors,
       // Persisted on the analysis row for audit/re-parsing. Never rendered.
       raw_output: result.raw_output ?? "",
+      validation_md: validationMd,
     }),
   });
   return unwrap(res, "Save competitor analysis");
+}
+
+export type ValidationVerdict = "implement_now" | "test_first" | "differentiate" | "avoid" | "not_a_fit";
+
+/** One number with where it came from: `measured`, `judged` or `unavailable` (never a guessed 0). */
+export interface ValidationMetric {
+  key: string;
+  label: string;
+  value: string;
+  score: number | null;
+  source: "measured" | "judged" | "unavailable";
+  detail: string;
+}
+
+export interface ValidatedCompetitor {
+  rank: number;
+  name: string;
+  domain: string;
+  page_url: string | null;
+  play: string;
+  proof: number | null;
+  fit: number | null;
+  feasibility: number | null;
+  total: number | null;
+  verdict: ValidationVerdict;
+  verdict_reason: string;
+  metrics: ValidationMetric[];
+  blockers: { reason: string; source: "rule" | "judged"; quote: string }[];
+  what_to_take: string;
+  how_to_prove: string;
+  /** Steps to adapt `what_to_take` for this client's asset. Absent on a report scored before it. */
+  how_to_apply?: string;
+  top_keywords: { keyword: string; position: number | null; volume: number | null }[];
+  /** Organic-traffic band vs the client's own domain: `above` / `peer` / `below`. */
+  business_level: "above" | "peer" | "below" | null;
+  page_count: number | null;
+  keyword_count: number | null;
+  /** Every keyword scanned for this domain, shown on hover. Absent on a report scored before it. */
+  scanned_keywords?: ScannedKeyword[];
+}
+
+/** One keyword a domain ranks for, as DataForSEO reported it. */
+export interface ScannedKeyword {
+  keyword: string;
+  position: number | null;
+  volume: number | null;
+  url?: string;
+}
+
+export interface CompetitorValidation {
+  asset_id: string;
+  location: string;
+  client_traffic: number | null;
+  client_top10: number | null;
+  client_page_count: number | null;
+  client_keyword_count: number | null;
+  /** The client's own scanned keywords, for the baseline line's hover. */
+  client_keywords?: ScannedKeyword[];
+  /** Keywords scanned per domain (the top N by estimated traffic). */
+  scanned_limit?: number;
+  competitors: ValidatedCompetitor[];
+  plays: {
+    play: string;
+    count: number;
+    share: number;
+    combined_traffic: number | null;
+    average_fit: number | null;
+    verdict: ValidationVerdict;
+    competitors: string[];
+  }[];
+  market_gaps: string[];
+  sources: string[];
+  notes: string[];
+  judge: "ok" | "unavailable";
+  dropped_quotes: number;
+  markdown: string;
+}
+
+/** `POST /pipeline/competitor/{assetId}/validate` — proof, fit and feasibility for this client.
+ * One DataForSEO request per competitor plus one judge call; stores nothing. */
+export async function validateCompetitors(
+  assetId: string,
+  body: {
+    run_id: string | null;
+    phase: PipelinePhase;
+    chat_session_id?: string | null;
+    target_url: string;
+    location: string;
+    service: string;
+    client_profile: Record<string, string>;
+    competitors: CompetitorRow[];
+  },
+): Promise<CompetitorValidation> {
+  const res = await fetch(`/api/pipeline/competitor/${assetId}/validate`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  return unwrap(res, "Competitor validation");
 }
 
 /** Thin client for `app/routers/chat_sessions.py` — the chat-history sidebar's persistence.
@@ -811,8 +1088,46 @@ export interface KeywordReportResult {
   clusters: KeywordClusterSummary[];
   warnings: string[];
   reason?: string | null;
-  /** The country the volumes are for (Ahrefs has countries only). Empty for the stub provider. */
+  /** The country the volumes are for (countries only). Empty for the stub provider. */
   location?: string;
+  /** The best-ranked keywords (`keyword_rank.py`). Absent on reports read before ranking existed. */
+  ranked?: RankedKeyword[];
+  /** The ranked keywords as primary keywords, each with its secondary keywords. */
+  groups?: KeywordGroup[];
+  /** Alternate names seeded per service (`service_synonyms.py`). */
+  synonyms?: Record<string, string[]>;
+  /** Every seed the demand map was fetched from, alternate names included. */
+  seeds?: string[];
+}
+
+/** One keyword, ranked on searches, estimated traffic and search momentum. Missing numbers are
+ * null, never 0. */
+export interface RankedKeyword {
+  keyword: string;
+  volume: number | null;
+  difficulty: number | null;
+  /** % change in searches (quarter, else year). */
+  trend: number | null;
+  est_traffic: number | null;
+  virality: number | null;
+  score: number | null;
+  rank: number;
+  intent?: string | null;
+}
+
+/** A primary keyword (a core search term) and its secondaries (the same search with a modifier). */
+export interface KeywordGroup {
+  primary: RankedKeyword;
+  secondary: RankedKeyword[];
+  combined_volume: number;
+}
+
+/** What one stage was told to target (the `keyword_targets` stream event). */
+export interface KeywordTargets {
+  service: string;
+  location: string;
+  groups: KeywordGroup[];
+  synonyms: Record<string, string[]>;
 }
 
 export async function buildRunKeywords(
@@ -1148,6 +1463,107 @@ export async function reviseFunnelItem(
 
 export function funnelBuildZipUrl(runId: string): string {
   return `/api/pipeline/runs/${runId}/funnel-build/zip`;
+}
+
+// ------------------------------------------------------------------------------------------------
+// Blog keywords — `app/services/blog_keywords.py`
+// ------------------------------------------------------------------------------------------------
+
+export interface BlogCompetitorRank {
+  domain: string;
+  position: number | null;
+  url: string;
+}
+
+/** One keyword, measured against the client's reference page and the competing pages. */
+export interface BlogKeywordOpportunity {
+  keyword: string;
+  dataforseo_volume: number | null;
+  dataforseo_difficulty: number | null;
+  /** The same as `dataforseo_volume` / `_difficulty`, under the name every card reads. */
+  volume: number | null;
+  difficulty: number | null;
+  cpc: number | null;
+  intent: string | null;
+  /** The client's reference page's position for it, when it ranks. */
+  reference_position: number | null;
+  competitors: BlogCompetitorRank[];
+  /** gap: competitors rank and the client does not · improve: the client ranks past page one ·
+   * new: nobody compared ranks · owned: the client already ranks top 10. */
+  status: "gap" | "improve" | "new" | "owned";
+  score: number;
+  sources: string[];
+}
+
+export interface BlogComparedPage {
+  role: "reference" | "competitor";
+  url: string;
+  domain: string;
+  ranked: number | null;
+  on_topic: number | null;
+  error: string;
+}
+
+export interface BlogKeywordSuggestions {
+  seed: string;
+  location: string;
+  current: BlogKeywordOpportunity | null;
+  primary: BlogKeywordOpportunity[];
+  secondary: BlogKeywordOpportunity[];
+  compared: BlogComparedPage[];
+  /** "listing": the Blog's approved competitors · "serp": Google's top results for the seed. */
+  competitor_source: string;
+  dataforseo: { status: "ok" | "unconfigured" | "error"; error: string };
+  notes: string[];
+}
+
+/** Better keywords for a blog post, compared against the client's page and the competing pages. */
+export async function fetchBlogKeywords(body: {
+  seed: string;
+  region: string;
+  current_keyword: string;
+  run_id: string | null;
+  website_url: string;
+}): Promise<BlogKeywordSuggestions> {
+  const res = await fetch(`/api/pipeline/keywords/blog`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  return unwrap(res, "Blog keyword suggestions");
+}
+
+/** One competitor webinar page, as `POST /pipeline/webinar/sources` reports it. */
+export interface WebinarSource {
+  name: string;
+  domain: string;
+  url: string | null;
+  confidence: string;
+  /** Why this page was chosen, in the competitor research's own words. */
+  reason: string;
+  status: "read" | "failed" | "not_read";
+  title: string | null;
+  chars: number;
+  excerpt: string;
+  error: string;
+}
+
+export interface WebinarSourcesResult {
+  sources: WebinarSource[];
+  /** The field's answer: every page read, with its reason. "" when none was read. */
+  block: string;
+  notes: string[];
+}
+
+/** `POST /pipeline/webinar/sources` — the competitor webinar pages the approved research found, read
+ * for free. Stores nothing. See `app/services/webinar_sources.py`. */
+export async function fetchWebinarSources(listing: string): Promise<WebinarSourcesResult> {
+  const res = await fetch("/api/pipeline/webinar/sources", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ listing }),
+  });
+  return unwrap(res, "Competitor webinar sources");
 }
 
 export interface StandaloneHtml {
@@ -1539,6 +1955,8 @@ export interface AssetCheckReport {
   facts_missing: string[];
   /** "ok", or "unavailable" when only the rule findings could be produced. */
   judge: "ok" | "unavailable" | "skipped";
+  /** Why the review step was unavailable, when it was. */
+  judge_error?: string;
   dropped_quotes: number;
   virality_basis: "" | "benchmarked" | "rubric only";
   duration_ms: number;
@@ -1584,7 +2002,7 @@ export async function scanServices(
   return unwrap<ServiceScanResult>(res, "Find this site's services");
 }
 
-/** One keyword of a suggested sub-service. `volume` is Ahrefs' monthly searches, or null when
+/** One keyword of a suggested sub-service. `volume` is DataForSEO's monthly searches, or null when
  * it was not measured — never 0, which would claim a measured absence of demand. */
 export interface KeywordVolume {
   keyword: string;
@@ -1609,16 +2027,16 @@ export interface SubServiceDiscovery {
   source_url: string;
   primary_service: string;
   candidates: PlanSubServiceCandidate[];
-  /** "ahrefs" when the volumes are measured, "unavailable" when they could not be. */
+  /** "dataforseo" when the volumes are measured, "unavailable" when they could not be. */
   volume_source: string;
   location: string;
-  /** Why the volumes are missing, when they are: Ahrefs unconfigured, rejected, out of units. */
+  /** Why the volumes are missing, when they are: DataForSEO unconfigured, rejected, out of balance. */
   volume_error?: string;
   notes: string[];
 }
 
 /** The Plan of Action's sub-services: what the client's site already has under the primary service,
- * what it should add, and real search volumes. Two small model calls and one Ahrefs request;
+ * what it should add, and real search volumes. Two small model calls and one DataForSEO request;
  * stores nothing. See `app/services/sub_service_discovery.py`. */
 export async function discoverSubServices(
   primaryService: string,
@@ -1648,7 +2066,7 @@ export interface SecondaryKeyword {
   intent: string | null;
 }
 
-export type KeywordProvider = "ahrefs" | "dataforseo";
+export type KeywordProvider = "dataforseo";
 
 export interface ProviderSuggestions {
   provider: KeywordProvider;
@@ -1658,17 +2076,16 @@ export interface ProviderSuggestions {
   error: string;
 }
 
-/** `POST /pipeline/keywords/secondary` — both providers' suggestions for one head term. */
+/** `POST /pipeline/keywords/secondary` — DataForSEO's suggestions for one head term. */
 export interface SecondarySuggestions {
   head_term: string;
-  /** The country both were asked for; "" when the region named none. */
+  /** The country it was asked for; "" when the region named none. */
   location: string;
-  ahrefs: ProviderSuggestions;
   dataforseo: ProviderSuggestions;
 }
 
-/** Secondary / cluster terms for a Pillar Page head term, Ahrefs and DataForSEO side by side. Always
- * resolves for a provider failure: each column carries its own status. */
+/** Secondary / cluster terms for a Pillar Page head term, from DataForSEO. Always resolves for a
+ * provider failure: the result carries its own status. */
 export async function fetchSecondaryKeywords(headTerm: string, region: string): Promise<SecondarySuggestions> {
   const res = await fetch("/api/pipeline/keywords/secondary", {
     method: "POST",
@@ -1690,6 +2107,104 @@ export async function savePlanSubServices(runId: string, content: string): Promi
 
 /** Check a draft (saved or not) against the client's offers, funnel, business rules and predicted
  * virality. Stores nothing; one low-effort model call plus free rule checks. */
+export interface BuyerPhrase {
+  keyword: string;
+  volume: number | null;
+  difficulty: number | null;
+  trend: number | null;
+  score: number | null;
+}
+
+export interface OutcomeCluster {
+  name: string;
+  phrases: BuyerPhrase[];
+  combined_volume: number;
+  /** An outcome of what sets the service apart from its plain version (the "AI" of AI SEO). */
+  distinct?: boolean;
+}
+
+export interface AvoidItem {
+  term: string;
+  kind: "competitor" | "jargon" | "claim";
+  reason: string;
+  alternative: string;
+  term_volume: number | null;
+  alternative_volume: number | null;
+}
+
+/** Suggestions for CRO's buyer-language questions (`app/services/buyer_language.py`). */
+export interface BuyerLanguageResult {
+  mode: "outcome" | "avoid";
+  location: string;
+  clusters: OutcomeCluster[];
+  avoid: AvoidItem[];
+  sources: string[];
+  notes: string[];
+}
+
+export async function fetchBuyerLanguage(body: {
+  mode: "outcome" | "avoid";
+  services: string[];
+  region: string;
+  landing_url: string;
+  industry: string;
+  run_id: string | null;
+  phase: string;
+  chat_session_id: string | null;
+}): Promise<BuyerLanguageResult> {
+  const res = await fetch("/api/pipeline/keywords/buyer-language", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  return unwrap<BuyerLanguageResult>(res, "Suggest buyer language");
+}
+
+/** One point of a deliverable's summary. `section` is one of the document's own headings, or "". */
+export interface SummaryPoint {
+  text: string;
+  section: string;
+}
+
+/** The reader's Summary tab: what the document contains, as checked points
+ * (`app/services/asset_summary.py`). Throws an `ApiFaultError` with the server's sentence. */
+export async function summariseDocument(
+  assetId: string,
+  text: string,
+  opts: { label?: string; phase?: string; runId?: string | null; chatSessionId?: string | null } = {},
+): Promise<{ points: SummaryPoint[] }> {
+  const res = await fetch(`/api/pipeline/summary/${assetId}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      text,
+      label: opts.label ?? "",
+      phase: opts.phase ?? "phase1",
+      run_id: opts.runId ?? null,
+      chat_session_id: opts.chatSessionId ?? null,
+    }),
+  });
+  return unwrap<{ points: SummaryPoint[] }>(res, "Summarise this document");
+}
+
+/** An uploaded file's text, for the clip button on a file question. Stores nothing. */
+export interface ExtractedFile {
+  filename: string;
+  kind: "pdf" | "docx" | "markdown" | "text";
+  text: string;
+  /** Characters in the whole file, before any cut. */
+  chars: number;
+  pages: number | null;
+  truncated: boolean;
+}
+
+export async function extractFileText(file: File, signal?: AbortSignal): Promise<ExtractedFile> {
+  const body = new FormData();
+  body.append("file", file, file.name);
+  const res = await fetch("/api/pipeline/files/extract", { method: "POST", body, signal });
+  return unwrap<ExtractedFile>(res, "Read this file");
+}
+
 export async function checkAsset(
   assetId: string,
   text: string,

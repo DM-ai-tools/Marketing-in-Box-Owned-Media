@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { motion } from "framer-motion";
 import { useShallow } from "zustand/react/shallow";
 import { ASSET_BY_ID } from "../data/assetCatalog";
@@ -37,13 +38,22 @@ import { ScrapeCard } from "./ScrapeCard";
 import { ServiceChoiceCard } from "./ServiceChoiceCard";
 import { PlanSubServiceCard } from "./PlanSubServiceCard";
 import { SecondaryKeywordCard } from "./SecondaryKeywordCard";
+import { BlogKeywordCard } from "./BlogKeywordCard";
+import { WebinarSourcesCard } from "./WebinarSourcesCard";
+import { BuyerLanguageCard } from "./BuyerLanguageCard";
 import { FunnelBuildCard } from "./FunnelBuildCard";
+import { PageVariantsCard } from "./PageVariantsCard";
+import { VariantCompareCard } from "./VariantCompareCard";
+import { VariantNote } from "./VariantNote";
+import { FixesApplied, FixingBanner, FixingDraft } from "./FixingBanner";
 import { IndustryGuessOptions, StageAdvisoryCard } from "./IndustryCards";
 import { AssetCheckPanel } from "./AssetCheckPanel";
 import { ImageNotes, ManusPanel, ReplicaPanel } from "./ReplicaPanel";
+import { ContextRetrievalNote, SuggestionOptions } from "./ContextSearch";
 import { NEW_PAGE_OPTIONS, PHASE_META, stageAt, stagesFor, totalStagesFor } from "./pipelineData";
 import { PipelineInputBar } from "./PipelineInputBar";
 import {
+  approvedAssetIds,
   fieldBeingAsked,
   messagesInPhase,
   selectCanRerun,
@@ -51,6 +61,7 @@ import {
   selectCanStop,
   selectNeedsResume,
   selectStoppableStage,
+  isFixing,
   usePipelineStore,
 } from "./pipelineStore";
 import type { PipelineMessage } from "./pipelineStore";
@@ -658,6 +669,7 @@ function GenerationBody({ message, label }: { message: PipelineMessage; label: s
 
 function GenerationCard({ message }: { message: PipelineMessage }) {
   const retryGeneration = usePipelineStore((s) => s.retryGeneration);
+  const buildVariantWithManus = usePipelineStore((s) => s.buildVariantWithManus);
   const phase = usePipelineStore((s) => s.phase);
   const openReader = useUiStore((s) => s.openReader);
   const stage = stagesFor(phase).find((s) => s.asset.asset_id === message.assetId);
@@ -761,10 +773,12 @@ function GenerationCard({ message }: { message: PipelineMessage }) {
     >
       {header}
       {message.prepass && <PrepassChip prepass={message.prepass} />}
+      <VariantNote message={message} onBuildWithManus={() => void buildVariantWithManus(message.id)} />
       {/* This draft was generated from answers the operator has since changed. Kept for comparison,
           but its Save button is gone: approving it would put superseded answers into the Context
-          Store, and every later stage reads from there. */}
-      {message.superseded && (
+          Store, and every later stage reads from there. A variant kept as an alternate, closed by
+          another's approval, or rebuilt with Manus, says so in its variant note instead. */}
+      {message.superseded && !message.variantNotChosen && !message.variantAlternate && !message.manusRebuilt && (
         <div className="mb-2.5 rounded-lg border border-[var(--border)] bg-[var(--bg-sunken)] px-2.5 py-1.5 text-[0.76rem] text-[var(--fg-muted)]">
           Replaced — an answer changed after this draft was generated, so it's been regenerated below.
         </div>
@@ -801,14 +815,25 @@ function GenerationCard({ message }: { message: PipelineMessage }) {
         <TruncatedNotice message={message} />
       )}
       {!message.superseded && <ManusPanel build={message.manus} streaming={message.streaming} />}
-      <GenerationBody message={message} label={stage?.asset.label ?? "Generated page"} />
+      {/* "Fix with Refine" edits this card in place: the draft stays readable until the fixed one
+          replaces it, and nothing is posted to the transcript. */}
+      {isFixing(message) ? <FixingBanner /> : <FixesApplied at={message.fixedAt} />}
+      {!isFixing(message) && message.fixNote && (
+        <div className="mb-2.5 rounded-lg border px-2.5 py-1.5 text-[0.76rem]" style={{ borderColor: "var(--color-signal-amber)" }}>
+          {message.fixNote}
+        </div>
+      )}
+      <FixingDraft fixing={isFixing(message)}>
+        <GenerationBody message={message} label={stage?.asset.label ?? "Generated page"} />
+      </FixingDraft>
       {!message.superseded && <ImageNotes notes={message.imageNotes} />}
+      {!message.superseded && <ContextRetrievalNote report={message.contextRetrieval} assetId={message.assetId} />}
       {!message.superseded && <ReplicaPanel message={message} label={stage?.asset.label ?? "Generated page"} />}
       {/* Above Approve, never instead of it: the check advises, the operator decides. */}
-      {!message.streaming && !message.superseded && message.check && checkAppliesTo(message.phase, message.assetId) && (
+      {!message.streaming && !message.superseded && !isFixing(message) && message.check && checkAppliesTo(message.phase, message.assetId) && (
         <AssetCheckPanel message={message} />
       )}
-      {!message.streaming && !message.superseded && (
+      {!message.streaming && !message.superseded && !isFixing(message) && (
         <ActionRow
           message={message}
           label={stage?.asset.label ?? "Generated asset"}
@@ -866,6 +891,7 @@ function QuestionCard({ message }: { message: PipelineMessage }) {
         <>
           {/* Above the pills: the guess is the one-click answer, the pills are the correction. */}
           {message.industryGuess && <IndustryGuessOptions message={message} />}
+          {!message.editing && <SuggestionOptions message={message} />}
           {showWidget ? (
             <QuestionWidget field={field} onChoose={(v) => submitAnswer(v)} onSkip={skipField} />
           ) : (
@@ -1100,8 +1126,19 @@ function StopStageBar() {
  * underneath it to suggest continuing the stage they just walked out of. */
 function StageStoppedCard({ message }: { message: PipelineMessage }) {
   const startAtStage = usePipelineStore((s) => s.startAtStage);
+  const continueToNextStage = usePipelineStore((s) => s.continueToNextStage);
+  const nextLabel = usePipelineStore((s) => {
+    const trackId = s.phase === "phase2" ? s.activePhase2TrackId : null;
+    const approved = approvedAssetIds(s.messages, s.phase, trackId);
+    if (!message.stopped || !approved.has(message.stopped.assetId)) return null;
+    const next = stagesFor(s.phase).find((st) => !approved.has(st.asset.asset_id));
+    return next ? `Stage ${String(next.stageNumber).padStart(2, "0")}: ${next.asset.label}` : "";
+  });
   const stopped = message.stopped;
   if (!stopped) return null;
+  // A stage that is approved (it was stopped after the fact) has nothing to start again: the way on
+  // is the next stage still to build.
+  const done = nextLabel !== null;
 
   return (
     <div className="w-full min-w-0 max-w-[35rem] rounded-2xl border border-[var(--border)] bg-[var(--bg-raised)] px-3 py-3 msg-rise @[30rem]:px-4 @[30rem]:py-3.5">
@@ -1119,28 +1156,154 @@ function StageStoppedCard({ message }: { message: PipelineMessage }) {
         Pick any stage from the Asset Pipeline panel to start it — each one checks what it needs
         against this run first.
       </Hint>
-      <div className="mt-2.5 flex flex-wrap items-center gap-2">
-        <motion.button
-          type="button"
-          onClick={() => startAtStage(stopped.assetId)}
-          whileTap={{ scale: 0.97 }}
-          className="min-h-10 cursor-pointer rounded-full border border-[var(--border-strong)] px-3.5 py-1.5 text-[0.8rem] font-medium sm:min-h-0"
-        >
-          Start {stopped.label} again
-        </motion.button>
-      </div>
+      {!message.superseded && (
+        <div className="mt-2.5 flex flex-wrap items-center gap-2">
+          {done ? (
+            <motion.button
+              type="button"
+              onClick={() => continueToNextStage()}
+              whileTap={{ scale: 0.97 }}
+              className="min-h-10 cursor-pointer rounded-full px-3.5 py-1.5 text-[0.8rem] font-semibold text-white sm:min-h-0"
+              style={{ backgroundColor: "var(--color-electric-blue)" }}
+            >
+              {nextLabel ? `Continue with ${nextLabel}` : "Finish this phase"}
+            </motion.button>
+          ) : (
+            <motion.button
+              type="button"
+              onClick={() => startAtStage(stopped.assetId)}
+              whileTap={{ scale: 0.97 }}
+              className="min-h-10 cursor-pointer rounded-full border border-[var(--border-strong)] px-3.5 py-1.5 text-[0.8rem] font-medium sm:min-h-0"
+            >
+              Start {stopped.label} again
+            </motion.button>
+          )}
+        </div>
+      )}
     </div>
   );
 }
 
 function TextBubble({ message }: { message: PipelineMessage }) {
   const isUser = message.role === "user";
+  const deleteUserMessage = usePipelineStore((s) => s.deleteUserMessage);
+  // Where the menu opens: the pointer, or the bubble's corner from the keyboard. Viewport pixels.
+  const [menuAt, setMenuAt] = useState<{ x: number; y: number } | null>(null);
+  const menuOpen = menuAt !== null;
+  const setMenuOpen = (open: boolean) => {
+    if (!open) setMenuAt(null);
+  };
+  const [confirming, setConfirming] = useState(false);
+  const bubbleRef = useRef<HTMLDivElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+
+  // Any click elsewhere, or Escape, closes the menu.
+  useEffect(() => {
+    if (!menuOpen) return;
+    const close = (e: Event) => {
+      if (e instanceof KeyboardEvent && e.key !== "Escape") return;
+      if (e instanceof MouseEvent && menuRef.current?.contains(e.target as Node)) return;
+      setMenuOpen(false);
+      setConfirming(false);
+    };
+    // Scrolling the transcript would leave a fixed menu floating away from its bubble.
+    const dismiss = () => {
+      setMenuOpen(false);
+      setConfirming(false);
+    };
+    document.addEventListener("mousedown", close);
+    document.addEventListener("keydown", close);
+    window.addEventListener("scroll", dismiss, true);
+    window.addEventListener("resize", dismiss);
+    return () => {
+      document.removeEventListener("mousedown", close);
+      document.removeEventListener("keydown", close);
+      window.removeEventListener("scroll", dismiss, true);
+      window.removeEventListener("resize", dismiss);
+    };
+  }, [menuOpen]);
+
   return (
     <div
-      className={`min-w-0 max-w-[88%] rounded-2xl px-3.5 py-2.5 text-[0.92rem] leading-relaxed msg-rise @[30rem]:max-w-[34rem] @[30rem]:px-4 ${
-        isUser ? "bg-[var(--accent)] text-[var(--accent-fg)]" : "border border-[var(--border)] bg-[var(--bg-raised)]"
+      ref={bubbleRef}
+      data-user-bubble={isUser || undefined}
+      // Right-click (or the keyboard's context-menu key, once focused) opens Delete on the operator's
+      // own messages. The browser's menu still opens on everything else.
+      tabIndex={isUser ? 0 : undefined}
+      onContextMenu={
+        isUser
+          ? (e) => {
+              e.preventDefault();
+              // A keyboard-opened menu reports (0, 0): anchor it under the bubble instead.
+              const box = e.currentTarget.getBoundingClientRect();
+              const fromKeyboard = e.clientX === 0 && e.clientY === 0;
+              setMenuAt(fromKeyboard ? { x: box.right - 224, y: box.bottom + 4 } : { x: e.clientX, y: e.clientY });
+              setConfirming(false);
+            }
+          : undefined
+      }
+      className={`min-w-0 max-w-[88%] rounded-2xl px-3.5 py-2.5 text-[0.92rem] leading-relaxed msg-rise outline-none @[30rem]:max-w-[34rem] @[30rem]:px-4 ${
+        isUser
+          ? "bg-[var(--accent)] text-[var(--accent-fg)] focus-visible:ring-2 focus-visible:ring-[var(--color-electric-blue)]"
+          : "border border-[var(--border)] bg-[var(--bg-raised)]"
       }`}
     >
+      {/* Portalled to <body> and fixed at the pointer: inside the bubble it sat in the bubble's own
+          stacking context (its entry animation), and the next message painted over it. */}
+      {menuAt &&
+        createPortal(
+        <div
+          ref={menuRef}
+          role="menu"
+          data-bubble-menu
+          style={{
+            left: Math.max(8, Math.min(menuAt.x, window.innerWidth - 232)),
+            top: Math.max(8, Math.min(menuAt.y, window.innerHeight - 130)),
+          }}
+          className="fixed z-[1000] w-56 rounded-xl border border-[var(--border)] bg-[var(--bg-raised)] p-1.5 text-left text-[0.8rem] text-[var(--fg)] shadow-lg"
+        >
+          {!confirming ? (
+            <button
+              type="button"
+              role="menuitem"
+              autoFocus
+              onClick={() => setConfirming(true)}
+              className="w-full cursor-pointer rounded-lg px-2.5 py-1.5 text-left hover:bg-[var(--bg-sunken)]"
+              style={{ color: "var(--color-signal-orange)" }}
+            >
+              Delete message
+            </button>
+          ) : (
+            <div className="px-1.5 py-1">
+              <p className="m-0 text-[0.74rem] text-[var(--fg-muted)]">
+                Delete this message from the chat? The answer it gave is still used by the stage.
+              </p>
+              <div className="mt-2 flex gap-1.5">
+                <button
+                  type="button"
+                  autoFocus
+                  onClick={() => {
+                    setMenuOpen(false);
+                    setConfirming(false);
+                  }}
+                  className="cursor-pointer rounded-full border border-[var(--border-strong)] px-2.5 py-1 text-[0.74rem] font-medium"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={() => deleteUserMessage(message.id)}
+                  className="cursor-pointer rounded-full px-2.5 py-1 text-[0.74rem] font-semibold text-white"
+                  style={{ backgroundColor: "var(--color-signal-orange)" }}
+                >
+                  Delete
+                </button>
+              </div>
+            </div>
+          )}
+        </div>,
+          document.body,
+        )}
       {message.text}
       {/* An answer that was filled in rather than asked about still needs a way to be corrected. */}
       {message.editableFields?.length ? (
@@ -1266,8 +1429,20 @@ function MessageRow({ message, flashed }: { message: PipelineMessage; flashed?: 
     case "funnel-build":
       content = <FunnelBuildCard message={message} />;
       break;
+    case "page-variants":
+      content = <PageVariantsCard message={message} />;
+      break;
+    case "variant-compare":
+      content = <VariantCompareCard message={message} />;
+      break;
     case "service-choice":
-      content = message.serviceScan?.plan ? (
+      content = message.serviceScan?.buyerLanguage ? (
+        <BuyerLanguageCard message={message} />
+      ) : message.serviceScan?.webinar ? (
+        <WebinarSourcesCard message={message} />
+      ) : message.serviceScan?.blog ? (
+        <BlogKeywordCard message={message} />
+      ) : message.serviceScan?.plan ? (
         <PlanSubServiceCard message={message} />
       ) : message.serviceScan?.secondary ? (
         <SecondaryKeywordCard message={message} />

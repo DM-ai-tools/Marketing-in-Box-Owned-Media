@@ -6,6 +6,12 @@ If fewer than 10 genuinely qualifying competitors can be found and verified, ret
 than padding the list with weak or unverified matches — flag any lower-confidence entries instead
 of silently including them.
 
+WHO COUNTS AS A COMPETITOR HERE: a business that competes with the target for the same buyers of
+this sub-service — it sells {SERVICE} to the same kind of customer, in the same market. The blog
+is the lens this listing is judged through, never the service the competitor has to sell. Do NOT
+include companies that sell content writing, blogging or SEO-content services unless that is what
+the target itself sells.
+
 Additional inputs (all optional unless stated):
 
 competitor_type:

@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { motion } from "framer-motion";
 import type { AssetCheckReport, CheckFinding, CheckName, CheckResult } from "./pipelineApi";
-import { earlierCheckReport, usePipelineStore } from "./pipelineStore";
+import { earlierCheckReport, isFixing, usePipelineStore } from "./pipelineStore";
 import type { PipelineMessage } from "./pipelineStore";
 
 const CHECK_LABEL: Record<CheckName, string> = {
@@ -273,7 +273,7 @@ export function AssetCheckPanel({ message }: { message: PipelineMessage }) {
   }
 
   const selected = all.filter((f, i) => !skip.has(findingKey(f, i)));
-  const canFix = message.savePhase !== "saved" && !message.superseded && !message.refineSubmitted;
+  const canFix = message.savePhase !== "saved" && !message.superseded && !message.refineSubmitted && !isFixing(message);
 
   return (
     <motion.section
@@ -400,7 +400,8 @@ export function AssetCheckPanel({ message }: { message: PipelineMessage }) {
 
       {report.judge === "unavailable" && (
         <p className="m-0 text-[0.68rem] text-[var(--fg-faint)]">
-          Only the rule checks ran; the review step was unavailable.{" "}
+          Only the rule checks ran; the review step was unavailable
+          {report.judge_error ? ` (${report.judge_error})` : ""}.{" "}
           <button type="button" onClick={() => recheckAsset(message.id)} className="cursor-pointer underline">
             Check again
           </button>

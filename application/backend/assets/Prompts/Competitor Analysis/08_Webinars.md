@@ -6,6 +6,12 @@ If fewer than 10 genuinely qualifying competitors can be found and verified, ret
 than padding the list with weak or unverified matches — flag any lower-confidence entries instead
 of silently including them.
 
+WHO COUNTS AS A COMPETITOR HERE: a business that competes with the target for the same buyers —
+it sells the same or a substitutable service to the same kind of customer, in the same market.
+The webinar programme is the lens this listing is judged through, never the service the
+competitor has to sell. Do NOT include companies that sell webinar production, event marketing
+or virtual-event services unless that is what the target itself sells.
+
 Additional inputs (all optional unless stated):
 
 competitor_type:
@@ -15,8 +21,8 @@ competitor_type:
   as a lead magnet or educational resource
   If missing or empty, include both types.
 
-service: "webinars for {SERVICE}" (the target's core service, inferred from {TARGET_URL} if not
-specified)
+service: {SERVICE} — the service the target sells (inferred from {TARGET_URL} if not specified).
+  Look for webinars these same-service rivals run about that service.
   IMPORTANT CLARIFICATION (strict): only include companies that explicitly use webinars — hosted,
   branded, and offered BY THE COMPANY ITSELF — as lead magnets, offers, or educational resources
   covering the target topic. Do NOT include:

@@ -215,6 +215,10 @@ export const CLIENT_PROFILE_SOURCES: Record<string, ClientFactKey> = {
   // Every per-asset name for "the service this deliverable is for". Write-only (see below):
   // the stages word them differently because they mean subtly different things, so the fact is
   // collected for run-level use and never auto-fills another stage's question.
+  // ICP's own service field: without this, the CRO competitor search (which runs immediately
+  // after ICP, before CRO's own intake) has no service and used to fall back to searching for
+  // CRO agencies.
+  service_product_price_terms: "target_service",
   target_service_or_sub_service: "target_service",
   target_service_offer: "target_service",
   target_service_offer_to_ladder: "target_service",
@@ -238,6 +242,7 @@ export const CLIENT_PROFILE_SOURCES: Record<string, ClientFactKey> = {
 const WRITE_ONLY_PROFILE_FIELDS = new Set([
   "existing_page_url",
   "sub_vertical_niche",
+  "service_product_price_terms",
   "target_service_or_sub_service",
   "target_service_offer",
   "target_service_offer_to_ladder",
@@ -380,7 +385,7 @@ export function composeServicesAnswer(picked: PickedService[], other: string): s
 /** The Plan of Action's sub-service picker. Phase 1's last stage suggests the sub-services Phase 2
  * builds: when the walk reaches `servicesFieldId`, the server reads the client's menu for the ones it
  * already has under the primary service, suggests the missing ones from the approved competitor
- * research and the ICP, and puts an Ahrefs volume on every keyword
+ * research and the ICP, and puts a DataForSEO volume on every keyword
  * (`app/services/sub_service_discovery.py`). It rides the same `service-choice` card kind as the
  * Pillar Page's picker, so loading, resume and stop treat it the same; `serviceScan.plan` marks it.
  *
@@ -413,10 +418,10 @@ export function composePlanSubServicesAnswer(
   other: string,
   source: { volumeSource: string; location: string },
 ): string {
-  const measured = source.volumeSource === "ahrefs";
+  const measured = source.volumeSource === "dataforseo";
   const lines = [
     measured
-      ? `Volume source: Ahrefs, monthly Google searches in ${source.location || "the client's country"}.`
+      ? `Volume source: DataForSEO, monthly Google searches in ${source.location || "the client's country"}.`
       : "Volume source: not measured. Estimate volumes and label each one (est.).",
   ];
   for (const c of picked) {
@@ -432,8 +437,8 @@ export function composePlanSubServicesAnswer(
 }
 
 /** The Pillar Page's "Secondary / Cluster Terms": suggested from the head term chosen just before
- * it, by Ahrefs and by DataForSEO side by side (`POST /pipeline/keywords/secondary`), so the
- * operator can compare the two and tick terms from either. Optional: nothing starts ticked, and
+ * it, by DataForSEO (`POST /pipeline/keywords/secondary`), as a checklist with each term's
+ * measured volume. Optional: nothing starts ticked, and
  * Skip answers it. Both phases: the field is on the Pillar Page in each. */
 export const SECONDARY_KEYWORD_OPTION = {
   assetId: "pillar_page",
@@ -441,9 +446,126 @@ export const SECONDARY_KEYWORD_OPTION = {
   headTermFieldId: "primary_keyword_head_term",
 } as const;
 
-export const KEYWORD_PROVIDER_LABEL: Record<KeywordProvider, string> = { ahrefs: "Ahrefs", dataforseo: "DataForSEO" };
+export const KEYWORD_PROVIDER_LABEL: Record<KeywordProvider, string> = { dataforseo: "DataForSEO" };
 
-/** One ticked term, with the column it was ticked in. */
+/** CRO's two buyer-language questions, suggested rather than typed cold
+ * (`POST /pipeline/keywords/buyer-language`, `app/services/buyer_language.py`):
+ *   - **outcome words**: real searches that state an outcome, grouped into clusters, measured by
+ *     DataForSEO around the session's services and landing page;
+ *   - **words to avoid**: the run's competitors, jargon on the landing page that buyers search less
+ *     than its plain alternative, and unsupportable claims on the page.
+ * The operator ticks clusters or items and can type their own. Both phases: Phase 2 normally
+ * inherits both answers through `cro_client_settings` and is only asked when the parent has none. */
+export const BUYER_LANGUAGE_OPTION = {
+  assetId: "cro",
+  outcomeFieldId: "words_the_buyer_uses_for_the_outcome",
+  avoidFieldId: "words_to_avoid",
+} as const;
+
+/** Both answers travel to Phase 2 as one line of `cro_client_settings`, which the sub-key reader
+ * caps at 400 characters (`lib/contextSubKeys.ts`). Kept under it so nothing is cut on the way. */
+export const BUYER_LANGUAGE_MAX_CHARS = 380;
+
+/** A comma list of distinct phrases, cut at a whole phrase before `max` characters. */
+function phraseList(phrases: string[], max = BUYER_LANGUAGE_MAX_CHARS): string {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  let length = 0;
+  for (const raw of phrases) {
+    const phrase = raw.replace(/\s+/g, " ").replace(/[,;]/g, " ").trim();
+    const key = phrase.toLowerCase();
+    if (!phrase || seen.has(key)) continue;
+    const next = length + (out.length ? 2 : 0) + phrase.length;
+    if (next > max) break;
+    seen.add(key);
+    out.push(phrase);
+    length = next;
+  }
+  return out.join(", ");
+}
+
+const typedPhrases = (typed: string) => typed.split(/[,;\n]/).map((s) => s.trim()).filter(Boolean);
+
+/** "Words the buyer uses for the outcome": each picked cluster's name, then its best searches,
+ * then anything typed. Plain phrases, comma-separated, as the field's own example is. Typed words
+ * lead, because the operator's own source (reviews, call notes) beats a search. */
+export function composeOutcomeWordsAnswer(
+  clusters: { name: string; phrases: { keyword: string }[] }[],
+  typed: string,
+  perCluster = 2,
+): string {
+  const fromSearch = clusters.flatMap((c) => [c.name, ...c.phrases.slice(0, perCluster).map((p) => p.keyword)]);
+  return phraseList([...typedPhrases(typed), ...fromSearch]);
+}
+
+/** "Words to avoid": the picked terms and the typed ones, as a plain comma list. No group labels:
+ * `business_facts.words_to_avoid` splits this on commas, and a label would become part of a word. */
+export function composeWordsToAvoidAnswer(terms: string[], typed: string): string {
+  return phraseList([...typedPhrases(typed), ...terms]);
+}
+
+/** The Blog's keyword card: when the walk reaches the primary keyword, better keywords are suggested
+ * by comparing the client's reference page with the pages competing for the topic, all measured by
+ * DataForSEO (`POST /pipeline/keywords/blog`). One card answers both the
+ * primary keyword and the optional supporting keywords. Both phases: the fields are the same. */
+export const BLOG_KEYWORD_OPTION = {
+  assetId: "blog",
+  fieldId: "primary_keyword",
+  secondaryFieldId: "secondary_supporting_keywords_optional",
+  topicFieldId: "blog_topic_working_title",
+} as const;
+
+/** The Webinar's "Competitor Webinar Sources": read from the webinar pages the approved competitor
+ * research found (`POST /pipeline/webinar/sources`), shown on a card with each page and why it was
+ * chosen, rather than asked for as pasted transcripts. The research question sits just before it in
+ * the intake for this reason. Without a listing it is asked as a plain question. */
+export const WEBINAR_SOURCES_OPTION = {
+  assetId: "webinar",
+  fieldId: "competitor_webinar_sources",
+  listingFieldId: "competitor_analysis_webinars",
+} as const;
+
+/** The sources answer: the pages read, then anything the operator added. "" when both are empty. */
+export function composeWebinarSourcesAnswer(block: string, own: string): string {
+  const added = own.trim();
+  if (!added) return block.trim();
+  const ownBlock = `SOURCES ADDED BY THE OPERATOR:\n\n${added}`;
+  return block.trim() ? `${block.trim()}\n\n${ownBlock}` : ownBlock;
+}
+
+/** A keyword with its measured numbers, as the blog prompt reads it. */
+export function blogKeywordLine(k: {
+  keyword: string;
+  dataforseo_volume: number | null;
+  dataforseo_difficulty: number | null;
+}): string {
+  const n = (v: number | null) => (v === null || v === undefined ? "—" : v.toLocaleString("en-US"));
+  const parts: string[] = [];
+  if (k.dataforseo_volume !== null || k.dataforseo_difficulty !== null) {
+    parts.push(`DataForSEO ${n(k.dataforseo_volume)}/mo, KD ${n(k.dataforseo_difficulty)}`);
+  }
+  return parts.length ? `${k.keyword} (${parts.join("; ")})` : k.keyword;
+}
+
+/** The supporting-keywords answer: one keyword per line with its numbers, then any typed ones.
+ * "N/A" when nothing was picked or typed — the same answer the plain question's Skip gives. */
+export function composeBlogSecondaryAnswer(
+  picked: Parameters<typeof blogKeywordLine>[0][],
+  other: string,
+  location: string,
+): string {
+  const chosen = new Set(picked.map((k) => k.keyword));
+  const typed = other
+    .split(/[,;\n]/)
+    .map((s) => s.trim())
+    .filter((s) => s && !chosen.has(s.toLowerCase()));
+  if (!picked.length && !typed.length) return "N/A";
+  const lines = picked.map((k) => `- ${blogKeywordLine(k)}`);
+  lines.push(...typed.map((t) => `- ${t}`));
+  return [`Supporting keywords${location ? ` (monthly Google searches, ${location})` : ""}:`, ...lines].join("\n");
+}
+
+/** One ticked term, with the provider that measured it. */
 export interface PickedSecondaryTerm {
   provider: KeywordProvider;
   keyword: string;
@@ -451,8 +573,7 @@ export interface PickedSecondaryTerm {
 }
 
 /** The secondary-terms answer: where the numbers come from, then one term per line with its volume
- * and provider (a term ticked in both columns carries both numbers), then any typed terms. "" when
- * nothing was picked or typed. */
+ * and provider, then any typed terms. "" when nothing was picked or typed. */
 export function composeSecondaryTermsAnswer(picked: PickedSecondaryTerm[], other: string, location: string): string {
   const byTerm = new Map<string, PickedSecondaryTerm[]>();
   for (const p of picked) byTerm.set(p.keyword, [...(byTerm.get(p.keyword) ?? []), p]);

@@ -123,7 +123,7 @@ const SHARED_FIELD_HINTS: Record<string, ResolvedFieldHint> = {
   },
   keyword_search_volume_data_source_optional: {
     helpText: "Real volumes if you have them; otherwise estimates get used and flagged as estimates.",
-    example: "e.g. paste an Ahrefs or Search Console export — one row per keyword, with volume",
+    example: "e.g. paste a Search Console or keyword tool export — one row per keyword, with volume",
   },
 
   // ---- Page design and the SEO/competitive pass, both asked by the merged Pillar Page stage.

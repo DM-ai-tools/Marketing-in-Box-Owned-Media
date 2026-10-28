@@ -9,7 +9,7 @@ import path from "node:path";
 import { build } from "vite";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const entries = ["smoke.tsx", "card.tsx", "shell.tsx", "plan.tsx", "gate.tsx", "stop.tsx", "clear.tsx", "phase2cro.tsx", "competitors.tsx", "topics.tsx", "industry.tsx", "phase2icp.tsx", "check.tsx", "visual.tsx", "sources.tsx", "report.tsx", "businessCheck.tsx", "services.tsx", "planPhase1.tsx", "ahrefsUsage.tsx", "plainOutline.tsx", "exports.tsx", "deleteCard.tsx", "manus.tsx", "secondaryKeywords.tsx", "embedImages.tsx", "funnelCompetitors.tsx", "funnelBuild.tsx"];
+const entries = ["smoke.tsx", "card.tsx", "shell.tsx", "plan.tsx", "gate.tsx", "stop.tsx", "clear.tsx", "phase2cro.tsx", "competitors.tsx", "topics.tsx", "industry.tsx", "phase2icp.tsx", "check.tsx", "visual.tsx", "sources.tsx", "report.tsx", "businessCheck.tsx", "services.tsx", "planPhase1.tsx", "keywordUsage.tsx", "plainOutline.tsx", "exports.tsx", "deleteCard.tsx", "manus.tsx", "secondaryKeywords.tsx", "embedImages.tsx", "funnelCompetitors.tsx", "funnelBuild.tsx", "blogKeywords.tsx", "webinarSources.tsx", "competitorValidation.tsx", "contextSearch.tsx", "summary.tsx", "buyerLanguage.tsx", "pageVariants.tsx"];
 
 let failed = false;
 

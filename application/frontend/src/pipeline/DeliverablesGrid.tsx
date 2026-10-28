@@ -7,6 +7,7 @@ import { summariseAsset } from "../lib/assetSummary";
 import { PreviewThumb } from "../components/PreviewThumb";
 import { SummaryFlags } from "../components/AssetDocumentView";
 import { useUiStore } from "../store/uiStore";
+import { VARIANT_LABEL } from "../lib/pageVariants";
 import { funnelBuildZipUrl } from "./pipelineApi";
 import { stagesFor } from "./pipelineData";
 import { messagesInPhase, usePipelineStore } from "./pipelineStore";
@@ -41,9 +42,11 @@ export function DeliverablesGrid() {
         const text = upgradePlainOutline(message.text ?? "");
         const stage = stages.find((s) => s.asset.asset_id === message.assetId);
         const doc = parseAssetDocument(text);
+        const baseLabel = stage?.asset.label ?? message.assetId ?? "Asset";
+        const variantLabel = message.variant ? VARIANT_LABEL[message.variant] : undefined;
         return {
           id: message.id,
-          label: stage?.asset.label ?? message.assetId ?? "Asset",
+          label: variantLabel ? `${baseLabel} · ${variantLabel}` : baseLabel,
           emoji: stage?.emoji ?? "✨",
           stageNumber: stage?.stageNumber,
           words: doc.words || countWords(text),
@@ -52,6 +55,7 @@ export function DeliverablesGrid() {
           glance: assetGlance(message.assetId, doc),
           sections: doc.sections.length,
           structured: doc.structured,
+          alternate: Boolean(message.variantAlternate),
         };
       });
   }, [allMessages, phase, stages, activePhase2TrackId]);
@@ -118,6 +122,7 @@ export function DeliverablesGrid() {
                 <span className="min-w-0 truncate text-[0.8rem] font-semibold">{item.label}</span>
               </span>
               <span className="mt-0.5 block text-[0.68rem] text-[var(--fg-faint)]">
+                {item.alternate ? "Alternate · " : ""}
                 {item.structured ? `${item.sections} parts · ` : ""}
                 {item.words.toLocaleString()} words
               </span>

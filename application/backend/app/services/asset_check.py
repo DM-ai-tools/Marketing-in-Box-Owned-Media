@@ -22,6 +22,7 @@ alone.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -119,6 +120,7 @@ class CheckReport:
     facts_used: list[str]
     facts_missing: list[str]
     judge: str  # "ok" | "unavailable" | "skipped"
+    judge_error: str = ""  # why the judge was unavailable, in a sentence
     dropped_quotes: int = 0
     virality_basis: str = ""  # "benchmarked" | "rubric only" | ""
     duration_ms: int = 0
@@ -655,6 +657,16 @@ def _hold_unexplained_drops(results: dict[str, CheckResult], previous: list[Chec
     A lower score with no error or warning to show for it is the judge's run-to-run noise, and it
     is what made "Fix with Refine" look as if it had made the draft worse."""
     before = {p.check: p.score for p in previous if p.score is not None}
+    old_quotes: dict[str, list[str]] = {}
+    for p in previous:
+        old_quotes.setdefault(p.check, []).extend(_norm(f.quote) for f in p.findings if f.quote)
+
+    def is_new(check: str, quote: str) -> bool:
+        # The judge quotes the same problem a little differently from run to run: one quote inside
+        # the other is the same finding.
+        q = _norm(quote)
+        return not any(q in old or old in q for old in old_quotes.get(check, []) if old)
+
     for name, result in results.items():
         if name in RULE_ONLY_CHECKS:
             # Computed from the page, so a lower score always has findings behind it.
@@ -662,7 +674,12 @@ def _hold_unexplained_drops(results: dict[str, CheckResult], previous: list[Chec
         was = before.get(name)
         if was is None or result.score is None or result.score >= was:
             continue
-        if not any(f.severity in {"error", "warn"} for f in result.findings):
+        # Only a problem the earlier draft did not have can lower the score. The same findings,
+        # unfixed, scored again a few points lower is noise, and it is what made every "Fix with
+        # Refine" look like it had made the draft worse.
+        if not any(
+            f.severity in {"error", "warn"} and is_new(name, f.quote) for f in result.findings
+        ):
             result.score = was
 
 
@@ -705,11 +722,24 @@ async def check_asset(
     judge_state = "skipped"
     dropped = 0
 
+    judge_error = ""
     if use_judge and text.strip() and judged:
         try:
-            data = _parse_judge(await _call_judge(_judge_prompt(asset_id, judged, facts, text, rule_findings, benchmarks, previous), on_usage))
-            if data is None:
-                raise ValueError("the judge's reply was not the requested JSON")
+            prompt = _judge_prompt(asset_id, judged, facts, text, rule_findings, benchmarks, previous)
+            data = None
+            # One retry: an overloaded API or a reply that was not JSON is usually gone on the
+            # next call, and a re-check that falls back to rules alone wipes every score.
+            for attempt in (1, 2):
+                try:
+                    data = _parse_judge(await _call_judge(prompt, on_usage))
+                    if data is None:
+                        raise ValueError("the judge's reply was not the requested JSON")
+                    break
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("Asset check judge attempt %d failed for %s: %s", attempt, asset_id, exc)
+                    if attempt == 2:
+                        raise
+                    await asyncio.sleep(1.5)
             judge_state = "ok"
             for name, body in data["checks"].items():  # type: ignore[union-attr]
                 if name not in results or name in RULE_ONLY_CHECKS or not isinstance(body, dict):
@@ -738,6 +768,7 @@ async def check_asset(
         except Exception as exc:  # noqa: BLE001 — the rules still stand on their own
             logger.warning("Asset check judge failed for %s: %s", asset_id, exc)
             judge_state = "unavailable"
+            judge_error = " ".join(str(exc).split())[:240] or type(exc).__name__
 
     if judge_state == "ok" and previous:
         _hold_unexplained_drops(results, previous)
@@ -752,6 +783,7 @@ async def check_asset(
         facts_used=facts_used,
         facts_missing=list(facts.missing),
         judge=judge_state,
+        judge_error=judge_error,
         dropped_quotes=dropped,
         virality_basis=("benchmarked" if benchmarked else "rubric only") if "virality" in checks else "",
         duration_ms=int((time.monotonic() - started) * 1000),
