@@ -1,8 +1,10 @@
+import { useEffect, useRef } from "react";
 import { TypingIndicator } from "../components/TypingIndicator";
-import { BUSINESS_LEVEL_LABEL, defaultPicks, isPickable, PLAY_COLUMN_HINTS, VERDICT_HINT, VERDICT_LABEL } from "../lib/competitorValidation";
+import { BUSINESS_LEVEL_LABEL, defaultPicks, isPickable, PLAY_COLUMN_HINTS, uniqueFetchedKeywords, VERDICT_HINT, VERDICT_LABEL } from "../lib/competitorValidation";
 import type { CompetitorValidation, ValidatedCompetitor, ValidationMetric, ValidationVerdict } from "./pipelineApi";
 import { usePipelineStore, type PipelineMessage } from "./pipelineStore";
 import { ratioTone } from "./visual/tone";
+import { comparisonWins, KeywordCompareHover, RankingWinnerTag } from "./KeywordCompare";
 import { ScannedKeywords } from "./ScannedKeywords";
 
 const VERDICT_COLOR: Record<ValidationVerdict, string> = {
@@ -21,9 +23,9 @@ const SOURCE_LABEL: Record<ValidationMetric["source"], string> = {
 
 const n = (v: number | null | undefined) => (v === null || v === undefined ? "—" : Math.round(v).toLocaleString("en-US"));
 
-/** "Avoid" is not shown as a tag, at the operator's request: the row's blocker line already says why
- * the client can't run it, and the play has no "Use as reference" box. */
-const HIDDEN_VERDICTS: ReadonlySet<ValidationVerdict> = new Set(["avoid"]);
+/** "Avoid" and "Not a fit" are not shown as tags: the row's reason line already says why, and
+ * neither play has a "Use as reference" box. The verdict still ranks the row. */
+const HIDDEN_VERDICTS: ReadonlySet<ValidationVerdict> = new Set(["avoid", "not_a_fit"]);
 
 function VerdictPill({ verdict }: { verdict: ValidationVerdict }) {
   if (HIDDEN_VERDICTS.has(verdict)) return null;
@@ -32,7 +34,7 @@ function VerdictPill({ verdict }: { verdict: ValidationVerdict }) {
       className="shrink-0 rounded-full px-2 py-0.5 text-[0.64rem] font-semibold"
       style={{
         backgroundColor: `color-mix(in srgb, ${VERDICT_COLOR[verdict]} 18%, transparent)`,
-        color: verdict === "not_a_fit" ? "var(--fg-muted)" : VERDICT_COLOR[verdict],
+        color: VERDICT_COLOR[verdict],
       }}
       title={VERDICT_HINT[verdict]}
     >
@@ -60,15 +62,18 @@ function Axis({ label, value }: { label: string; value: number | null }) {
 function CompetitorScoreRow({
   c,
   limit,
+  clientKeywords,
   picked,
   onPick,
 }: {
   c: ValidatedCompetitor;
   limit?: number;
+  clientKeywords?: CompetitorValidation["client_keywords"];
   /** Undefined when the card is saved: no box, the choice is already made. */
   picked?: boolean;
   onPick?: () => void;
 }) {
+  const wins = comparisonWins(c.keyword_comparisons);
   return (
     <li data-validated={c.domain} className="border-t border-[var(--border)] px-2.5 py-2.5 first:border-t-0 @[30rem]:px-3">
       <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
@@ -91,6 +96,7 @@ function CompetitorScoreRow({
             {BUSINESS_LEVEL_LABEL[c.business_level]}
           </span>
         )}
+        <RankingWinnerTag comparisons={c.keyword_comparisons} />
         <span className="text-[0.7rem] text-[var(--fg-faint)]">{c.play}</span>
         {onPick && isPickable(c) && (
           <label className="ml-auto flex cursor-pointer items-center gap-1.5 text-[0.72rem] font-medium">
@@ -154,11 +160,24 @@ function CompetitorScoreRow({
                     <ScannedKeywords keywords={c.scanned_keywords} total={c.keyword_count} limit={limit}>
                       {m.label}
                     </ScannedKeywords>
+                  ) : m.key === "overlap" ? (
+                    <span className="inline-flex flex-wrap items-center gap-y-0.5">
+                      <KeywordCompareHover comparisons={c.keyword_comparisons}>{m.label}</KeywordCompareHover>
+                      <RankingWinnerTag comparisons={c.keyword_comparisons} />
+                    </span>
                   ) : (
                     m.label
                   )}
                 </td>
-                <td className="py-1 pr-2 font-semibold">{m.value}</td>
+                <td className="py-1 pr-2 font-semibold">
+                  {m.key === "overlap" && clientKeywords?.length ? (
+                    <ScannedKeywords keywords={clientKeywords} total={clientKeywords.length} limit={limit}>
+                      {m.value}
+                    </ScannedKeywords>
+                  ) : (
+                    m.value
+                  )}
+                </td>
                 <td className="py-1 pr-2">
                   <span
                     className="rounded-full px-1.5 py-[1px] text-[0.6rem] font-semibold"
@@ -177,7 +196,44 @@ function CompetitorScoreRow({
         </table>
         {c.top_keywords.length > 0 && (
           <p className="mt-1 text-[0.72rem] text-[var(--fg-muted)]">
-            Ranks for: {c.top_keywords.map((k) => `${k.keyword}${k.position ? ` (#${k.position})` : ""}`).join(", ")}
+            Ranks for:{" "}
+            {c.top_keywords.map((k, i) => {
+              const cmp = c.keyword_comparisons?.find((row) => row.keyword.toLowerCase() === k.keyword.toLowerCase());
+              const winner = cmp?.winner;
+              return (
+                <span key={k.keyword}>
+                  {i > 0 ? ", " : ""}
+                  <span
+                    style={
+                      winner === "competitor"
+                        ? { color: "var(--color-signal-amber)", fontWeight: 600 }
+                        : winner === "client"
+                          ? { color: "var(--color-signal-green)", fontWeight: 600 }
+                          : undefined
+                    }
+                  >
+                    {k.keyword}
+                    {k.position != null ? ` (#${k.position})` : ""}
+                  </span>
+                  {cmp?.client_position != null ? (
+                    <span className="text-[var(--fg-faint)]">{` · client #${cmp.client_position}`}</span>
+                  ) : cmp && cmp.client_position == null ? (
+                    <span className="text-[var(--fg-faint)]"> · client not ranking</span>
+                  ) : null}
+                </span>
+              );
+            })}
+          </p>
+        )}
+        {wins.client > 0 && (
+          <p className="mt-1 text-[0.72rem]" style={{ color: "var(--color-signal-green)" }} data-client-keyword-wins>
+            Client ranks better on {wins.client} shared keyword{wins.client === 1 ? "" : "s"}
+            {c.keyword_comparisons
+              ?.filter((r) => r.winner === "client")
+              .slice(0, 6)
+              .map((r, i) => `${i === 0 ? ": " : ", "}${r.keyword} (#${r.client_position})`)
+              .join("")}
+            .
           </p>
         )}
       </details>
@@ -215,14 +271,148 @@ function PlaysColumnsHint() {
   );
 }
 
+function HeaderCheck({
+  checked,
+  indeterminate,
+  disabled,
+  onChange,
+}: {
+  checked: boolean;
+  indeterminate: boolean;
+  disabled?: boolean;
+  onChange: () => void;
+}) {
+  const ref = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    if (ref.current) ref.current.indeterminate = indeterminate;
+  }, [indeterminate]);
+  return (
+    <input
+      ref={ref}
+      type="checkbox"
+      checked={checked}
+      disabled={disabled}
+      onChange={onChange}
+      aria-label={checked ? "Clear every keyword" : "Select every keyword"}
+      data-keyword-select-all
+    />
+  );
+}
+
+/** Every ranking keyword fetched for the listing, one row each, for the operator to tick. */
+function KeywordSelectTable({
+  report,
+  keywordPicks,
+  onToggleKeyword,
+  onSetKeywords,
+  locked,
+}: {
+  report: CompetitorValidation;
+  keywordPicks: string[];
+  onToggleKeyword?: (keyword: string) => void;
+  onSetKeywords?: (keywords: string[]) => void;
+  locked?: boolean;
+}) {
+  const rows = uniqueFetchedKeywords(report.competitors);
+  if (!rows.length) return null;
+  const chosen = new Set(keywordPicks.map((k) => k.toLowerCase()));
+  const selected = rows.filter((r) => chosen.has(r.keyword.toLowerCase())).length;
+  const allOn = selected === rows.length;
+  const pos = (value: number | null) => (value == null ? "—" : `#${value}`);
+  return (
+    <div className="mt-3" data-keyword-picker>
+      <div className="mb-1 text-[0.68rem] font-semibold uppercase tracking-wide text-[var(--fg-faint)]">
+        Keywords for this stage
+      </div>
+      <p className="text-[0.72rem] leading-snug text-[var(--fg-muted)]">
+        {locked
+          ? `${selected} keyword${selected === 1 ? "" : "s"} selected for this stage's draft.`
+          : "Every ranking keyword fetched for these competitors. Duplicates are shown once. Tick the ones to use in the draft — nothing is included until you tick it."}
+      </p>
+      {!locked && onSetKeywords && (
+        <div className="mt-1.5 flex flex-wrap items-center gap-3 text-[0.72rem] text-[var(--fg-muted)]">
+          <span>
+            {selected} of {rows.length} selected
+          </span>
+          <button type="button" className="cursor-pointer underline underline-offset-2" onClick={() => onSetKeywords(rows.map((r) => r.keyword))}>
+            Select all
+          </button>
+          <button type="button" className="cursor-pointer underline underline-offset-2" onClick={() => onSetKeywords([])}>
+            Clear
+          </button>
+        </div>
+      )}
+      <div className="mt-1.5 max-h-80 overflow-y-auto rounded-xl border border-[var(--border)]">
+        <table className="w-full text-left text-[0.74rem]">
+          <thead className="sticky top-0 bg-[var(--bg-raised)] text-[var(--fg-faint)]">
+            <tr>
+              <th className="w-8 py-1.5 pl-2 pr-1 font-medium">
+                <HeaderCheck
+                  checked={allOn && rows.length > 0}
+                  indeterminate={selected > 0 && !allOn}
+                  disabled={locked || !onSetKeywords}
+                  onChange={() => onSetKeywords?.(allOn ? [] : rows.map((r) => r.keyword))}
+                />
+              </th>
+              <th className="py-1.5 pr-2 font-medium">Keyword</th>
+              <th className="py-1.5 pr-2 text-right font-medium">Position</th>
+              <th className="py-1.5 pr-2 text-right font-medium">Searches/mo</th>
+              <th className="py-1.5 pr-2 text-right font-medium">Client</th>
+              <th className="py-1.5 pr-2 font-medium">Ranked by</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((row) => {
+              const checked = chosen.has(row.keyword.toLowerCase());
+              return (
+                <tr key={row.keyword.toLowerCase()} className="border-t border-[var(--border)] align-top" data-fetched-keyword={row.keyword}>
+                  <td className="py-1 pl-2 pr-1">
+                    <input
+                      type="checkbox"
+                      checked={checked}
+                      disabled={locked || !onToggleKeyword}
+                      onChange={() => onToggleKeyword?.(row.keyword)}
+                      data-keyword-pick={row.keyword}
+                      aria-label={`Use ${row.keyword}`}
+                    />
+                  </td>
+                  <td className="py-1 pr-2 font-medium text-[var(--fg)]" style={locked && !checked ? { opacity: 0.55 } : undefined}>
+                    {row.keyword}
+                  </td>
+                  <td className="whitespace-nowrap py-1 pr-2 text-right tabular-nums">{pos(row.position)}</td>
+                  <td className="whitespace-nowrap py-1 pr-2 text-right tabular-nums">{n(row.volume)}</td>
+                  <td className="whitespace-nowrap py-1 pr-2 text-right tabular-nums text-[var(--fg-muted)]">
+                    {row.clientKnown ? (row.clientPosition == null ? "not ranking" : pos(row.clientPosition)) : "—"}
+                  </td>
+                  <td className="py-1 pr-2 text-[var(--fg-muted)]" title={row.competitors.join(", ")}>
+                    {row.competitors.join(", ")}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
 function Report({
   report,
   picks,
   onPick,
+  keywordPicks,
+  onToggleKeyword,
+  onSetKeywords,
+  locked,
 }: {
   report: CompetitorValidation;
   picks: string[];
   onPick?: (domain: string) => void;
+  keywordPicks: string[];
+  onToggleKeyword?: (keyword: string) => void;
+  onSetKeywords?: (keywords: string[]) => void;
+  locked?: boolean;
 }) {
   const counts = report.competitors.reduce<Partial<Record<ValidationVerdict, number>>>((acc, c) => {
     acc[c.verdict] = (acc[c.verdict] ?? 0) + 1;
@@ -267,6 +457,7 @@ function Report({
             key={c.domain}
             c={c}
             limit={report.scanned_limit}
+            clientKeywords={report.client_keywords}
             picked={picks.includes(c.domain)}
             onPick={onPick ? () => onPick(c.domain) : undefined}
           />
@@ -311,6 +502,14 @@ function Report({
         </div>
       )}
 
+      <KeywordSelectTable
+        report={report}
+        keywordPicks={keywordPicks}
+        onToggleKeyword={onToggleKeyword}
+        onSetKeywords={onSetKeywords}
+        locked={locked}
+      />
+
       <details className="mt-3 rounded-xl border border-[var(--border)] bg-[var(--bg-sunken)] px-3 py-2">
         <summary className="cursor-pointer text-[0.72rem] font-semibold text-[var(--fg-muted)]">How this was checked</summary>
         <ul className="mt-1 list-disc pl-5 text-[0.72rem] text-[var(--fg-muted)]">
@@ -335,6 +534,8 @@ export function CompetitorValidationPanel({ message }: { message: PipelineMessag
   const validate = usePipelineStore((s) => s.validateCompetitorStep);
   const state = message.competitorValidation;
   const togglePick = usePipelineStore((s) => s.togglePlayPick);
+  const toggleKeywordPick = usePipelineStore((s) => s.toggleKeywordPick);
+  const setKeywordPicks = usePipelineStore((s) => s.setKeywordPicks);
   const saved = message.savePhase === "saved";
   if (!state) {
     if (saved || !message.competitor?.competitors?.length) return null;
@@ -380,6 +581,10 @@ export function CompetitorValidationPanel({ message }: { message: PipelineMessag
           report={state.report}
           picks={state.picks ?? defaultPicks(state.report)}
           onPick={saved ? undefined : (domain) => togglePick(message.id, domain)}
+          keywordPicks={state.keywordPicks ?? []}
+          onToggleKeyword={saved ? undefined : (keyword) => toggleKeywordPick(message.id, keyword)}
+          onSetKeywords={saved ? undefined : (keywords) => setKeywordPicks(message.id, keywords)}
+          locked={saved}
         />
       )}
     </section>

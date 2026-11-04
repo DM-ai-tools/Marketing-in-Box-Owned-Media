@@ -8,6 +8,7 @@ import { useChatSessionsStore } from "../store/chatSessionsStore";
 import type { ContextEntry, ContextStore } from "../store/chatStore.types";
 import {
   buildRunKeywords,
+  saveKeywordClusterSelection,
   createChatSession,
   createRun,
   fetchAssetReadiness,
@@ -77,7 +78,7 @@ import type {
 } from "./pipelineApi";
 import { KEYWORD_DATA_PREPASS_ID, fetchBuyerLanguage, fetchWebinarSources, prefillSuggestions } from "./pipelineApi";
 import type { BuyerLanguageResult } from "./pipelineApi";
-import type { ContextRetrievalReport, FieldSuggestion, KeywordTargets, SummaryPoint } from "./pipelineApi";
+import type { ContextRetrievalReport, FieldSuggestion, KeywordTargets, SeoArchitecture, SummaryPoint } from "./pipelineApi";
 import { summariseDocument } from "./pipelineApi";
 import { comparePageVariants } from "./pipelineApi";
 import type { PageVariantId, PageVariantMeasure, VariantPageRow } from "./pipelineApi";
@@ -135,7 +136,7 @@ import { useUiStore } from "../store/uiStore";
 import { PLAN_COMPOSED_KEYS, SERVER_COMPOSED_CONTEXT_KEYS } from "../data/assetCatalog";
 import { INDUSTRY_PROFILES, isIndustryBucket, notRecommendedReason } from "../data/industryProfiles";
 import { specifyPrefix } from "../lib/specifyChoice";
-import { defaultPicks, validationMarkdownFor } from "../lib/competitorValidation";
+import { defaultPicks, uniqueFetchedKeywords, validationMarkdownFor } from "../lib/competitorValidation";
 
 export type NavStatus = "Ready" | "Awaiting Input" | "Generating…" | "Awaiting Review";
 export type ActiveStatus = "running" | "hitl" | null;
@@ -534,6 +535,8 @@ export interface PipelineMessage {
     error?: string;
     /** Domains of the plays the operator ticked to apply; they reach the stage as its reference. */
     picks?: string[];
+    /** Fetched ranking keywords the operator ticked to use in this stage's draft. */
+    keywordPicks?: string[];
   };
   /** What that listing was searched for, so "Re-run" repeats the same search. */
   competitorInputs?: CompetitorRunInputs;
@@ -622,6 +625,8 @@ export interface PipelineMessage {
   /** On a generation card: the primary and secondary keywords this stage was told to write with.
    * The deliverable's "Keyword data" section lists them and checks which the text uses. */
   keywordTargets?: KeywordTargets;
+  /** On a generation card: hub/spoke URL map from the keyword clusters. Shown under Keyword data. */
+  seoArchitecture?: SeoArchitecture;
   /** The reader's Summary tab, kept with the deliverable so reopening it costs nothing. `textHash`
    * is the text it was made from: an edited or refined document is summarised again. */
   docSummary?: {
@@ -820,6 +825,9 @@ interface PipelineState {
   confirmSecondaryKeywords: (messageId: string, picked: PickedSecondaryTerm[], other: string) => void;
   /** Ask both providers again about a different search term (two requests each). */
   researchSecondaryKeywords: (messageId: string, term: string) => void;
+  /** Keep only these clusters of the run's keyword report for every stage that runs from now on.
+   * Resolves to an error sentence, or null once saved. */
+  selectKeywordClusters: (messageId: string, selected: string[]) => Promise<string | null>;
   /** Answer a CRO buyer-language card: the ticked clusters (outcome) or terms (avoid), by name, plus
    * typed words. */
   confirmBuyerLanguage: (messageId: string, picked: string[], typed: string) => void;
@@ -861,6 +869,9 @@ interface PipelineState {
   /** Run the competitor validation again (after an error, or on a listing that never had one). */
   validateCompetitorStep: (messageId: string) => void;
   togglePlayPick: (messageId: string, domain: string) => void;
+  toggleKeywordPick: (messageId: string, keyword: string) => void;
+  /** Replace the ticked keywords in one step (Select all / Clear on the keyword table). */
+  setKeywordPicks: (messageId: string, keywords: string[]) => void;
   /** Re-read the page for a scrape that failed, while its field is still the one being asked. */
   retryPageScrape: (messageId: string) => Promise<void>;
   /** Run the competitor research the consent card offered. */
@@ -2209,6 +2220,7 @@ async function streamIntoMessage(
     onRevisionEdits: (report) => patchMessage(get, set, messageId, { revisionReport: report }),
     onContextRetrieval: (report) => patchMessage(get, set, messageId, { contextRetrieval: report }),
     onKeywordTargets: (targets) => patchMessage(get, set, messageId, { keywordTargets: targets }),
+    onSeoArchitecture: (map) => patchMessage(get, set, messageId, { seoArchitecture: map }),
     onManus: (event) => {
       const current = get().messages.find((m) => m.id === messageId)?.manus;
       // Progress events carry no fallback message; keep the task link once one has arrived.
@@ -2228,6 +2240,7 @@ async function streamIntoMessage(
       manus: undefined,
       contextRetrieval: undefined,
       keywordTargets: undefined,
+      seoArchitecture: undefined,
     });
 
   try {
@@ -2497,6 +2510,7 @@ interface StreamHooks {
   onImageNotes: (notes: string[]) => void;
   onContextRetrieval: (report: ContextRetrievalReport) => void;
   onKeywordTargets: (targets: KeywordTargets) => void;
+  onSeoArchitecture: (map: SeoArchitecture) => void;
   onRevisionEdits: (report: RevisionEditReport) => void;
   onManus: (event: ManusBuildEvent) => void;
   onPageVariant: (event: PageVariantMeasure) => void;
@@ -5513,6 +5527,31 @@ export const usePipelineStore = create<PipelineState>((set, get) => ({
     void loadBlogKeywords(get, set, messageId);
   },
 
+  selectKeywordClusters: async (messageId, selected) => {
+    const report = get().messages.find((m) => m.id === messageId)?.keywordReport;
+    if (!report) return "This keyword report is no longer available.";
+    const profile = get().clientProfile;
+    try {
+      const result = await saveKeywordClusterSelection(
+        report.run_id,
+        selected,
+        profile.website_url ?? profile.website ?? "",
+      );
+      // Every announcement of this run's report shows the same selection, whichever one was ticked.
+      set({
+        messages: get().messages.map((m) =>
+          m.keywordReport?.run_id === report.run_id
+            ? { ...m, keywordReport: { ...result, status: m.keywordReport.status } }
+            : m,
+        ),
+      });
+      schedulePersist();
+      return null;
+    } catch (err) {
+      return err instanceof Error ? err.message : "Could not save the selection.";
+    }
+  },
+
   researchSecondaryKeywords: (messageId, term) => {
     const message = liveMessage(get(), messageId);
     const scan = message?.serviceScan;
@@ -6275,11 +6314,30 @@ chooseHeadlines: async (messageId, ids) => {
     try {
       const runId = await ensureRun(get, set);
       const validation = message.competitorValidation?.status === "ready" ? message.competitorValidation.report : undefined;
+      const keywordPicks = message.competitorValidation?.keywordPicks ?? [];
+      // Only keywords from the competitors being saved — a left-out rival must not block or unlock
+      // terms for this stage.
+      const competitorKeywords = validation
+        ? uniqueFetchedKeywords(
+            validation.competitors.filter((c) =>
+              result.competitors.some((a) => a.domain.toLowerCase() === c.domain.toLowerCase()),
+            ),
+          ).map((k) => k.keyword)
+        : [];
       const saved = await saveCompetitorAnalysis(
         runId,
         assetId,
         { ...result, asset_id: assetId },
-        validation ? validationMarkdownFor(validation, result.competitors, message.competitorValidation?.picks ?? defaultPicks(validation)) : "",
+        validation
+          ? validationMarkdownFor(
+              validation,
+              result.competitors,
+              message.competitorValidation?.picks ?? defaultPicks(validation),
+              keywordPicks,
+            )
+          : "",
+        keywordPicks,
+        competitorKeywords,
       );
       // The card then shows the listing that was actually saved, not the one that was offered — and
       // so does the transcript on reload, which persists this message rather than the card's state.
@@ -6302,12 +6360,20 @@ chooseHeadlines: async (messageId, ids) => {
       // intake carries straight on; a gating one (CRO's) hands off to the stage's intake, which has
       // not started yet. Restarting the intake in the first case would wipe every answer given so
       // far, which is why this branches on the field rather than on the stage.
+      // A Re-run after the first approval only replaces the listing: the field is already answered
+      // and the walk has moved on, so advancing again would re-ask later questions.
       const intake = get().intake;
       if (message.competitorFillsFieldId && intake) {
         const fieldId = message.competitorFillsFieldId;
         const field = intake.asset.fields.find((f) => f.field_id === fieldId);
+        const alreadyAnswered = Boolean(String(intake.answers[fieldId] ?? "").trim());
         intake.answers[fieldId] = saved.context_text;
         markQuestionAnswered(get, set, fieldId);
+        schedulePersist();
+        if (alreadyAnswered) {
+          set({ activeStatus: "hitl", navStatus: "Awaiting Input" });
+          return;
+        }
         if (field) applyAnswerAndAdvance(get, set, intake, field);
         else advanceIntake(get, set, get().currentIndex, intake.asset, intake.answers, 0);
         return;
@@ -6394,6 +6460,35 @@ chooseHeadlines: async (messageId, ids) => {
     const picks = state.picks ?? defaultPicks(state.report);
     const next = picks.includes(domain) ? picks.filter((d) => d !== domain) : [...picks, domain];
     patchMessage(get, set, messageId, { competitorValidation: { ...state, picks: next } });
+  },
+
+  toggleKeywordPick: (messageId, keyword) => {
+    const message = liveMessage(get(), messageId);
+    const state = message?.competitorValidation;
+    if (!state?.report || message?.savePhase === "saved") return;
+    const key = keyword.trim().toLowerCase();
+    if (!key) return;
+    const picks = state.keywordPicks ?? [];
+    const next = picks.some((k) => k.toLowerCase() === key)
+      ? picks.filter((k) => k.toLowerCase() !== key)
+      : [...picks, keyword.trim()];
+    patchMessage(get, set, messageId, { competitorValidation: { ...state, keywordPicks: next } });
+  },
+
+  setKeywordPicks: (messageId, keywords) => {
+    const message = liveMessage(get(), messageId);
+    const state = message?.competitorValidation;
+    if (!state?.report || message?.savePhase === "saved") return;
+    const seen = new Set<string>();
+    const next: string[] = [];
+    for (const keyword of keywords) {
+      const trimmed = keyword.trim();
+      const key = trimmed.toLowerCase();
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      next.push(trimmed);
+    }
+    patchMessage(get, set, messageId, { competitorValidation: { ...state, keywordPicks: next } });
   },
 
   retryCompetitorStep: async (messageId) => {

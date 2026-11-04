@@ -134,6 +134,9 @@ class CompetitorScore:
     #: Every keyword scanned for this domain (the top `_RANKED_LIMIT` by estimated traffic, out of
     #: `keyword_count`), shown on hover over "ranking keywords".
     scanned_keywords: list[dict[str, object]] = field(default_factory=list)
+    #: Shared topic keywords with both sides' Google positions — who ranks better, for the evidence
+    #: hover. `winner` is `client` | `competitor` | `tie` | `unknown`.
+    keyword_comparisons: list[dict[str, object]] = field(default_factory=list)
 
 
 def _keyword_rows(ranked: list[dataforseo_client.RankedKeyword]) -> list[dict[str, object]]:
@@ -141,6 +144,48 @@ def _keyword_rows(ranked: list[dataforseo_client.RankedKeyword]) -> list[dict[st
         {"keyword": k.keyword, "position": k.position, "volume": k.volume, "url": k.url}
         for k in ranked
     ]
+
+
+def _position_winner(client_pos: int | None, competitor_pos: int | None) -> str:
+    """Lower Google position wins. A side that does not rank loses to one that does."""
+    if client_pos is None and competitor_pos is None:
+        return "unknown"
+    if client_pos is None:
+        return "competitor"
+    if competitor_pos is None:
+        return "client"
+    if client_pos < competitor_pos:
+        return "client"
+    if competitor_pos < client_pos:
+        return "competitor"
+    return "tie"
+
+
+def _keyword_comparisons(
+    on_topic: list[dataforseo_client.RankedKeyword],
+    client_ranked: list[dataforseo_client.RankedKeyword],
+) -> list[dict[str, object]]:
+    """For each client-topic keyword the competitor ranks for, pair both positions."""
+    client_pos = {k.keyword.lower(): k for k in client_ranked}
+    out: list[dict[str, object]] = []
+    seen: set[str] = set()
+    for k in on_topic:
+        key = k.keyword.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        mine = client_pos.get(key)
+        c_pos = mine.position if mine else None
+        out.append(
+            {
+                "keyword": k.keyword,
+                "competitor_position": k.position,
+                "client_position": c_pos,
+                "volume": k.volume if k.volume is not None else (mine.volume if mine else None),
+                "winner": _position_winner(c_pos, k.position),
+            }
+        )
+    return out
 
 
 @dataclass
@@ -566,12 +611,26 @@ async def validate(
 
         overlap_s: int | None = None
         on_topic: list[dataforseo_client.RankedKeyword] = []
+        comparisons: list[dict[str, object]] = []
         if m.ranked:
             on_topic = [k for k in m.ranked if _on_topic(k.keyword, exact, words)]
+            comparisons = _keyword_comparisons(on_topic, mine.ranked)
             pct = len(on_topic) / len(m.ranked)
             overlap_s = min(100, round(pct * 200))
-            metrics.append(Metric("overlap", "Ranks for the client's keywords", f"{len(on_topic)} of {len(m.ranked)}", overlap_s, "measured",
-                                  ", ".join(k.keyword for k in on_topic[:4])))
+            client_wins = sum(1 for row in comparisons if row["winner"] == "client")
+            competitor_wins = sum(1 for row in comparisons if row["winner"] == "competitor")
+            rank_detail = ", ".join(k.keyword for k in on_topic[:4])
+            if comparisons:
+                rank_detail = (
+                    f"{rank_detail}; client ranks better on {client_wins}, "
+                    f"competitor on {competitor_wins}"
+                    if rank_detail
+                    else f"client ranks better on {client_wins}, competitor on {competitor_wins}"
+                )
+            metrics.append(Metric(
+                "overlap", "Ranks for the client's keywords", f"{len(on_topic)} of {len(m.ranked)}",
+                overlap_s, "measured", rank_detail,
+            ))
         else:
             metrics.append(Metric("overlap", "Ranks for the client's keywords", "—", None, "unavailable"))
 
@@ -619,6 +678,7 @@ async def validate(
             page_count=m.page_count,
             keyword_count=m.keyword_count,
             scanned_keywords=_keyword_rows(m.ranked),
+            keyword_comparisons=comparisons,
         ))
 
     if dropped:
@@ -673,12 +733,9 @@ def render_md(report: ValidationReport) -> str:
             lines.append(f"- **{s.name} — {VERDICT_LABEL[s.verdict]}.** Take: {s.what_to_take or '—'} Apply: {s.how_to_apply or '—'} Prove it: {s.how_to_prove or '—'}")
         for b in s.blockers:
             lines.append(f"- **{s.name} — blocker:** {b.reason}")
-        if s.top_keywords:
-            ranked = ", ".join(
-                f"{k['keyword']} (#{k['position']})" if k.get("position") else str(k["keyword"])
-                for k in s.top_keywords
-            )
-            lines.append(f"- **{s.name} — ranks for:** {ranked}")
+        # Ranking keywords are not listed here. The operator picks which ones the stage may use on
+        # the card ("Keywords for this stage"); those append as their own section. Dumping every
+        # top keyword here made unticked terms (e.g. a rival's product keyword) look like targets.
     if report.plays:
         lines += ["", "Plays across the market:"]
         for p in report.plays:

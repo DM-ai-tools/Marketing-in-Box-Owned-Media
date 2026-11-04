@@ -40,7 +40,12 @@ from app.services.funnel_build import (
     _this_file,
 )
 from app.services.funnel_plan import FunnelFile
-from app.services.generation import PAGE_BUILD_STANDARDS, _brand_token_block, _generated_images_block
+from app.services.generation import (
+    CONTENT_OPTIMIZATION,
+    PAGE_BUILD_STANDARDS,
+    _brand_token_block,
+    _generated_images_block,
+)
 from app.services.manus_client import ManusClient
 from app.services.reference_forms import forms_markdown
 
@@ -91,6 +96,7 @@ def build_brief(inputs: BuildInputs, files: list[FunnelFile]) -> str:
         if design.generated_images:
             parts.append(_generated_images_block(design.generated_images))
     parts.append("\n# PAGE BUILD STANDARDS\n\n" + (_PROMPTS_DIR / PAGE_BUILD_STANDARDS).read_text(encoding="utf-8").strip())
+    parts.append(CONTENT_OPTIMIZATION)
     return "\n".join(parts)
 
 

@@ -663,11 +663,15 @@ _COMPONENT_VOCABULARY_DIRECTIVE = (
 )
 
 _LINKS_DIRECTIVE = (
-    "\n  - **Every link comes from the Links section.** Header menu items (sub-menus under their "
-    "parent), footer columns, social icons, contact links and legal links use the href given there, "
-    "character for character. Never `#`, never an empty href, never a path on the client's site that "
-    "is not listed. Calls to action point at the primary call to action that section names unless "
-    "the copy names another listed link. Social icons carry an `aria-label` naming the platform."
+    "\n  - **Every link comes from the Links section — match the reference's internal linking.** "
+    "Header menu items (sub-menus under their parent), footer columns, social icons, contact links "
+    "and legal links use the href given there, character for character — every listed header and "
+    "footer link must appear on the page in the reference's order. Body / in-page links from that "
+    "section, Internal Cluster Pages from the inputs, and any service URLs in Services Covered are "
+    "woven into the copy where those destinations are mentioned (descriptive anchors, not a dump "
+    "in the footer). Never `#`, never an empty href, never a path on the client's site that is not "
+    "listed. Calls to action point at the primary call to action that section names unless the copy "
+    "names another listed link. Social icons carry an `aria-label` naming the platform."
 )
 
 _RESPONSIVE_DIRECTIVE = (
@@ -721,6 +725,61 @@ _OUTPUT_STYLE = (
     "emails, SMS messages, social captions, scripts and headlines. Write those in the form the "
     "master prompt asks for.\n"
     f"===== END {OUTPUT_STYLE_BLOCK} =====\n\n"
+)
+
+# How customer-facing web content is optimised: SEO, GEO and AEO. One block composed here rather
+# than an edit to each master prompt, for the reason the output-style block gives — the two phases
+# carry near-copies of those files, and a rule pasted into each of them drifts. It follows the
+# business brief so it can defer to facts, KEYWORD_TARGETS and SEO_ARCHITECTURE already stated,
+# and it does not add a section the master prompt does not ask for.
+CONTENT_OPTIMIZATION_BLOCK = "CONTENT_OPTIMIZATION"
+CONTENT_OPTIMIZATION = (
+    f"===== BEGIN {CONTENT_OPTIMIZATION_BLOCK} =====\n"
+    "HOW THIS BLOCK BINDS YOUR RESPONSE:\n"
+    "It sets the standard for customer-facing web content: search rankings (SEO), citation by AI "
+    "search (GEO) and direct answers (AEO). Helpfulness, accuracy, readability, originality and "
+    "search intent come before keyword density. Do not quote, name or acknowledge this block in "
+    "the output.\n\n"
+    "Closed format:\n"
+    "- Apply these rules inside the sections the master prompt already asks for. The master "
+    "prompt's section list is closed: do not add a title-tag, schema, FAQ or checklist section "
+    "it does not have.\n"
+    "- Operator-facing analysis, strategy, rationale and notes stay in the scanning form already "
+    "set. SMS, email, scripts and social captions take clear language and natural vocabulary "
+    "only — no title tag, meta description, canonical, schema or FAQ bolted on.\n\n"
+    "Evidence:\n"
+    "- Statistics, quotes, sources, dates, author credentials, review counts and URLs come only "
+    "from the inputs and the business brief. If a fact is not on record, leave it out. Never "
+    "invent one, and do not write a placeholder marker such as [CLIENT TO CONFIRM].\n"
+    "- Show experience, expertise, authoritativeness and trustworthiness only from the client's "
+    "own proof in those inputs. Do not invent an author bio.\n\n"
+    "Keywords and links:\n"
+    "- KEYWORD_TARGETS is the only keyword list. Use its primary, secondary and long-tail terms "
+    "naturally in the title, the one H1, headings and body. Never stuff them. If that block is "
+    "absent, do not invent a keyword list.\n"
+    "- SEO_ARCHITECTURE and, on an HTML page, the Links section are the only internal URLs. Do "
+    "not invent a host, a slug or an external URL. Name an outside source only when the inputs "
+    "name it.\n\n"
+    "Web copy, wherever the deliverable is a page, article or HTML document:\n"
+    "- Answer the search intent directly, especially in the opening and in any FAQ the master "
+    "prompt already includes. FAQ questions come from the keyword and intake data, each answered "
+    "in a few sentences.\n"
+    "- One H1. Logical H2 and H3 headings. Short paragraphs. Bullets and numbered lists where they "
+    "help. A comparison table only where the content actually compares things.\n"
+    "- Original, specific and useful. No generic, repetitive or purely promotional language. Do "
+    "not copy a competitor page or restate search results.\n"
+    "- Write so ChatGPT, Gemini and Perplexity can extract and cite it: clear language, "
+    "descriptive headings, definitions, and sections that stand alone.\n"
+    "- One relevant call to action. It must not turn an informational section into a pitch.\n"
+    "- Keep information current only to what the inputs state. Do not invent an updated date.\n\n"
+    "HTML, when you emit a page:\n"
+    "- Title at most 60 characters. Meta description at most 155. A canonical URL. One H1. "
+    "Descriptive alt text. Mobile-first, crawlable markup.\n"
+    "- JSON-LD schema only for a type the page actually supports, and only from facts on the "
+    "page: FAQPage, Article, BreadcrumbList, Organization, LocalBusiness, Product or Person.\n"
+    "- Where PAGE_BUILD_STANDARDS or the brand design tokens are present, they win on markup, "
+    "links and technical tags.\n"
+    f"===== END {CONTENT_OPTIMIZATION_BLOCK} =====\n\n"
 )
 
 
@@ -979,6 +1038,9 @@ def _prompt_parts(
     not, for the same reason and on the same side of the cache boundary: it is per client, so it
     must not sit in front of the library. It is "" for the default bucket, which keeps a run that
     never set an industry byte-identical to the prompt before this block existed.
+
+    The content-optimization block follows the business brief, still in the tail: it defers to the
+    facts, keywords and link map that brief already stated, and it is the same text on every stage.
     """
     cfg = _config(asset_id, phase)
     answers = _apply_reference_injections(asset_id, answers)
@@ -997,6 +1059,7 @@ def _prompt_parts(
         voice_block(voice)
         + _OUTPUT_STYLE
         + business_brief
+        + CONTENT_OPTIMIZATION
         + brand
         + _page_build_standards_block(asset_id)
         + "— INPUTS (fill in before submitting) —\n\n"

@@ -99,7 +99,10 @@ here seems to conflict with DESIGN.md, DESIGN.md wins.
 ## 7. Links
 
 - Header, footer, social, contact and legal links come from DESIGN.md's Links section, href for
-  href. Internal anchors (`#section-id`) must match an `id` on the page.
+  href — every listed header and footer link appears on the page in the reference's order. Body /
+  in-page Links, Internal Cluster Pages and service URLs from the inputs are linked in the sections
+  that cover those destinations (same pattern as the reference), not omitted or dumped only in the
+  footer. Internal anchors (`#section-id`) must match an `id` on the page.
 - External links open in the same tab unless they are documents; links that do open a new tab carry
   `rel="noopener"`.
 - Link text describes the destination — no "click here", no bare "Learn more" without context
@@ -109,7 +112,8 @@ here seems to conflict with DESIGN.md, DESIGN.md wins.
 
 Run through this list mentally and fix anything that fails:
 
-1. Every header, footer and social link matches DESIGN.md's Links section exactly.
+1. Every header, footer and social link matches DESIGN.md's Links section exactly; body destinations
+   the copy still covers are linked the way the reference links them.
 2. No `href="#"`, no empty `src`, no lorem ipsum, no invented URLs.
 3. At 360px: no horizontal scroll, menu collapses, grids are one column, buttons full-width where
    the reference does that. On desktop, every sub-menu is closed on load.

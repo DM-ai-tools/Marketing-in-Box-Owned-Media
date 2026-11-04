@@ -15,8 +15,8 @@ export interface PageVariantDef {
 }
 
 export const PAGE_VARIANTS: PageVariantDef[] = [
-  { id: "reference", label: "Beat your current page", blurb: "Measured against the client's hosted page, fixing what the CRO audit found." },
-  { id: "competitor", label: "Outperform competitors", blurb: "Built to cover every topic the competitors' pages cover, better, with a beat sheet." },
+  { id: "reference", label: "Beat your current page", blurb: "Designs the CRO rewrite into the page and fixes what the audit found on the hosted page." },
+  { id: "competitor", label: "Outperform competitors", blurb: "Built from competitors' best coverage patterns for this client's services — not the CRO rewrite." },
   { id: "skills", label: "Built with your skill", blurb: "Follows the skill document you supplied as its method." },
   { id: "framework", label: "Built with your framework", blurb: "Structured by the framework you supplied, part by part." },
 ];

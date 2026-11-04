@@ -19,6 +19,7 @@ import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 
+from app.services import keyword_selection
 from app.services.link_manifest import LinkManifest
 from app.services.media_storage import current_media_url
 
@@ -278,7 +279,7 @@ async def load_business_facts(
     if asset_id != "funnel":
         facts.funnel = _content(await lookup("funnel_stages")) or _content(await lookup("funnel"))
 
-    keywords = await lookup("keyword_clusters")
+    keywords = keyword_selection.apply(await lookup("keyword_clusters"))
     if isinstance(keywords, dict) and isinstance(keywords.get("clean_keywords"), list):
         facts.keywords = [k for k in keywords["clean_keywords"] if isinstance(k, dict)]
 

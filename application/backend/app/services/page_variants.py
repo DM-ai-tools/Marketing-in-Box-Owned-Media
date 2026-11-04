@@ -3,16 +3,16 @@
 The stage stays one stage (`pillar_page`). Each variant is a generation of it with one extra block in
 the prompt tail, `PAGE_VARIANT`, saying which lens this draft takes:
 
-| Variant | Lens | Measured input (free) |
-| --- | --- | --- |
-| `reference` | beat the client's hosted page | that page's outline, CRO's audit findings |
-| `competitor` | outperform every competitor page | each competitor page's outline, as a beat sheet |
-| `skills` | follow the operator's skill document | none: the document is the input |
-| `framework` | follow the operator's framework document | none |
+| Variant | Lens | Content source | Measured input (free) |
+| --- | --- | --- | --- |
+| `reference` | beat the client's hosted page | CRO rewrite + audit | that page's outline, CRO's audit findings |
+| `competitor` | outperform every competitor page | beat sheet + client facts (no CRO rewrite) | each competitor page's outline, as a beat sheet |
+| `skills` | follow the operator's skill document | skill document (+ shared INPUTS) | none: the document is the input |
+| `framework` | follow the operator's framework document | framework document (+ shared INPUTS) | none |
 
-Only the variant's own document reaches its prompt: `answers_for` blanks the other's, so a
-reference draft is not quietly written to the skill file too. Every page is read with
-`scraper._fetch_html`, free, never a paid reader, because this loops over URLs.
+`answers_for` blanks the other document variant's fields, and for `competitor` also blanks the CRO
+rewrite and locked sections so that draft cannot rebuild the current-page rewrite. Every page is
+read with `scraper._fetch_html`, free, never a paid reader, because this loops over URLs.
 """
 
 from __future__ import annotations
@@ -46,6 +46,15 @@ _DOCUMENT_FIELDS: dict[str, tuple[str, str]] = {
 
 NOT_USED = "N/A — not used by this page variant."
 
+#: What the competitor variant's Improved Page Content field carries so the master prompt can see
+#: that the CRO rewrite is deliberately withheld (not missing). Starts with `NOT_USED` so
+#: `_has_document` and ordinary "N/A" checks treat it the same.
+CRO_CONTENT_NOT_USED = (
+    f"{NOT_USED} Build from the PAGE_VARIANT beat sheet and the client's services, business rules, "
+    "terminology and facts in the INPUTS. Do not reconstruct the CRO rewrite. Do not reuse or "
+    "paraphrase that rewrite's H1, hero headline or title tag — write a distinct hero for this variant."
+)
+
 #: At most this many competitor pages are read, each a free fetch.
 MAX_COMPETITOR_PAGES = 5
 #: CRO's audit findings are background for the reference variant, cut to this length.
@@ -75,13 +84,26 @@ def document_requested(variant: str, answers: dict[str, str]) -> bool:
     return _yes(answers.get(flag)) and _has_document(answers.get(doc))
 
 
+def cro_rewrite_withheld(value: str | None) -> bool:
+    """True when Improved Page Content is the competitor-variant sentinel, not a real rewrite."""
+    text = (value or "").strip()
+    return text.lower().startswith(NOT_USED.lower())
+
+
 def answers_for(variant: str, answers: dict[str, str]) -> dict[str, str]:
-    """The intake as this variant's prompt should read it: the other variant's document blanked."""
+    """The intake as this variant's prompt should read it.
+
+    Blanks the other document variant's skill/framework fields. For `competitor`, also blanks the
+    CRO rewrite and locked sections so Outperform competitors cannot rebuild Beat your current page.
+    """
     out = dict(answers)
     for owner, (flag, doc) in _DOCUMENT_FIELDS.items():
         if owner != variant:
             out[flag] = "No"
             out[doc] = NOT_USED
+    if variant == "competitor":
+        out["improved_page_content"] = CRO_CONTENT_NOT_USED
+        out["cro_locked_sections"] = NOT_USED
     return out
 
 
@@ -200,19 +222,30 @@ async def measure(
 _DIRECTIVES: dict[str, str] = {
     "reference": (
         "PAGE VARIANT — BEAT THE CURRENT PAGE. This draft is one of several the operator will compare. "
-        "Build the page to outperform the client's currently hosted page, measured below. Keep what works "
-        "on it, fix every problem the CRO audit found, and beat it on each measured line where more is "
-        "better for the buyer (substance, sections that answer their questions, clear CTAs, proof, FAQ, "
-        "structured data, internal links, target keywords). Never pad to win a count. In the delivery notes, "
-        "add a short 'Against the current page' list: what changed and why."
+        "The Improved Page Content is the CRO rewrite of the client's page: design that copy into the page, "
+        "fix every problem the CRO audit found (below), and beat the current page measured below on each "
+        "line where more is better for the buyer (substance, sections that answer their questions, clear "
+        "CTAs, proof, FAQ, structured data, internal links, target keywords). Keep what already works on "
+        "the hosted page. Never pad to win a count. Hero and H1: use the Improved Page Content's own "
+        "headline (tighten only if needed) — this variant owns that line. In the delivery notes, add a "
+        "short 'Against the current page' list: what changed and why."
     ),
     "competitor": (
         "PAGE VARIANT — OUTPERFORM THE COMPETITORS. This draft is one of several the operator will compare. "
-        "Build the page to beat every competitor page measured below: cover each topic they cover, better and "
-        "more specifically for this client's buyer; answer what they leave out; match or exceed their depth "
-        "without padding; carry an FAQ and structured data where they help. Use only facts the INPUTS state "
-        "about this client; never borrow a competitor's claims. In the delivery notes, add a short 'Against "
-        "the competitors' list: each topic and how this page handles it better."
+        "The Improved Page Content input is deliberately withheld for this variant — do not reconstruct or "
+        "follow the CRO rewrite of the current page. Build the page from the beat sheet below: cover each "
+        "topic the competitors cover, better and more specifically for this client's buyer; answer what they "
+        "leave out; match or exceed their depth without padding; carry an FAQ and structured data where they "
+        "help. Wording, claims and offers come only from this client's services, business rules, terminology "
+        "map, CTAs and other INPUTS facts — never from a competitor's copy or claims, and never from a CRO "
+        "audit of the current page. "
+        "Hero and H1 must be unique to this variant: write a new H1, hero subhead and title tag angled off "
+        "the beat sheet (what competitors lead with, or the gap this client can own). Do not reuse, lightly "
+        "edit or paraphrase the CRO rewrite's headline, or any H1 the Beat-your-current-page draft would "
+        "use from that rewrite. The same head term may appear; the promise and wording must differ so the "
+        "two variants are visibly different in the compare table. In the delivery notes, add a short "
+        "'Against the competitors' list (each topic and how this page handles it better) and one line "
+        "'Hero difference' naming how this H1 differs from the CRO rewrite's."
     ),
     "skills": (
         "PAGE VARIANT — BUILT WITH THE OPERATOR'S SKILL. This draft is one of several the operator will compare. "

@@ -123,6 +123,7 @@ const saved = renderToStaticMarkup(
 ok("a saved card states how many were used", saved.includes("2 competitors") && saved.includes("used for this stage"));
 ok("a saved card lists only what was saved", saved.includes("b.com") && !saved.includes("a.com offering"));
 ok("a saved card offers no choices", !saved.includes("Choose which to use") && !saved.includes('type="checkbox"'));
+ok("a saved card still offers re-run (thin listings need another search)", saved.includes("Re-run Analysis"));
 
 // --- report ------------------------------------------------------------------------------------
 

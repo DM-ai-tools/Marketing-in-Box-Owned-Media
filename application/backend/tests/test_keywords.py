@@ -443,3 +443,154 @@ def test_an_unresolvable_region_is_an_actionable_error() -> None:
     config = K.KeywordRunConfig("Acme", "", "Sydney NSW", "English", {"SMM": ["smm"]})
     with pytest.raises(K.KeywordProviderError, match="Melbourne, Australia"):
         K.resolve_location(config)
+
+
+# --------------------------------------------------------------------------------------
+# Cluster naming — headline framework
+# --------------------------------------------------------------------------------------
+
+
+def test_clustering_system_injects_the_headline_framework() -> None:
+    """Cluster names are framework headlines; the framework must be in the system prompt, not
+    merely named in the clustering rules file."""
+    blocks = K.clustering_system_blocks()
+    assert len(blocks) == 2
+    framework_block, rules_block = blocks
+    assert K.HEADLINE_FRAMEWORK in framework_block["text"]
+    assert "Cluster names are publishable headlines" in framework_block["text"]
+    assert "COMPREHENSIVE HEADLINE FRAMEWORK" in framework_block["text"].upper() or "headline" in framework_block["text"].lower()
+    assert "publishable headline" in rules_block["text"].lower() or "COMPREHENSIVE_HEADLINE_FRAMEWORK" in rules_block["text"]
+    assert framework_block["cache_control"]["ttl"] == "1h"
+    assert rules_block["cache_control"]["ttl"] == "1h"
+
+
+def test_clustering_prompt_requires_framework_bound_names() -> None:
+    text = K.load_clustering_prompt()
+    assert "COMPREHENSIVE_HEADLINE_FRAMEWORK" in text
+    assert "framework_formula" in text
+    assert "curiosity_elements" in text
+    assert "topic label" in text.lower()
+
+
+def test_validation_warns_when_framework_naming_fields_are_missing() -> None:
+    _config, clean, _dropped, vocabulary = _clean()
+    report = {
+        "clusters": [
+            {
+                "name": "How To Grow Social Reach In 30 Days",
+                "intent": "commercial",
+                "content_type": "guide",
+                "keywords": [{"keyword": clean[0].keyword, "role": "Primary"}],
+            }
+        ]
+    }
+    _validated, warnings, _invented = K.validate_clusters(report, clean, vocabulary)
+    assert any("framework_formula" in w for w in warnings)
+    assert any("curiosity_elements" in w for w in warnings)
+
+
+def test_markdown_report_carries_the_framework_fields() -> None:
+    config = K.config_from_profile(PROFILE, "phase1")
+    report = {
+        "total_keywords": 1,
+        "clusters_created": 1,
+        "orphan_count": 0,
+        "clusters": [
+            {
+                "name": "How Marketing Teams Cut Ad Waste In Half With AI SEO",
+                "intent": "commercial",
+                "funnel": "MOFU",
+                "framework_formula": "Part 3D How To [Benefit] In [Timeframe]",
+                "curiosity_elements": ["SPECIFICITY", "COMPARISON"],
+                "content_type": "guide",
+                "recommended_content": "Guide",
+                "recommended_url": "/blog/ai-seo",
+                "keywords": [{"keyword": "ai seo", "volume": 100, "difficulty": 20, "role": "Primary"}],
+            }
+        ],
+        "orphans": [],
+    }
+    md = K.to_markdown(report, config)
+    assert "How Marketing Teams Cut Ad Waste In Half With AI SEO" in md
+    assert "Part 3D How To [Benefit] In [Timeframe]" in md
+    assert "SPECIFICITY" in md and "COMPARISON" in md
+
+
+# --------------------------------------------------------------------------------------
+# Service offering — not adjacent product demand
+# --------------------------------------------------------------------------------------
+
+
+def test_product_tool_searches_are_dropped_for_an_agency_service() -> None:
+    """'best seo tool' shares the head word 'seo' but is a product buy, not the client's offer."""
+    config = K.config_from_profile(
+        {"industry": "Digital-Marketing - AI optimised SEO", "region": "Australia", "client_name": "Acme"}
+    )
+    assert config is not None
+    assert K.is_product_search("best seo tool", config)
+    assert K.is_product_search("ai seo tools", config)
+    assert not K.is_product_search("ai powered seo services", config)
+    assert not K.on_service("best seo tool", config)
+
+    raw = [
+        K.RawKeyword("best seo tool", 261_000, 10, "broad", "ai optimised seo", "AI optimised SEO", "test"),
+        K.RawKeyword("ai powered seo services", 800, 20, "phrase", "ai optimised seo", "AI optimised SEO", "test"),
+        K.RawKeyword("get seo services", 500, 18, "phrase", "ai optimised seo", "AI optimised SEO", "test"),
+    ]
+    clean, dropped, _vocab = K.run_keyword_pipeline(raw, config)
+    assert {k.keyword for k in clean} == {"ai powered seo services", "get seo services"}
+    assert any(d["keyword"] == "best seo tool" and "product/tool" in d["reason"] for d in dropped)
+
+
+def test_a_product_named_service_keeps_tool_searches() -> None:
+    config = K.KeywordRunConfig(
+        "Acme",
+        "https://acme.com",
+        "Australia",
+        "English",
+        {"SEO Software": ["seo software", "seo software tools"]},
+    )
+    assert K.service_sells_a_product(config)
+    assert not K.is_product_search("best seo software", config)
+    assert K.on_service("best seo software", config)
+
+
+def test_validation_drops_a_tool_cluster_the_model_invents() -> None:
+    config = K.config_from_profile(
+        {"industry": "Digital-Marketing - AI optimised SEO", "region": "Australia", "client_name": "Acme"}
+    )
+    assert config is not None
+    grounded = K.CleanKeyword(
+        "ai powered seo services",
+        800,
+        20,
+        "phrase",
+        "ai optimised seo",
+        "AI optimised SEO",
+        "transactional",
+        "ai optimised seo",
+        [],
+        None,
+    )
+    vocabulary = K.build_vocabulary(config)
+    report = {
+        "clusters": [
+            {
+                "name": "Best SEO Tool Or AI-Powered Software? Which Actually Works For Rankings",
+                "intent": "commercial",
+                "funnel": "MOFU",
+                "content_type": "comparison",
+                "framework_formula": "Part 3D",
+                "curiosity_elements": ["SPECIFICITY", "COMPARISON"],
+                "keywords": [
+                    {"keyword": "best seo tool", "role": "Primary", "volume": 261000},
+                    {"keyword": grounded.keyword, "role": "Secondary"},
+                ],
+            }
+        ]
+    }
+    validated, warnings, invented = K.validate_clusters(report, [grounded], vocabulary, config)
+    assert validated["clusters"]
+    assert validated["clusters"][0]["primary_keyword"] == grounded.keyword
+    assert any(row["keyword"] == "best seo tool" and "product/tool" in row["reason"] for row in invented)
+    assert any("product/tool headline" in w for w in warnings)

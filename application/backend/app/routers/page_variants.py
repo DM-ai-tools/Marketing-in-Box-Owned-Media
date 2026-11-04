@@ -51,6 +51,29 @@ def _row(page: page_compare.PageOutline, variant: str, topics: list[str], has_pa
     return row
 
 
+def _draft_base_url(payload: "CompareRequest") -> str | None:
+    """A URL on the client's host so absolute Links-section hrefs on a draft count as internal.
+
+    Drafts copy DESIGN.md Links character for character, which are absolute. Without a host to
+    match against, `page_compare` only counts relative `/…` paths and reports 0 internal links
+    next to a live page that has dozens.
+    """
+    from app.routers.pipeline import _as_url, _variant_reference_url
+
+    if payload.current and payload.current.get("url"):
+        return str(payload.current["url"])
+    if payload.current_url:
+        return _as_url(payload.current_url)
+    answers = payload.answers or {}
+    return (
+        _variant_reference_url(answers)
+        or _as_url(answers.get("existing_page_url") or "")
+        or _as_url(answers.get("client_website_url") or "")
+        # NO REFERENCE still embeds the landing URL; host match is all we need for counting.
+        or _as_url(answers.get("reference_design_source") or "")
+    )
+
+
 async def _current_row(payload: "CompareRequest", keywords: list[str]) -> dict | None:
     if payload.current and not payload.current.get("error"):
         fields = {k: v for k, v in payload.current.items() if k in page_compare.PageOutline.__dataclass_fields__}
@@ -68,8 +91,9 @@ async def _current_row(payload: "CompareRequest", keywords: list[str]) -> dict |
 @router.post("/pillar/variants/compare")
 async def compare_variants(payload: CompareRequest) -> dict:
     keywords = [k for k in payload.keywords if k.strip()][:30]
+    base_url = _draft_base_url(payload)
     pages = []
     for draft in payload.drafts[:6]:
-        page = page_compare.outline(draft.label or draft.variant, draft.text, None, keywords)
+        page = page_compare.outline(draft.label or draft.variant, draft.text, base_url, keywords)
         pages.append(_row(page, draft.variant, payload.topics, page_compare.page_html(draft.text) is not None))
     return {"pages": pages, "current": await _current_row(payload, keywords)}

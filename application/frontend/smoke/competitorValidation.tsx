@@ -11,9 +11,17 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { CompetitorCard } from "../src/pipeline/CompetitorCard";
 import { usePipelineStore, type PipelineMessage } from "../src/pipeline/pipelineStore";
 import type { CompetitorAnalysisResult, CompetitorValidation } from "../src/pipeline/pipelineApi";
-import { defaultPicks, validationMarkdownFor } from "../src/lib/competitorValidation";
+import {
+  defaultPicks,
+  keywordConstraintMarkdown,
+  selectedKeywordsMarkdown,
+  uniqueFetchedKeywords,
+  validationMarkdownFor,
+} from "../src/lib/competitorValidation";
 import { competitorAppendixFor } from "../src/lib/competitorSources";
+import { KeywordCompareHover, RankingWinnerTag } from "../src/pipeline/KeywordCompare";
 import { ScannedKeywords } from "../src/pipeline/ScannedKeywords";
+import type { KeywordComparison } from "../src/pipeline/pipelineApi";
 
 let pass = 0;
 const fails: string[] = [];
@@ -67,6 +75,22 @@ const REPORT: CompetitorValidation = {
         { keyword: "social media marketing audit", position: 3, volume: 500, url: "https://alpha.com.au/offer/" },
         { keyword: "free instagram audit", position: 14, volume: 90, url: "https://alpha.com.au/offer/" },
       ],
+      keyword_comparisons: [
+        {
+          keyword: "social media marketing audit",
+          competitor_position: 3,
+          client_position: 18,
+          volume: 500,
+          winner: "competitor",
+        },
+        {
+          keyword: "instagram for retail",
+          competitor_position: 22,
+          client_position: 4,
+          volume: 210,
+          winner: "client",
+        },
+      ] satisfies KeywordComparison[],
     },
     {
       rank: 2, name: "Beta", domain: "beta.com.au", page_url: "https://beta.com.au/offer/", play: "Case study library",
@@ -75,6 +99,19 @@ const REPORT: CompetitorValidation = {
       blockers: [{ reason: "Relies on case studies; the client's settings say testimonials are NO.", source: "rule", quote: "case studies" }],
       what_to_take: "", how_to_prove: "", top_keywords: [],
       business_level: "above", page_count: 12, keyword_count: 2,
+      scanned_keywords: [
+        { keyword: "Social Media Marketing Audit", position: 11, volume: 500 },
+        { keyword: "case study examples", position: 6, volume: 80 },
+      ],
+    },
+    {
+      rank: 3, name: "Gamma", domain: "gamma.com.au", page_url: "https://gamma.com.au/offer/", play: "Unrelated tool",
+      proof: 20, fit: 15, feasibility: 80, total: 32, verdict: "not_a_fit",
+      verdict_reason: "Little overlap with this client's service, keywords or buyer.",
+      metrics: [metric("traffic", "Organic visits / month", "40", 10, "measured")],
+      blockers: [],
+      what_to_take: "A calculator", how_to_apply: "Do not apply.", how_to_prove: "", top_keywords: [],
+      scanned_keywords: [],
     },
   ],
   plays: [
@@ -143,11 +180,14 @@ ok("the listing is sent for validation", !!req && (req.body.competitors as unkno
 ok("with the client's site, region and run", req?.body.target_url === "https://client.com.au/" && req?.body.location === "Melbourne, Australia" && req?.body.run_id === "run-1");
 let state = usePipelineStore.getState();
 let msg = state.messages.find((m) => m.id === "comp-1")!;
-ok("the report is on the card", msg.competitorValidation?.status === "ready" && msg.competitorValidation.report?.competitors.length === 2);
+ok("the report is on the card", msg.competitorValidation?.status === "ready" && msg.competitorValidation.report?.competitors.length === 3);
 
 const html = renderToStaticMarkup(<CompetitorCard message={msg} />);
 ok("the card asks the question", html.includes("Will it work for this client?"));
-ok("verdict tags show, but Avoid is not tagged (operator's request)", html.includes("Implement now") && !html.includes(">Avoid<"));
+ok(
+  "verdict tags show, but Avoid and Not a fit are not tagged",
+  html.includes("Implement now") && !html.includes(">Avoid<") && !html.includes("Not a fit") && html.includes("Little overlap with this client"),
+);
 ok("the fit score and the three axes are shown", html.includes("Fit score 88 of 100") && html.includes("Proof") && html.includes("Feasibility"));
 ok("the client's own baseline is shown", html.includes("Baseline, the client&#x27;s own site"));
 ok("business level, page count and keywords are on the listing", html.includes("Above this client") && html.includes("Number of pages: 42") && html.includes("social media marketing audit (#3)"));
@@ -158,12 +198,62 @@ ok(
 );
 ok("the evidence row's label opens the same list", (html.match(/data-scanned-keywords/g) ?? []).length >= 3);
 ok("the client's baseline lists its own scanned keywords", html.includes("client brand name"));
+ok("shared-keyword hover compares client vs competitor positions", html.includes("data-keyword-compare") && html.includes("instagram for retail"));
+ok("a tag says who ranks better on shared keywords", html.includes("data-rank-winner") && (html.includes("Competitor ranks better") || html.includes("Client ranks better")));
+ok("client keyword wins are listed under the evidence", html.includes("data-client-keyword-wins") && html.includes("Client ranks better on"));
+ok("the per-competitor take-keywords panel is gone", !html.includes("data-choose-keywords") && !html.includes("Take keywords"));
+const picker = html.slice(html.indexOf("data-keyword-picker"));
+ok(
+  "the keyword table is the last block after the plays table",
+  html.indexOf("data-plays") < html.indexOf("Gaps no competitor") &&
+    html.indexOf("post-by-post sales report") < html.indexOf("data-keyword-picker") &&
+    html.indexOf("data-keyword-picker") < html.indexOf("How this was checked") &&
+    picker.includes("Keywords for this stage"),
+);
+ok(
+  "each fetched keyword has one selection box",
+  (picker.match(/data-keyword-pick="/g) ?? []).length === uniqueFetchedKeywords(REPORT.competitors).length &&
+    picker.includes("data-keyword-select-all"),
+);
+ok(
+  "the same keyword from two competitors is one row, best position kept",
+  uniqueFetchedKeywords(REPORT.competitors).filter((r) => r.keyword.toLowerCase() === "social media marketing audit").length === 1 &&
+    (picker.match(/data-fetched-keyword="social media marketing audit"/g) ?? []).length === 1 &&
+    uniqueFetchedKeywords(REPORT.competitors).find((r) => r.keyword.toLowerCase() === "social media marketing audit")?.position === 3 &&
+    (uniqueFetchedKeywords(REPORT.competitors).find((r) => r.keyword.toLowerCase() === "social media marketing audit")?.competitors.length ?? 0) === 2,
+);
+ok(
+  "any ticked keyword reaches the stage markdown, including one the client ranks higher for",
+  selectedKeywordsMarkdown(REPORT.competitors, ["social media marketing audit", "instagram for retail"]).includes("Competitor keywords selected by the operator") &&
+    selectedKeywordsMarkdown(REPORT.competitors, ["instagram for retail"]).includes("instagram for retail") &&
+    selectedKeywordsMarkdown(REPORT.competitors, ["Social Media Marketing Audit", "social media marketing audit"]).split("social media marketing audit").length === 2,
+);
+ok(
+  "empty ticks ban every fetched competitor keyword",
+  keywordConstraintMarkdown(REPORT.competitors, []).includes("Competitor keywords — none selected") &&
+    validationMarkdownFor(REPORT, LISTING.competitors, ["alpha.com.au"], []).includes("none selected"),
+);
+ok(
+  "a ticked pick still reaches validation markdown and does not emit the empty ban",
+  validationMarkdownFor(REPORT, LISTING.competitors, ["alpha.com.au"], ["free instagram audit"]).includes("free instagram audit") &&
+    !validationMarkdownFor(REPORT, LISTING.competitors, ["alpha.com.au"], ["free instagram audit"]).includes("none selected"),
+);
+ok(
+  "the compare hover and winner tag render alone",
+  renderToStaticMarkup(
+    <KeywordCompareHover comparisons={REPORT.competitors[0].keyword_comparisons}>overlap</KeywordCompareHover>,
+  ).includes("data-keyword-compare") &&
+    renderToStaticMarkup(<RankingWinnerTag comparisons={REPORT.competitors[0].keyword_comparisons} />).includes("data-rank-winner"),
+);
 ok(
   "a competitor scored before the list was kept shows plain text, no popover",
   renderToStaticMarkup(<ScannedKeywords keywords={undefined} total={2}>2 ranking keywords</ScannedKeywords>) === "2 ranking keywords" &&
     renderToStaticMarkup(<ScannedKeywords keywords={[]} total={2}>2 ranking keywords</ScannedKeywords>) === "2 ranking keywords",
 );
-ok("what to take and how to prove it", html.includes("A free 10-point audit") && html.includes("Opt-in rate ≥ 25% within 30 days"));
+ok(
+  "what to take and how to prove it",
+  html.includes("A free 10-point audit") && html.includes("Opt-in rate ≥ 25% within 30 days") && !html.includes("A calculator"),
+);
 ok("a blocker says why", html.includes("testimonials are NO"));
 ok("each number says where it came from", html.includes("Measured") && html.includes("Judged") && html.includes("Not available"));
 ok("the judge's reason quotes its source", html.includes("Owners of Melbourne retail stores"));
@@ -181,7 +271,12 @@ ok("how it was checked, with the limits stated", html.includes("How this was che
 // The ranking reaches the prompt only for the competitors approved.
 const subset = validationMarkdownFor(REPORT, [LISTING.competitors[0]]);
 ok("a narrowed listing drops the left-out competitor's lines", !subset.includes("Beta") && subset.includes("| 1 | Alpha |"), subset);
-ok("all approved: the whole ranking", validationMarkdownFor(REPORT, LISTING.competitors) === REPORT.markdown);
+const allApproved = validationMarkdownFor(REPORT, LISTING.competitors);
+ok(
+  "all approved: the whole ranking plus the keyword constraint",
+  allApproved.startsWith(REPORT.markdown) && allApproved.includes("Competitor keywords — none selected"),
+  allApproved.slice(0, 200),
+);
 const alpha = { ...REPORT.competitors[0], what_to_take: "A free audit with a stated dollar value", how_to_apply: "Offer a free retail audit and gate it behind the booking form" };
 const picked = validationMarkdownFor({ ...REPORT, competitors: [alpha, REPORT.competitors[1]] }, LISTING.competitors, ["alpha.com.au"]);
 ok("a ticked play reaches the stage as its reference, with what and how", picked.includes("Plays selected by the operator") && picked.includes("Brings them leads: A free audit") && picked.includes("How to apply: Offer a free retail audit"), picked);
@@ -189,9 +284,25 @@ ok("an unticked play is not in the reference", !validationMarkdownFor({ ...REPOR
 ok("implement-now plays are ticked by default", defaultPicks({ ...REPORT, competitors: [alpha, REPORT.competitors[1]] }).includes("alpha.com.au"));
 ok("the operator's own list carries no ranking", validationMarkdownFor(REPORT, [{ ...LISTING.competitors[0], domain: "mine.com" }]) === "");
 
+usePipelineStore.getState().toggleKeywordPick("comp-1", "free instagram audit");
 await usePipelineStore.getState().saveCompetitorStep("comp-1", { ...LISTING, competitors: [LISTING.competitors[0]], returned_count: 1 });
 const save = requests.find((r) => r.url.endsWith("/competitor/competitor_analysis_lead_magnet/save"));
-ok("saving carries the ranking for the approved competitors", String(save?.body.validation_md).includes("Alpha") && !String(save?.body.validation_md).includes("Beta"), String(save?.body.validation_md));
+ok(
+  "saving carries the ranking, the ticked keywords, and the full offered list",
+  String(save?.body.validation_md).includes("Alpha") &&
+    !String(save?.body.validation_md).includes("Beta") &&
+    String(save?.body.validation_md).includes("Competitor keywords selected by the operator") &&
+    String(save?.body.validation_md).includes("free instagram audit") &&
+    Array.isArray(save?.body.keyword_picks) &&
+    (save?.body.keyword_picks as string[]).includes("free instagram audit") &&
+    Array.isArray(save?.body.competitor_keywords) &&
+    (save?.body.competitor_keywords as string[]).some((k) => k.toLowerCase() === "social media marketing audit"),
+  JSON.stringify({
+    validation_md: save?.body.validation_md,
+    keyword_picks: save?.body.keyword_picks,
+    competitor_keywords: save?.body.competitor_keywords,
+  }),
+);
 
 // The deliverable's appendix carries each verdict.
 state = usePipelineStore.getState();

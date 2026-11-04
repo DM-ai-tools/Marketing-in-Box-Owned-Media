@@ -252,6 +252,8 @@ export interface StreamStageOptions {
   onContextRetrieval?: (report: ContextRetrievalReport) => void;
   /** The primary and secondary keywords this stage was told to write with. */
   onKeywordTargets?: (targets: KeywordTargets) => void;
+  /** Hub/spoke URL map derived from the keyword clusters (`seo_architecture`). */
+  onSeoArchitecture?: (map: SeoArchitecture) => void;
   /** A page Refine's report: the page is changed by exact edits, never retyped, and this says how
    * many landed and why any did not. Only a built pillar page's Refine sends it. */
   onRevisionEdits?: (report: RevisionEditReport) => void;
@@ -405,6 +407,7 @@ type SseEvent =
   | { type: "image_notes"; notes: string[] }
   | ({ type: "context_retrieval" } & ContextRetrievalReport)
   | ({ type: "keyword_targets" } & KeywordTargets)
+  | ({ type: "seo_architecture" } & SeoArchitecture)
   | ({ type: "manus" } & ManusBuildEvent)
   | ({ type: "revision_edits" } & RevisionEditReport)
   | ({ type: "page_variant" } & PageVariantMeasure);
@@ -514,6 +517,10 @@ async function consumeSseStream(
       else if (event.type === "keyword_targets") {
         const { type: _t, ...targets } = event;
         if (targets.groups?.length) opts.onKeywordTargets?.(targets);
+      }
+      else if (event.type === "seo_architecture") {
+        const { type: _t, ...map } = event;
+        if (map.pages?.length) opts.onSeoArchitecture?.(map);
       }
       else if (event.type === "context_retrieval") {
         if (event.fields?.length) opts.onContextRetrieval?.({ fields: event.fields, notes: event.notes ?? [] });
@@ -889,6 +896,10 @@ export async function saveCompetitorAnalysis(
   result: CompetitorAnalysisResult,
   /** The validation's ranking (`CompetitorValidation.markdown`), carried into the stage's prompt. */
   validationMd = "",
+  /** Keywords the operator ticked; with `competitorKeywords`, strips unticked ones from KEYWORD_TARGETS. */
+  keywordPicks: string[] = [],
+  /** Every unique ranking keyword the validation table offered. */
+  competitorKeywords: string[] = [],
 ): Promise<SaveCompetitorResponse> {
   const res = await fetch(`/api/pipeline/runs/${runId}/competitor/${assetId}/save`, {
     method: "POST",
@@ -903,6 +914,8 @@ export async function saveCompetitorAnalysis(
       // Persisted on the analysis row for audit/re-parsing. Never rendered.
       raw_output: result.raw_output ?? "",
       validation_md: validationMd,
+      keyword_picks: keywordPicks,
+      competitor_keywords: competitorKeywords,
     }),
   });
   return unwrap(res, "Save competitor analysis");
@@ -945,6 +958,8 @@ export interface ValidatedCompetitor {
   keyword_count: number | null;
   /** Every keyword scanned for this domain, shown on hover. Absent on a report scored before it. */
   scanned_keywords?: ScannedKeyword[];
+  /** Overlap keywords with client vs competitor positions. Absent on a report scored before it. */
+  keyword_comparisons?: KeywordComparison[];
 }
 
 /** One keyword a domain ranks for, as DataForSEO reported it. */
@@ -953,6 +968,15 @@ export interface ScannedKeyword {
   position: number | null;
   volume: number | null;
   url?: string;
+}
+
+/** A client-topic keyword both sides were checked for: who ranks higher in Google. */
+export interface KeywordComparison {
+  keyword: string;
+  competitor_position: number | null;
+  client_position: number | null;
+  volume: number | null;
+  winner: "client" | "competitor" | "tie" | "unknown";
 }
 
 export interface CompetitorValidation {
@@ -1073,6 +1097,8 @@ export interface KeywordClusterSummary {
   primary_keyword: string | null;
   keyword_count: number;
   total_volume: number;
+  /** False when the operator unticked it: later stages ignore it. Absent on older responses (kept). */
+  selected?: boolean;
 }
 
 export interface KeywordReportResult {
@@ -1130,6 +1156,37 @@ export interface KeywordTargets {
   synonyms: Record<string, string[]>;
 }
 
+/** One page on the measured SEO map (`seo_architecture` stream event). */
+export interface SeoMappedPage {
+  cluster: string;
+  primary_keyword: string;
+  intent: string;
+  content_type: string;
+  funnel: string;
+  volume: number | null;
+  url: string;
+  status: string;
+  role: string;
+}
+
+export interface SeoLinkEdge {
+  from_url: string;
+  to_url: string;
+  from_label: string;
+  to_label: string;
+  anchor: string;
+  reason: string;
+}
+
+/** Hub/spoke URL map derived from keyword clusters for page-writing stages. */
+export interface SeoArchitecture {
+  service: string;
+  location: string;
+  pages: SeoMappedPage[];
+  links: SeoLinkEdge[];
+  notes: string[];
+}
+
 export async function buildRunKeywords(
   runId: string,
   profile: Record<string, string>,
@@ -1146,6 +1203,21 @@ export async function buildRunKeywords(
     }),
   });
   return unwrap(res, "Keyword clustering");
+}
+
+/** Record which clusters later stages use (`PUT /runs/{id}/keywords/clusters`). Free: nothing is
+ * fetched. Returns the report with the ranking, groups and total narrowed to the kept clusters. */
+export async function saveKeywordClusterSelection(
+  runId: string,
+  selected: string[],
+  website = "",
+): Promise<KeywordReportResult> {
+  const res = await fetch(`/api/pipeline/runs/${runId}/keywords/clusters`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ selected, website }),
+  });
+  return unwrap(res, "Saving the keyword clusters");
 }
 
 /** One suggested headline, with the evidence behind it.

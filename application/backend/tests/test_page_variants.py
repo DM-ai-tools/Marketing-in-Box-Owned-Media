@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -98,6 +99,22 @@ def test_a_draft_is_measured_on_its_page_not_its_notes():
     assert page_compare.page_html(DRAFT) is not None
 
 
+def test_absolute_same_host_links_on_a_draft_count_as_internal():
+    """DESIGN.md Links are absolute; without a client host they used to measure as 0."""
+    draft = """```html
+<!doctype html><html><body>
+<a href="https://client.com.au/seo">SEO</a>
+<a href="https://client.com.au/contact">Contact</a>
+<a href="https://other.com/x">External</a>
+<a href="/local">Local</a>
+</body></html>
+```"""
+    alone = page_compare.outline("Variant", draft)
+    assert alone.internal_links == 1  # only the relative path
+    counted = page_compare.outline("Variant", draft, "https://www.client.com.au/seo")
+    assert counted.internal_links == 3
+
+
 def test_prose_falls_back_to_markdown_headings():
     page = page_compare.outline("Prose", "# Title\n\n## One\ntext [Book a call](/book)\n\n## FAQ\n")
     assert page.h1 == "Title" and page.sections == ["One", "FAQ"]
@@ -143,6 +160,48 @@ def test_each_variant_sees_only_its_own_document():
     reference = V.answers_for("reference", ANSWERS)
     assert reference["skill_document"] == V.NOT_USED and reference["framework_document"] == V.NOT_USED
     assert ANSWERS["skill_document"].startswith("Attached")  # the caller's answers are untouched
+
+
+def test_competitor_variant_withholds_the_cro_rewrite_reference_keeps_it():
+    cro = {
+        **ANSWERS,
+        "improved_page_content": "## Hero\nRank higher with AI SEO.\n\n## Proof\n120 clients.",
+        "cro_locked_sections": "Hero H1; Pricing table",
+        "word_for_the_reader": "client",
+    }
+    competitor = V.answers_for("competitor", cro)
+    assert competitor["improved_page_content"] == V.CRO_CONTENT_NOT_USED
+    assert competitor["cro_locked_sections"] == V.NOT_USED
+    assert V.cro_rewrite_withheld(competitor["improved_page_content"])
+    # Terminology stays — client language, not the audit rewrite.
+    assert competitor["word_for_the_reader"] == "client"
+    reference = V.answers_for("reference", cro)
+    assert reference["improved_page_content"].startswith("## Hero")
+    assert reference["cro_locked_sections"] == "Hero H1; Pricing table"
+    assert not V.cro_rewrite_withheld(reference["improved_page_content"])
+    assert cro["improved_page_content"].startswith("## Hero")  # caller untouched
+    library, tail = _prompt_parts("pillar_page", competitor, "phase1")
+    assert "Rank higher with AI SEO" not in tail
+    assert V.CRO_CONTENT_NOT_USED in tail
+    assert "BEAT THE CURRENT PAGE" in V._DIRECTIVES["reference"]
+    assert "Improved Page Content input is deliberately withheld" in V._DIRECTIVES["competitor"]
+    assert "Hero and H1 must be unique" in V._DIRECTIVES["competitor"]
+    assert "Improved Page Content's own headline" in V._DIRECTIVES["reference"]
+    assert "distinct hero" in V.CRO_CONTENT_NOT_USED.lower()
+
+
+def test_both_pillar_prompts_override_always_wins_for_the_competitor_variant():
+    roots = Path(__file__).resolve().parents[1] / "assets" / "Prompts"
+    for path in (
+        roots / "Master_Prompt_Universal_Page_Design_v1.md",
+        roots / "Phase2" / "Master_Prompt_Universal_Page_Design_v1_phase2.md",
+    ):
+        text = path.read_text(encoding="utf-8")
+        assert "PAGE_VARIANT override — Outperform competitors" in text
+        assert "N/A — not used by this page variant" in text
+        assert "do not reconstruct a CRO rewrite" in text
+        assert "Hero / H1 uniqueness" in text
+        assert "same promise line is not" in text.lower()
 
 
 @pytest.mark.asyncio
@@ -368,6 +427,32 @@ def test_the_comparison_route_measures_every_draft_alike():
     assert first["topics_covered"] == [1, 2]
     assert first["keywords_covered"] == ["local seo"] and first["keywords_checked"] == 2
     assert second["has_page"] is False and second["sections"] == ["One"]
+
+
+def test_the_comparison_counts_absolute_client_links_on_drafts():
+    draft = """```html
+<!doctype html><html><body>
+<nav><a href="https://client.com.au/">Home</a><a href="https://client.com.au/seo">SEO</a></nav>
+<a href="https://client.com.au/contact">Book a call</a>
+</body></html>
+```"""
+    client = TestClient(app)
+    body = client.post(
+        "/pipeline/pillar/variants/compare",
+        json={
+            "drafts": [{"variant": "reference", "text": draft}],
+            "answers": {"reference_design_source": "https://client.com.au/seo"},
+            "current": {
+                "label": "Current page",
+                "url": "https://client.com.au/seo",
+                "words": 100,
+                "internal_links": 64,
+                "sections": [],
+            },
+        },
+    ).json()
+    assert body["pages"][0]["internal_links"] == 3
+    assert body["current"]["internal_links"] == 64
 
 
 def test_the_comparison_reads_the_live_page_when_no_outline_was_sent(monkeypatch):

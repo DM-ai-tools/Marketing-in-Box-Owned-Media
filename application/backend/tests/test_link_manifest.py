@@ -172,3 +172,17 @@ def test_markdown_lists_every_href_verbatim_under_the_public_heading(landing: Li
     assert text.startswith(LINKS_HEADING)
     for href in landing.hrefs:
         assert f"`{href}`" in text
+
+
+def test_body_links_must_be_reused_where_the_copy_covers_them() -> None:
+    html = """<html><body>
+<header><nav><a href="/">Home</a></nav></header>
+<main><h1>SEO</h1><p>See our <a href="/services/local-seo/">local SEO</a> page for suburbs.</p>
+<section><h2>More</h2><p>Enough body copy for a second band on the walk.</p></section></main>
+<footer><a href="/privacy/">Privacy</a></footer>
+</body></html>"""
+    manifest = extract_link_manifest(html, "https://acme.example/seo/")
+    assert manifest.group("body")
+    text = "\n".join(links_markdown(manifest))
+    assert "Reuse every in-page link" in text
+    assert "are not required" not in text

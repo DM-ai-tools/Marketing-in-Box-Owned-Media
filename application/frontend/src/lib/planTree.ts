@@ -58,6 +58,9 @@ export type PlanNodeKind =
   | "book"
   | "podcast"
   | "strategy"
+  | "seo-map"
+  | "hub"
+  | "spoke"
   | "detail";
 
 export interface PlanNode {
@@ -121,6 +124,9 @@ const KIND_RULES: [PlanNodeKind, RegExp][] = [
   ["industry", /\bindustry(?:-specific)?\b/i],
   ["location", /\blocation(?:-based)?\b/i],
   ["blog", /\bblogs?\b|\bblog\s*post\b/i],
+  ["seo-map", /\bseo\s+architecture\s+map\b|\bsite\s+architecture\b|\bhub\s+and\s+spoke\b/i],
+  ["hub", /\bhub\s*\(pillar\)\b|\bpillar\s+hub\b|^\s*hub\b/i],
+  ["spoke", /^\s*spoke\b|\bspoke\s+page\b/i],
   ["keyword", /\b(?:keyword|search\s*volume|seo)\b/i],
   ["page", /\b(?:pillar\s*page|landing\s*page|page)\b/i],
   ["table", /\b(?:ranking|master\s*list|roll-?up)\b/i],

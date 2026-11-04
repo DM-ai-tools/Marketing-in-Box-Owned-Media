@@ -32,6 +32,8 @@ MAX_SOURCE_RUN_HOPS = 4
 #                           "Social Media Marketing"; Phase 2's is demand for "Meta Ads". They are
 #                           different keyword universes with different volumes and different
 #                           competition, and one is not an approximation of the other.
+#   `seo_architecture`    — the URL map + hub/spoke link plan derived from that run's keyword
+#                           clusters (`seo_architecture.py`). Tied to the same service scope.
 #   `selected_headlines`  — the topics the operator picked, which are what every later stage in
 #                           that leg is written about. Inheriting them would put Phase 2's Meta Ads
 #                           blog, lead magnets and SMS sequence under a headline chosen for the
@@ -41,5 +43,5 @@ MAX_SOURCE_RUN_HOPS = 4
 # So a Phase-2 run that has not built its own gets a 404 and builds one, rather than quietly
 # working from the parent's. Everything else still inherits.
 PHASE_SCOPED_CONTEXT_KEYS: frozenset[str] = frozenset(
-    {"keyword_clusters", "selected_headlines", "icp", "offers", "offer_ladder"}
+    {"keyword_clusters", "seo_architecture", "selected_headlines", "icp", "offers", "offer_ladder"}
 )

@@ -188,6 +188,8 @@ def test_ranked_by_verdict_with_what_to_take_and_how_to_prove(patched: dict[str,
     assert "## Competitor validation — ranked for this client" in md
     assert "| 1 | Alpha | Free audit | Above this client | 42 | 3 | Implement now |" in md
     assert "Beta — blocker:" in md
+    # Ranking keywords are chosen on the card, not dumped into the listing for the model to reuse.
+    assert "ranks for:" not in md
 
 
 def test_no_country_measures_nothing_and_says_so(patched: dict[str, Any]) -> None:
@@ -241,3 +243,24 @@ def test_every_scanned_keyword_reaches_the_hover(patched: dict[str, Any]) -> Non
     assert set(alpha.scanned_keywords[0]) == {"keyword", "position", "volume", "url"}
     assert report.scanned_limit == cv._RANKED_LIMIT
     assert isinstance(report.client_keywords, list)
+
+
+def test_position_winner_lower_google_rank_wins() -> None:
+    assert cv._position_winner(3, 8) == "client"
+    assert cv._position_winner(12, 4) == "competitor"
+    assert cv._position_winner(5, 5) == "tie"
+    assert cv._position_winner(None, 2) == "competitor"
+    assert cv._position_winner(7, None) == "client"
+    assert cv._position_winner(None, None) == "unknown"
+
+
+def test_keyword_comparisons_pair_client_and_competitor_positions(patched: dict[str, Any]) -> None:
+    report = _run()
+    alpha = next(s for s in report.competitors if s.name == "Alpha")
+    assert isinstance(alpha.keyword_comparisons, list)
+    if alpha.keyword_comparisons:
+        row = alpha.keyword_comparisons[0]
+        assert set(row) >= {"keyword", "competitor_position", "client_position", "volume", "winner"}
+        assert row["winner"] in {"client", "competitor", "tie", "unknown"}
+        overlap = next(m for m in alpha.metrics if m.key == "overlap")
+        assert "client ranks better on" in overlap.detail or "competitor on" in overlap.detail

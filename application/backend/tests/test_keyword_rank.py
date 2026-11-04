@@ -231,6 +231,18 @@ def test_a_report_stored_before_ranking_is_ranked_on_read() -> None:
     assert all(g.primary.keyword != "unmeasured term" for g in targets.groups)
 
 
+def test_unticked_competitor_keywords_are_stripped_from_targets() -> None:
+    targets = keyword_rank.targets_from_entry(STORED)
+    # A secondary the operator left unticked on the competitor table must not stay a target.
+    filtered = keyword_rank.without_keywords(targets, {"SEO Melbourne"})
+    assert [g.primary.keyword for g in filtered.groups][:1] == ["seo"]
+    assert [k.keyword for k in filtered.groups[0].secondary] == []
+    # Blocking a primary drops its group; other groups stay.
+    without_seo = keyword_rank.without_keywords(targets, {"seo"})
+    assert all(g.primary.keyword != "seo" for g in without_seo.groups)
+    assert keyword_rank.without_keywords(targets, set()).groups == targets.groups
+
+
 def test_the_stub_provider_never_reaches_a_prompt() -> None:
     assert keyword_rank.targets_from_entry({**STORED, "provider": "stub"}).groups == []
     assert keyword_rank.targets_block(keyword_rank.targets_from_entry({**STORED, "provider": "stub"})) == ""
@@ -382,7 +394,9 @@ def test_the_run_build_seeds_alternate_names_with_the_real_provider(monkeypatch:
 @pytest.mark.parametrize(
     ("keyword", "kept"),
     [
-        ("ai seo tools", True),
+        ("ai seo tools", False),  # product/tool shopping — not an agency SEO offer
+        ("best seo tool", False),
+        ("seo software comparison", False),
         ("seo company melbourne", True),
         ("ai powered seo services", True),
         ("search optimisation tips", True),

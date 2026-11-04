@@ -41,6 +41,7 @@ import { SecondaryKeywordCard } from "./SecondaryKeywordCard";
 import { BlogKeywordCard } from "./BlogKeywordCard";
 import { WebinarSourcesCard } from "./WebinarSourcesCard";
 import { BuyerLanguageCard } from "./BuyerLanguageCard";
+import { KeywordClusterPicker } from "./KeywordClusterPicker";
 import { FunnelBuildCard } from "./FunnelBuildCard";
 import { PageVariantsCard } from "./PageVariantsCard";
 import { VariantCompareCard } from "./VariantCompareCard";
@@ -1451,7 +1452,15 @@ function MessageRow({ message, flashed }: { message: PipelineMessage; flashed?: 
       );
       break;
     default:
-      content = <TextBubble message={message} />;
+      content = message.keywordReport?.clusters.length ? (
+        // The prepass's announcement: the clusters it mapped, with the choice of which later stages use.
+        <div className="flex min-w-0 max-w-full flex-col items-start gap-2">
+          <TextBubble message={message} />
+          <KeywordClusterPicker message={message} />
+        </div>
+      ) : (
+        <TextBubble message={message} />
+      );
   }
 
   return (

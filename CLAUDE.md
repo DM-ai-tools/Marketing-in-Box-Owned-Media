@@ -797,12 +797,12 @@ run. It stays one stage (`pillar_page`): only that draft is filed to the Context
 downstream changes. Every other finished draft is kept in Deliverables as an alternate
 (`variantAlternate`), so the operator still has every take they paid to generate.
 
-| Variant | Lens | Measured first (free reads only) |
-| --- | --- | --- |
-| `reference` — Beat your current page | outperform the client's hosted page | that page's outline, plus CRO's `cro_audit_findings` |
-| `competitor` — Outperform competitors | beat every competitor page | each competitor page's outline, as a beat sheet |
-| `skills` — Built with your skill | follow the operator's skill document | nothing: the document is the input |
-| `framework` — Built with your framework | structure by the operator's framework | nothing |
+| Variant | Lens | Content source | Measured first (free reads only) |
+| --- | --- | --- | --- |
+| `reference` — Beat your current page | outperform the client's hosted page | CRO rewrite + audit | that page's outline, plus CRO's `cro_audit_findings` |
+| `competitor` — Outperform competitors | beat every competitor page | beat sheet + client facts (no CRO rewrite) | each competitor page's outline, as a beat sheet |
+| `skills` — Built with your skill | follow the operator's skill document | skill document | nothing: the document is the input |
+| `framework` — Built with your framework | structure by the operator's framework | framework document | nothing |
 
 - **The flow.** `runStage` pushes a `page-variants` picker (`PageVariantsCard`) instead of a draft.
   - The picker offers each variant with what it needs, and says why one is off (`lib/pageVariants.ts`'s `variantOptions`).
@@ -824,7 +824,10 @@ downstream changes. Every other finished draft is kept in Deliverables as an alt
   stream when its field is empty. So the first variant (competitor, when ticked) runs alone until its
   `prepass` event arrives, and the rest start with the listing filled in.
 - **Server.** `GenerateStageRequest.variant`:
-  - `page_variants.answers_for` blanks the other document variant's fields, so a draft reads only its own document;
+  - `page_variants.answers_for` blanks the other document variant's fields, so a draft reads only its
+    own document; for `competitor` it also blanks `improved_page_content` / `cro_locked_sections`
+    (`CRO_CONTENT_NOT_USED`) so Outperform cannot rebuild the CRO rewrite. Both Page Design masters
+    carry a PAGE_VARIANT override when that sentinel is present;
   - `_measure_page_variant` reads what the variant needs;
   - `variant_block` (`PAGE_VARIANT`) joins the tail beside the business brief, and the stream emits `page_variant`;
   - a variant with nothing to work from fails before any model call with `code: "variant_unavailable"`;
@@ -981,6 +984,52 @@ fields; relevance, brand and intent stay in `keywords.py`.
   written into `message.text`. `smoke/keywordUsage.tsx` pins it.
 - **Tests never hit the live API.** Pass an `httpx.MockTransport` to `DataForSEOClient`, or patch
   `dataforseo_client.DataForSEOClient` / `is_configured`.
+
+### SEO architecture — URL map + hub/spoke links (SearchFit rules, measured data)
+
+`app/services/seo_architecture.py` turns the run's `keyword_clusters` into a site map: one cluster →
+one page, a hub (pillar), spokes, and internal-link edges with keyword anchors. Volumes and cluster
+intent/URLs come from the keyword report; missing intent is guessed from modifiers (`how to`, `vs`,
+`best`, `near me`). Stub-provider placeholders never become a map.
+
+- **Stored** as phase-scoped `seo_architecture` when keywords are built (and backfilled on reuse /
+  first consumer stage if an older run has clusters but no map).
+- **Prompt block** `SEO_ARCHITECTURE` rides next to `KEYWORD_TARGETS` for: `pillar_page`, `funnel`,
+  `funnel_hub_media`, `lead_magnet`, `offers`, `blog`, `content_marketing_strategy`, `plan_of_action`.
+- **Plan of Action** gets the markdown in `plan_phase1_assets` and must restate `## SEO Architecture
+  Map` so `planTree` draws hub/spoke nodes. Deliverable appendix: Keyword data → SEO architecture map.
+- **Never invent hosts or volumes.** Existing service-scan URLs win over proposed slugs.
+- `tests/test_seo_architecture.py` pins it.
+
+### Choosing clusters — the operator keeps the topics later stages use
+
+The cluster model is not always right about what the client sells, so the announcement of the keyword
+report ("Mapped search demand for …") carries a checklist of its clusters (`KeywordClusterPicker`,
+rendered under that message in `GenerationStream`). Stages that run after a save use only the ticked ones.
+
+- **Stored on the entry.** `PUT /pipeline/runs/{id}/keywords/clusters` writes a new version of
+  `keyword_clusters` with `selected_clusters` (a list of names). Absent means every cluster, which is
+  also what a report stored before this existed means, and ticking everything clears the key.
+  At least one must stay kept (422), and a name that is not a cluster of the report is refused.
+- **Readers call `keyword_selection.apply(value)`, never read the key.** It returns the value as the
+  readers expect it, narrowed: the report's clusters, `clean_keywords` and `ranked_keywords` are cut to
+  the keywords that belong to a kept cluster, and `keyword_groups` is dropped so it is regrouped from
+  what is left. Keywords in no cluster are out once a selection exists. It covers `_keyword_targets`
+  (`KEYWORD_TARGETS`), the SEO map (`_seo_architecture` and the rebuild below), the headline gate,
+  the plan's keyword list, `business_facts` (so the business check and competitor validation) and the
+  buyer-language pool. A new reader of `keyword_clusters` must call it.
+- **The SEO map follows.** Saving rebuilds `seo_architecture` from the kept clusters as a new version,
+  because it is derived from them and stored. The request carries the client's site so the map keeps
+  its real host.
+- **Free, and forward-only.** Nothing is fetched. A stage already built keeps what it was written with;
+  the card says so. A forced rebuild of the report (`force`) is a new report and starts with all
+  clusters kept.
+- **The UI reads one response.** Clusters are all listed, each with `selected`; `ranked`, `groups` and
+  `total_keywords` are the kept ones. Every announcement of the run's report is patched with it
+  (`selectKeywordClusters`, keeping each one's `built`/`reused` status). The deliverable's "Keyword data"
+  section tables and counts only the kept clusters and says how many were kept of how many found.
+- **Not offered for the stub provider**, whose clusters are placeholders.
+- `tests/test_keyword_selection.py` and `smoke/keywordClusters.tsx` pin it.
 
 ### Alternate names, ranking, primary and secondary keywords
 
@@ -1251,14 +1300,25 @@ approval (`app/services/competitor_validation.py`, `POST /pipeline/competitor/{i
 - **Feasibility (can the client run it).** Rules from `cro_client_settings` (testimonials, claim
   tier, pricing disclosure) and judged blockers. Any rule blocker makes the verdict **Avoid**.
 - **Verdicts:** Implement now / Test first / Differentiate / Avoid / Not a fit.
-  - Avoid is not shown as a tag on the card or in the count strip, at the operator's request
-    (`HIDDEN_VERDICTS`). The row's blocker line says why, and the verdict still ranks the row.
+  - Avoid and Not a fit are not shown as tags on the card or in the count strip
+ (`HIDDEN_VERDICTS`). The row's reason line says why, and the verdict still ranks the row.
   - The fit score weights proof 40, fit 40 and feasibility 20.
   - "Implement now" items carry `how_to_prove`, the KPI and test.
   - Hovering any "ranking keywords" (a competitor's count, its evidence row, the client's baseline)
     lists every keyword scanned (`scanned_keywords` / `client_keywords`, `ScannedKeywords.tsx`):
     the top `_RANKED_LIMIT` by traffic, with position and searches. No extra request: it is the
-    data the score already read.
+    data the score already read. "Ranks for the client's keywords" also hovers a side-by-side
+    client vs competitor position table (`keyword_comparisons`, `KeywordCompare.tsx`) and tags
+    who wins more shared terms. There is no per-competitor keyword chooser.
+  - After the plays table, **Keywords for this stage** lists every fetched ranking keyword once
+    (`uniqueFetchedKeywords`: case-insensitive, best position and highest volume kept). Each row
+    has a box. Nothing starts ticked. The ticked terms (`keywordPicks`) append to `validation_md`
+    as "Competitor keywords selected by the operator — target these"; unticked everything appends
+    an explicit "none selected" ban. On save, offered + picked lists are stored on the competitor
+    context entry; `_keyword_targets` strips every offered-but-unticked term from `KEYWORD_TARGETS`
+    so an unticked rival keyword cannot appear in the draft or in Keywords at a glance — even when
+    the demand map also ranked it. The validation markdown no longer dumps each competitor's
+    "ranks for" list.
   - A "Plays across the market" table (Play, Used by, Their traffic/mo) and market gaps go with
     them. Its "Avg fit" and "For this client" columns were removed at the operator's request; each
     competitor's own verdict and fit score still show on its row.

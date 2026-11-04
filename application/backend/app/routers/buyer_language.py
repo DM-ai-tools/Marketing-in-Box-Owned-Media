@@ -17,7 +17,7 @@ from pydantic import BaseModel, Field
 
 from app.db.base import get_sessionmaker
 from app.routers.pipeline import KEYWORD_CONTEXT_KEY, _latest_context_entry
-from app.services import buyer_language, usage as usage_service
+from app.services import buyer_language, keyword_selection, usage as usage_service
 
 router = APIRouter()
 
@@ -44,7 +44,7 @@ async def _run_keywords(run_id: str | None) -> list[dict]:
     async with get_sessionmaker()() as session:
         found = await _latest_context_entry(session, run_uuid, KEYWORD_CONTEXT_KEY)
         if found is not None and isinstance(found[0].value, dict) and found[0].value.get("provider") == "dataforseo":
-            value = found[0].value
+            value = keyword_selection.apply(found[0].value)
             rows = [r for r in value.get("ranked_keywords") or value.get("clean_keywords") or [] if isinstance(r, dict)]
     return rows
 

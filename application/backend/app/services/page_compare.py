@@ -158,7 +158,13 @@ def _outline_markdown(label: str, text: str, url: str | None) -> PageOutline:
             out.sections.append(heading)
     out.sections = out.sections[:40]
     out.ctas = sum(1 for anchor, _ in _MD_LINK.findall(text) if _CTA_WORDS.search(anchor))
-    out.internal_links = sum(1 for _, href in _MD_LINK.findall(text) if href.startswith("/"))
+    host = (urlparse(url).hostname or "").removeprefix("www.") if url else ""
+    out.internal_links = sum(
+        1
+        for _, href in _MD_LINK.findall(text)
+        if (href.startswith("/") and not href.startswith("//"))
+        or (host and (urlparse(href).hostname or "").removeprefix("www.") == host)
+    )
     out.faq = bool(_FAQ.search(" ".join(out.sections)))
     out.proof_mentions = len(_PROOF.findall(plain))
     out._text = plain  # type: ignore[attr-defined]

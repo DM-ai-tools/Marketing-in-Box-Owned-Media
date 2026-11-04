@@ -1,4 +1,11 @@
-import type { HeadlineCandidate, KeywordGroup, KeywordReportResult, KeywordTargets, RankedKeyword } from "../pipeline/pipelineApi";
+import type {
+  HeadlineCandidate,
+  KeywordGroup,
+  KeywordReportResult,
+  KeywordTargets,
+  RankedKeyword,
+  SeoArchitecture,
+} from "../pipeline/pipelineApi";
 import type { PipelineMessage, PlanDiscoveryState } from "../pipeline/pipelineStore";
 import { topicGatesFor } from "./topicSuggestions";
 
@@ -45,6 +52,8 @@ export interface KeywordUsage {
   checkBenchmarked: boolean;
   /** The primary and secondary keywords this asset's generation was told to write with. */
   targets: KeywordTargets | null;
+  /** Hub/spoke URL map handed to page-writing stages with the keyword targets. */
+  architecture: SeoArchitecture | null;
   /** The asset's own text, which the targeted keywords are counted in. */
   text: string;
 }
@@ -91,9 +100,10 @@ export function keywordUsageFor(messages: PipelineMessage[], generation: Pipelin
   const checkBenchmarked = Boolean(demand) && generation.check?.report?.virality_basis === "benchmarked";
 
   const targets = generation.keywordTargets?.groups?.length ? generation.keywordTargets : null;
+  const architecture = generation.seoArchitecture?.pages?.length ? generation.seoArchitecture : null;
 
-  if (!demand && !topics.length && !measuredPlan && !targets) return null;
-  return { demand, topics, plan: measuredPlan, checkBenchmarked, targets, text: generation.text ?? "" };
+  if (!demand && !topics.length && !measuredPlan && !targets && !architecture) return null;
+  return { demand, topics, plan: measuredPlan, checkBenchmarked, targets, architecture, text: generation.text ?? "" };
 }
 
 /** The asset's words as a reader sees them: tags and entities out, so a keyword in a built page is
@@ -183,7 +193,9 @@ function glanceLines(groups: KeywordGroup[], topics: KeywordTopic[]): string[] {
 /** The whole section, or "" when DataForSEO contributed nothing to this asset. */
 export function renderKeywordUsage(usage: KeywordUsage | null): string {
   if (!usage) return "";
-  const { demand, topics, plan, checkBenchmarked, targets, text } = usage;
+  const { demand, topics, plan, checkBenchmarked, targets, architecture, text } = usage;
+  // Only the clusters the operator kept: those are what the stages were written against.
+  const keptClusters = demand?.clusters.filter((c) => c.selected !== false) ?? [];
   const country = demand?.location || plan?.location || targets?.location || "";
   const synonyms = Object.entries(demand?.synonyms ?? targets?.synonyms ?? {}).filter(([, names]) => names.length);
   const targeted = targets ? targetRows(targets) : [];
@@ -211,12 +223,14 @@ export function renderKeywordUsage(usage: KeywordUsage | null): string {
     );
   }
   if (demand) {
-    const clusters = demand.clusters.length;
+    const clusters = keptClusters.length;
+    const dropped = demand.clusters.length - clusters;
     how.push(
       `- **Search demand map.** For ${demand.service ?? "this run's service"}, the seed terms were measured with ` +
         "DataForSEO `keyword_overview` and expanded with `keyword_suggestions`, `related_keywords` and `keyword_ideas`. " +
         `After cleaning, ${num(demand.total_keywords)} keywords were grouped into ${clusters} topic ` +
         `${clusters === 1 ? "cluster" : "clusters"}` +
+        (dropped > 0 ? `, the ${clusters} the operator kept of ${demand.clusters.length} found` : "") +
         (demand.status === "reused" ? " (measured earlier in this run and reused)." : "."),
     );
   }
@@ -238,6 +252,14 @@ export function renderKeywordUsage(usage: KeywordUsage | null): string {
   if (checkBenchmarked) {
     how.push("- **Business check.** The virality score below was benchmarked against these keyword volumes.");
   }
+  if (architecture) {
+    const hub = architecture.pages.find((p) => p.role === "hub");
+    how.push(
+      `- **SEO architecture.** ${architecture.pages.length} pages were mapped from the keyword clusters` +
+        (hub ? ` (hub: ${hub.cluster})` : "") +
+        ` with ${architecture.links.length} hub-and-spoke internal links planned.`,
+    );
+  }
 
   const parts = [
     "",
@@ -254,15 +276,15 @@ export function renderKeywordUsage(usage: KeywordUsage | null): string {
     how.join("\n"),
   ];
 
-  if (demand?.clusters.length) {
-    const rows = [...demand.clusters]
+  if (demand && keptClusters.length) {
+    const rows = [...keptClusters]
       .sort((a, b) => b.total_volume - a.total_volume)
       .slice(0, MAX_CLUSTERS)
       .map(
         (c) =>
           `| ${cell(c.name)} | ${cell(c.primary_keyword)} | ${num(c.keyword_count)} | ${num(c.total_volume)} | ${cell(c.intent)} | ${cell(c.funnel)} |`,
       );
-    const more = demand.clusters.length > MAX_CLUSTERS ? `\n\nTop ${MAX_CLUSTERS} of ${demand.clusters.length} clusters by volume.` : "";
+    const more = keptClusters.length > MAX_CLUSTERS ? `\n\nTop ${MAX_CLUSTERS} of ${keptClusters.length} clusters by volume.` : "";
     parts.push(
       "",
       `### Search demand map — ${cell(demand.service)}`,
@@ -358,6 +380,37 @@ export function renderKeywordUsage(usage: KeywordUsage | null): string {
             const keywords = c.keywords.map((k) => `${k.keyword} (${num(k.volume)})`).join(", ");
             return `| ${cell(c.name)} | ${status} | ${cell(keywords)} | ${num(c.combined_volume)} |`;
           })
+          .join("\n"),
+      );
+    }
+  }
+
+  if (architecture) {
+    parts.push(
+      "",
+      "### SEO architecture map",
+      "",
+      "One keyword cluster → one page. URLs are existing pages on the client's site or proposed slugs.",
+      "",
+      "| Role | Cluster | Primary keyword | Intent | Status | URL | Volume/mo |",
+      "| --- | --- | --- | --- | --- | --- | --- |",
+      architecture.pages
+        .map(
+          (p) =>
+            `| ${cell(p.role)} | ${cell(p.cluster)} | ${cell(p.primary_keyword)} | ${cell(p.intent)} | ${cell(p.status)} | ${cell(p.url)} | ${num(p.volume)} |`,
+        )
+        .join("\n"),
+    );
+    if (architecture.links.length) {
+      parts.push(
+        "",
+        "### Internal links planned",
+        "",
+        "| From | To | Anchor | Why |",
+        "| --- | --- | --- | --- |",
+        architecture.links
+          .slice(0, 20)
+          .map((e) => `| ${cell(e.from_label)} | ${cell(e.to_label)} | ${cell(e.anchor)} | ${cell(e.reason)} |`)
           .join("\n"),
       );
     }

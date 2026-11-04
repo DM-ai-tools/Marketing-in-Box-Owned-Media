@@ -195,19 +195,26 @@ def render_keywords(rows: list[dict[str, object]]) -> str:
     return "## Keyword Clusters (measured search volume)\n\n" + "\n".join(lines)
 
 
-def render_phase1_assets(docs: dict[str, str], keywords: list[dict[str, object]] | None = None) -> str:
+def render_phase1_assets(
+    docs: dict[str, str],
+    keywords: list[dict[str, object]] | None = None,
+    seo_architecture_md: str | None = None,
+) -> str:
     """The headline service's approved deliverables, as the Plan's "Existing Phase 1 Assets":
     measured facts, then an excerpt, per deliverable. "" when nothing was built."""
     found = [(asset_id, docs[asset_id]) for asset_id in PHASE1_ASSET_IDS if (docs.get(asset_id) or "").strip()]
-    if not found:
+    seo_md = (seo_architecture_md or "").strip()
+    if not found and not seo_md:
         return ""
     built = {a for a, _ in found}
     missing = [LABELS[a] for a in PHASE1_ASSET_IDS if a not in built]
     intro = (
         "Built and approved in Phase 1 for the headline service (treat as done, do not re-plan): "
         f"{', '.join(LABELS[a] for a, _ in found)}."
+        if found
+        else "Phase 1 deliverables not yet approved; the SEO architecture map below is still measured."
     )
-    if missing:
+    if missing and found:
         intro += f" Not built in Phase 1: {', '.join(missing)}."
     sections = []
     for asset_id, text in found:
@@ -216,4 +223,6 @@ def render_phase1_assets(docs: dict[str, str], keywords: list[dict[str, object]]
     keyword_block = render_keywords(keywords or [])
     if keyword_block:
         sections.append(keyword_block)
+    if seo_md:
+        sections.append(seo_md)
     return intro + "\n\n" + "\n\n---\n\n".join(sections)

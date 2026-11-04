@@ -156,9 +156,15 @@ def test_both_pillar_prompts_carry_the_design_language_rules(path: pathlib.Path)
     text = path.read_text(encoding="utf-8")
     assert "design-language fidelity" in text
     assert "Real links only" in text
+    assert "internal linking as per the reference" in text
     assert "Deploy-ready" in text
     assert "Links section" in text
     assert "Responsive section" in text
     # The old fixed breakpoints contradicted the measured ones.
     assert "Breakpoints: 768px (tablet), 480px (mobile)" not in text
     assert "responsive breakpoints at 768px and 480px" not in text
+
+
+def test_links_directive_requires_reference_parity_internal_linking() -> None:
+    assert "match the reference's internal linking" in generation._LINKS_DIRECTIVE
+    assert "Services Covered" in generation._LINKS_DIRECTIVE

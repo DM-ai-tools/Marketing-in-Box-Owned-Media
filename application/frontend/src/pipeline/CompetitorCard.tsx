@@ -469,26 +469,53 @@ export function CompetitorCard({ message }: { message: PipelineMessage }) {
         </>
       )}
 
-      {result.notes && (saved || activeMode !== "own") && (
+      {(result.notes || shortfall > 0) && (saved || activeMode !== "own") && (
         <div className="mt-3 rounded-xl border border-[var(--border)] bg-[var(--bg-sunken)] px-3 py-2.5">
           <div className="mb-1 text-[0.68rem] font-semibold uppercase tracking-wide text-[var(--fg-faint)]">
-            Notes{!saved && shortfall > 0 ? ` — ${shortfall} short of ${result.requested_count}` : ""}
+            Notes{shortfall > 0 ? ` — ${shortfall} short of ${result.requested_count}` : ""}
           </div>
-          <p className="text-[0.78rem] leading-relaxed text-[var(--fg-muted)]">{result.notes}</p>
+          {result.notes ? (
+            <p className="text-[0.78rem] leading-relaxed text-[var(--fg-muted)]">{result.notes}</p>
+          ) : null}
+          {shortfall > 0 ? (
+            <p className="mt-1 text-[0.74rem] text-[var(--fg-muted)]">
+              Only {result.returned_count} of {result.requested_count} competitors came back. Use{" "}
+              <span className="font-medium text-[var(--fg)]">Re-run Analysis</span> to search again, or continue with
+              this list.
+            </p>
+          ) : null}
         </div>
       )}
 
       <div className="mt-3 border-t border-[var(--border)] pt-3">
         {saved ? (
-          <span
-            className="flex w-fit items-center gap-1.5 rounded-full px-3 py-1 text-[0.78rem] font-semibold text-white"
-            style={{ backgroundColor: "var(--color-signal-green)" }}
-          >
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none">
-              <path d="M5 12l5 5L20 7" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" />
-            </svg>
-            {message.competitorFillsFieldId ? "Saved — continuing this stage" : `Saved — continuing to ${mainLabel}`}
-          </span>
+          <div className="flex flex-wrap items-center gap-2">
+            <span
+              className="flex w-fit items-center gap-1.5 rounded-full px-3 py-1 text-[0.78rem] font-semibold text-white"
+              style={{ backgroundColor: "var(--color-signal-green)" }}
+            >
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none">
+                <path d="M5 12l5 5L20 7" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+              {message.competitorFillsFieldId ? "Saved — continuing this stage" : `Saved — continuing to ${mainLabel}`}
+            </span>
+            {/* Still offered after save: a thin listing (1 of 10) is often worth searching again,
+                and mid-intake Pillar Page research used to leave no way back once approved. */}
+            <motion.button
+              type="button"
+              onClick={() => void retryCompetitorStep(message.id)}
+              whileTap={{ scale: 0.97 }}
+              className="min-h-10 cursor-pointer rounded-full border-2 px-3.5 py-1.5 text-[0.8rem] font-semibold sm:min-h-0"
+              style={{ borderColor: "var(--color-signal-orange)", color: "var(--color-signal-orange)" }}
+              title={
+                shortfall > 0
+                  ? `Search again — only ${result.returned_count} of ${result.requested_count} were found`
+                  : "Search again for a fresh competitor listing"
+              }
+            >
+              Re-run Analysis
+            </motion.button>
+          </div>
         ) : (
           <>
             {saveError}
@@ -501,6 +528,11 @@ export function CompetitorCard({ message }: { message: PipelineMessage }) {
                 whileTap={{ scale: 0.97 }}
                 className="min-h-10 cursor-pointer rounded-full border-2 px-3.5 py-1.5 text-[0.8rem] font-semibold disabled:cursor-not-allowed disabled:opacity-60 sm:min-h-0"
                 style={{ borderColor: "var(--color-signal-orange)", color: "var(--color-signal-orange)" }}
+                title={
+                  shortfall > 0
+                    ? `Search again — only ${result.returned_count} of ${result.requested_count} were found`
+                    : "Search again for a fresh competitor listing"
+                }
               >
                 Re-run Analysis
               </motion.button>

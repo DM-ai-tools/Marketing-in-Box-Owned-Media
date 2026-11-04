@@ -38,6 +38,7 @@ from app.services import page_check
 from app.services.claude_client import get_client
 from app.services.funnel_plan import FunnelEmail, FunnelFile, FunnelPlan
 from app.services.generation import (
+    CONTENT_OPTIMIZATION,
     DEFAULT_EFFORT,
     EFFORT_CAPABLE_MODELS,
     PAGE_BUILD_STANDARDS,
@@ -192,6 +193,7 @@ def build_page_request(inputs: BuildInputs, current: FunnelFile) -> list[dict]:
             parts.append(_generated_images_block(design.generated_images) + "\n")
     standards = (_PROMPTS_DIR / PAGE_BUILD_STANDARDS).read_text(encoding="utf-8").strip()
     parts.append(_block(f"assets/Prompts/{PAGE_BUILD_STANDARDS}", standards))
+    parts.append(CONTENT_OPTIMIZATION)
     parts.append("Build THIS FILE now, following every rule above. Return the page and the build notes only.")
     text = "".join(parts)
     shots = design.screenshot_urls if design is not None else ()
@@ -209,6 +211,7 @@ def build_email_request(inputs: BuildInputs, email: FunnelEmail) -> str:
         + _block("THIS EMAIL", f"## {email.title}\n\n{email.copy}")
         + _block("FUNNEL LINKS", links)
         + _block("BRAND THEME", theme or "No brand theme on this run: use neutral greys and say so in the notes.")
+        + CONTENT_OPTIMIZATION
         + "Build THIS EMAIL now. Return the email and the notes only."
     )
 

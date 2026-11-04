@@ -123,6 +123,8 @@ from app.services import (
     stream_locks,
     usage as usage_service,
     keyword_rank,
+    keyword_selection,
+    seo_architecture as seo_architecture_service,
     service_synonyms,
     vector_context,
     webinar_sources as webinar_sources_service,
@@ -425,6 +427,14 @@ class SaveCompetitorRequest(BaseModel):
     #: The validation's ranking (`competitor_validation.render_md`), appended to the context prose
     #: so the paired stage builds on what was judged to work for this client. Empty when not run.
     validation_md: str = ""
+    #: Ranking keywords the operator ticked on "Keywords for this stage". Empty means none of the
+    #: fetched competitor keywords may be used as targets — including any that also appear in the
+    #: run's demand map.
+    keyword_picks: list[str] = []
+    #: Every unique ranking keyword offered on that table (before ticks). Empty when validation did
+    #: not run or returned no keywords. Stored so generation can strip unticked ones from
+    #: `KEYWORD_TARGETS`.
+    competitor_keywords: list[str] = []
 
 
 class SaveCompetitorResponse(BaseModel):
@@ -664,12 +674,30 @@ async def save_competitor_stage(
             prose = f"{prose}\n\n{payload.validation_md.strip()}"
 
         version = await _next_version(session, run_uuid, asset_id)
+        offered = [k.strip() for k in payload.competitor_keywords if isinstance(k, str) and k.strip()]
+        picked = [k.strip() for k in payload.keyword_picks if isinstance(k, str) and k.strip()]
+        # Dedupe case-insensitively while keeping the first spelling.
+        def _unique(words: list[str]) -> list[str]:
+            seen: set[str] = set()
+            out: list[str] = []
+            for w in words:
+                key = w.lower()
+                if key in seen:
+                    continue
+                seen.add(key)
+                out.append(w)
+            return out
+
+        value: dict[str, object] = {"content": prose, "competitor_analysis_id": str(analysis.id)}
+        if offered:
+            value["competitor_keywords"] = _unique(offered)
+            value["keyword_picks"] = _unique(picked)
         session.add(
             ContextEntry(
                 run_id=run_uuid,
                 context_key=asset_id,
                 version=version,
-                value={"content": prose, "competitor_analysis_id": str(analysis.id)},
+                value=value,
                 written_by_asset_id=asset_id,
             )
         )
@@ -886,9 +914,20 @@ async def _compose_plan_context(session: AsyncSession, run_uuid: uuid.UUID, cont
         )
     ).scalar_one_or_none()
     if keyword_entry is not None and isinstance(keyword_entry.value, dict):
-        rows = keyword_entry.value.get("clean_keywords")
+        rows = keyword_selection.apply(keyword_entry.value).get("clean_keywords")
         keywords = rows if isinstance(rows, list) else []
-    return plan_context.render_phase1_assets(docs, keywords)
+    seo_md = ""
+    seo_entry = (
+        await session.execute(
+            select(ContextEntry)
+            .where(ContextEntry.run_id == root, ContextEntry.context_key == seo_architecture_service.CONTEXT_KEY)
+            .order_by(ContextEntry.version.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    if seo_entry is not None and isinstance(seo_entry.value, dict):
+        seo_md = str(seo_entry.value.get("content") or "")
+    return plan_context.render_phase1_assets(docs, keywords, seo_architecture_md=seo_md)
 
 
 class SubServiceRequest(BaseModel):
@@ -1519,6 +1558,8 @@ class KeywordClusterOut(BaseModel):
     primary_keyword: str | None = None
     keyword_count: int = 0
     total_volume: int = 0
+    #: False when the operator unticked it; later stages then ignore it (`keyword_selection`).
+    selected: bool = True
 
 
 class KeywordReportResponse(BaseModel):
@@ -1587,13 +1628,17 @@ def _seeds_of(report: dict) -> list[str]:
     ]
 
 
-def _cluster_summaries(report: dict) -> list[KeywordClusterOut]:
+def _cluster_summaries(report: dict, selected: set[str] | None = None) -> list[KeywordClusterOut]:
+    """Every cluster of the report, flagged with whether it is in the operator's selection (all of them
+    when there is none)."""
     out: list[KeywordClusterOut] = []
     for cluster in report.get("clusters") or []:
         entries = cluster.get("keywords") or []
+        name = str(cluster.get("name") or "(unnamed)")
         out.append(
             KeywordClusterOut(
-                name=str(cluster.get("name") or "(unnamed)"),
+                name=name,
+                selected=selected is None or name in selected,
                 intent=cluster.get("intent"),
                 funnel=cluster.get("funnel"),
                 content_type=cluster.get("content_type"),
@@ -1621,6 +1666,100 @@ async def _stored_keyword_entry(session: AsyncSession, run_uuid: uuid.UUID) -> C
         .limit(1)
     )
     return result.scalar_one_or_none()
+
+
+def _stored_report_response(
+    run_id: str, phase: str, stored: dict, version: int, status: Literal["built", "reused"] = "reused"
+) -> KeywordReportResponse:
+    """A stored keyword entry as the UI reads it. Clusters are all listed, each flagged with whether
+    the operator kept it; the ranking, groups and total are the kept ones, which is what later
+    stages and the deliverable's "Keyword data" section use."""
+    report = stored.get("keyword_report") or {}
+    chosen = keyword_selection.selected_names(stored)
+    view = keyword_selection.apply(stored)
+    kept = view.get("keyword_report") or {}
+    return KeywordReportResponse(
+        run_id=run_id,
+        status=status,
+        phase=phase,
+        service=stored.get("service"),
+        provider=stored.get("provider"),
+        version=version,
+        total_keywords=(
+            sum(len(c.get("keywords") or []) for c in kept.get("clusters") or [])
+            if chosen is not None
+            else int(report.get("total_keywords") or 0)
+        ),
+        clusters=_cluster_summaries(report, chosen),
+        warnings=list(stored.get("warnings") or []),
+        location=str(stored.get("location") or ""),
+        ranked=_ranked_from_stored(view),
+        groups=_groups_from_stored(view, kept),
+        synonyms=dict(stored.get("service_synonyms") or {}),
+        seeds=_seeds_of(report),
+    )
+
+
+class ClusterSelectionRequest(BaseModel):
+    #: Names of the clusters to keep. At least one.
+    selected: list[str]
+    #: The client's site, so the rebuilt SEO map keeps its real host as it did on the first build.
+    website: str = ""
+
+
+@router.put("/runs/{run_id}/keywords/clusters", response_model=KeywordReportResponse)
+async def select_run_keyword_clusters(run_id: str, payload: ClusterSelectionRequest) -> KeywordReportResponse:
+    """Record which clusters later stages use, and rebuild the SEO map from them.
+
+    A new version of the run's keyword entry, so earlier versions stay as history. Free: nothing is
+    fetched or generated. Stages already built keep what they were written with; the next stage run
+    reads the new selection."""
+    try:
+        run_uuid = uuid.UUID(run_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid run_id: {run_id!r}") from exc
+
+    async with get_sessionmaker()() as session:
+        entry = await _stored_keyword_entry(session, run_uuid)
+        if entry is None or not isinstance(entry.value, dict):
+            raise HTTPException(status_code=404, detail=f"No keyword report for run {run_id}")
+        stored = entry.value
+        known = keyword_selection.cluster_names(stored)
+        unknown = [n for n in payload.selected if n not in known]
+        if unknown:
+            raise HTTPException(status_code=422, detail=f"Not clusters of this report: {', '.join(unknown)}")
+        if not payload.selected:
+            raise HTTPException(
+                status_code=422, detail="Keep at least one cluster; later stages need a topic to write about."
+            )
+
+        value = keyword_selection.with_selection(stored, payload.selected)
+        version = await _next_version(session, run_uuid, KEYWORD_CONTEXT_KEY)
+        session.add(
+            ContextEntry(
+                run_id=run_uuid, context_key=KEYWORD_CONTEXT_KEY, version=version, value=value, written_by_asset_id=None
+            )
+        )
+        # The map is derived from the clusters, so it follows them.
+        architecture = seo_architecture_service.build_from_keyword_entry(
+            keyword_selection.apply(value), website=payload.website
+        )
+        if architecture is not None:
+            session.add(
+                ContextEntry(
+                    run_id=run_uuid,
+                    context_key=seo_architecture_service.CONTEXT_KEY,
+                    version=await _next_version(session, run_uuid, seo_architecture_service.CONTEXT_KEY),
+                    value=architecture.to_context_value(),
+                    written_by_asset_id=None,
+                )
+            )
+        await session.commit()
+
+    logger.info(
+        "Keyword clusters selected run_id=%s kept=%d of %d v%s", run_id, len(payload.selected), len(known), version
+    )
+    return _stored_report_response(run_id, DEFAULT_PHASE, value, version)
 
 
 @router.post("/runs/{run_id}/keywords/build", response_model=KeywordReportResponse)
@@ -1661,23 +1800,36 @@ async def build_run_keywords(run_id: str, payload: BuildKeywordsRequest) -> Keyw
             stored = existing.value if isinstance(existing.value, dict) else {}
             if stored.get("config_fingerprint") == config.fingerprint():
                 report = stored.get("keyword_report") or {}
+                # Backfill the SEO map for runs that clustered before this module existed.
+                seo_existing = (
+                    await session.execute(
+                        select(ContextEntry)
+                        .where(
+                            ContextEntry.run_id == run_uuid,
+                            ContextEntry.context_key == seo_architecture_service.CONTEXT_KEY,
+                        )
+                        .order_by(ContextEntry.version.desc())
+                        .limit(1)
+                    )
+                ).scalar_one_or_none()
+                if seo_existing is None:
+                    website = str(payload.profile.get("website_url") or payload.profile.get("website") or "")
+                    architecture = seo_architecture_service.build_from_keyword_entry(
+                        keyword_selection.apply(stored), website=website
+                    )
+                    if architecture is not None:
+                        session.add(
+                            ContextEntry(
+                                run_id=run_uuid,
+                                context_key=seo_architecture_service.CONTEXT_KEY,
+                                version=await _next_version(session, run_uuid, seo_architecture_service.CONTEXT_KEY),
+                                value=architecture.to_context_value(),
+                                written_by_asset_id=None,
+                            )
+                        )
+                        await session.commit()
                 logger.info("Reusing keyword report run_id=%s v%s", run_id, existing.version)
-                return KeywordReportResponse(
-                    run_id=run_id,
-                    status="reused",
-                    phase=payload.phase,
-                    service=stored.get("service"),
-                    provider=stored.get("provider"),
-                    version=existing.version,
-                    total_keywords=int(report.get("total_keywords") or 0),
-                    clusters=_cluster_summaries(report),
-                    warnings=list(stored.get("warnings") or []),
-                    location=str(stored.get("location") or ""),
-                    ranked=_ranked_from_stored(stored),
-                    groups=_groups_from_stored(stored, report),
-                    synonyms=dict(stored.get("service_synonyms") or {}),
-                    seeds=_seeds_of(report),
-                )
+                return _stored_report_response(run_id, payload.phase, stored, existing.version)
 
     async def on_usage(call_usage: usage_service.CallUsage) -> None:
         await usage_service.record(
@@ -1713,6 +1865,10 @@ async def build_run_keywords(run_id: str, payload: BuildKeywordsRequest) -> Keyw
         logger.exception("Keyword clustering failed run_id=%s fault=%s", run_id, fault.code)
         raise HTTPException(status_code=502, detail=fault.as_event()) from exc
 
+    keyword_value = result.to_context_value()
+    website = str(payload.profile.get("website_url") or payload.profile.get("website") or "")
+    architecture = seo_architecture_service.build_from_keyword_entry(keyword_value, website=website)
+
     async with session_factory() as session:
         version = await _next_version(session, run_uuid, KEYWORD_CONTEXT_KEY)
         session.add(
@@ -1720,22 +1876,34 @@ async def build_run_keywords(run_id: str, payload: BuildKeywordsRequest) -> Keyw
                 run_id=run_uuid,
                 context_key=KEYWORD_CONTEXT_KEY,
                 version=version,
-                value=result.to_context_value(),
+                value=keyword_value,
                 # No `asset_definitions` row backs this: it is a prepass, not an asset. The column
                 # is nullable precisely for context a stage did not write.
                 written_by_asset_id=None,
             )
         )
+        if architecture is not None:
+            seo_version = await _next_version(session, run_uuid, seo_architecture_service.CONTEXT_KEY)
+            session.add(
+                ContextEntry(
+                    run_id=run_uuid,
+                    context_key=seo_architecture_service.CONTEXT_KEY,
+                    version=seo_version,
+                    value=architecture.to_context_value(),
+                    written_by_asset_id=None,
+                )
+            )
         await session.commit()
 
     logger.info(
-        "Built keyword report run_id=%s phase=%s service=%r provider=%s clusters=%d v%s",
+        "Built keyword report run_id=%s phase=%s service=%r provider=%s clusters=%d v%s seo_pages=%s",
         run_id,
         payload.phase,
         result.service,
         result.provider,
         len(result.report.get("clusters") or []),
         version,
+        len(architecture.pages) if architecture else 0,
     )
     return KeywordReportResponse(
         run_id=run_id,
@@ -1771,23 +1939,7 @@ async def get_run_keywords(run_id: str) -> KeywordReportResponse:
             raise HTTPException(status_code=404, detail=f"No keyword report for run {run_id}")
 
     stored = entry.value if isinstance(entry.value, dict) else {}
-    report = stored.get("keyword_report") or {}
-    return KeywordReportResponse(
-        run_id=run_id,
-        status="reused",
-        phase=DEFAULT_PHASE,
-        service=stored.get("service"),
-        provider=stored.get("provider"),
-        version=entry.version,
-        total_keywords=int(report.get("total_keywords") or 0),
-        clusters=_cluster_summaries(report),
-        warnings=list(stored.get("warnings") or []),
-        location=str(stored.get("location") or ""),
-        ranked=_ranked_from_stored(stored),
-        groups=_groups_from_stored(stored, report),
-        synonyms=dict(stored.get("service_synonyms") or {}),
-        seeds=_seeds_of(report),
-    )
+    return _stored_report_response(run_id, DEFAULT_PHASE, stored, entry.version)
 
 
 # --------------------------------------------------------------------------------------
@@ -1992,10 +2144,11 @@ async def suggest_headlines_route(slot: str, payload: SuggestHeadlinesRequest) -
             # This run's own keyword report — never an inherited one (`_stored_keyword_entry`).
             entry = await _stored_keyword_entry(session, run_uuid)
             if entry is not None and isinstance(entry.value, dict):
-                context.keyword_report = entry.value.get("keyword_report") or {}
-                context.keyword_service = entry.value.get("service") or ""
-                context.clean_keywords = entry.value.get("clean_keywords") or []
-                context.vocabulary = entry.value.get("vocabulary") or []
+                kept = keyword_selection.apply(entry.value)
+                context.keyword_report = kept.get("keyword_report") or {}
+                context.keyword_service = kept.get("service") or ""
+                context.clean_keywords = kept.get("clean_keywords") or []
+                context.vocabulary = kept.get("vocabulary") or []
 
             context.icp_document = await _context_text(session, run_uuid, "icp")
             context.competitor_document = await _context_text(
@@ -3331,23 +3484,120 @@ class AssetCheckResponse(BaseModel):
     duration_ms: int = 0
 
 
+async def _competitor_keyword_blocklist(session: AsyncSession, run_uuid: uuid.UUID) -> set[str]:
+    """Competitor ranking keywords the operator was shown and did not tick.
+
+    Read from every `competitor_analysis_*` context entry on this run that stored the table. A term
+    offered on any listing and never picked on any listing that offered it is blocked — so an
+    unticked "semrush seo tool" cannot ride in through `KEYWORD_TARGETS` just because DataForSEO
+    also ranked it for the service. This run only; competitor listings are not inherited."""
+    result = await session.execute(
+        select(ContextEntry)
+        .where(
+            ContextEntry.run_id == run_uuid,
+            ContextEntry.context_key.startswith(_COMPETITOR_CONTEXT_PREFIX),
+        )
+        .order_by(ContextEntry.context_key, ContextEntry.version.desc())
+    )
+    offered: set[str] = set()
+    picked: set[str] = set()
+    seen_keys: set[str] = set()
+    for entry in result.scalars():
+        if entry.context_key in seen_keys:
+            continue
+        seen_keys.add(entry.context_key)
+        value = entry.value if isinstance(entry.value, dict) else {}
+        raw_offered = value.get("competitor_keywords")
+        if not isinstance(raw_offered, list) or not raw_offered:
+            continue
+        for word in raw_offered:
+            if isinstance(word, str) and word.strip():
+                offered.add(word.strip().lower())
+        raw_picks = value.get("keyword_picks")
+        if isinstance(raw_picks, list):
+            for word in raw_picks:
+                if isinstance(word, str) and word.strip():
+                    picked.add(word.strip().lower())
+    return offered - picked
+
+
 async def _keyword_targets(run_id: str | None, asset_id: str) -> keyword_rank.KeywordTargets | None:
     """This run's own keyword targets for a stage, or None (no run, no report, the stub provider, a
     stage in `NO_TARGETS`, or a read that failed). `keyword_clusters` is phase-scoped, so a Phase 2
-    run is never handed its parent's keywords."""
+    run is never handed its parent's keywords.
+
+    Competitor ranking keywords the operator left unticked on "Keywords for this stage" are stripped
+    so they cannot appear in the prompt or the deliverable's Keywords at a glance."""
     if not run_id or asset_id in keyword_rank.NO_TARGETS:
         return None
     try:
         run_uuid = uuid.UUID(run_id)
         async with get_sessionmaker()() as session:
             found = await _latest_context_entry(session, run_uuid, KEYWORD_CONTEXT_KEY)
+            blocked: set[str] = set()
+            if found is not None:
+                try:
+                    blocked = await _competitor_keyword_blocklist(session, run_uuid)
+                except Exception:  # noqa: BLE001 — filtering is best-effort; keep the demand-map targets
+                    logger.exception(
+                        "Competitor keyword blocklist for %s could not be read; using unfiltered targets",
+                        asset_id,
+                    )
     except Exception:  # noqa: BLE001 — keyword targets improve a draft; they never block one
         logger.exception("Keyword targets for %s could not be read; generating without them", asset_id)
         return None
     if found is None:
         return None
-    targets = keyword_rank.targets_from_entry(found[0].value)
+    targets = keyword_rank.targets_from_entry(keyword_selection.apply(found[0].value))
+    if blocked:
+        targets = keyword_rank.without_keywords(targets, blocked)
     return targets if targets.groups else None
+
+
+async def _seo_architecture(
+    run_id: str | None,
+    asset_id: str,
+    *,
+    client_profile: dict[str, str] | None = None,
+) -> seo_architecture_service.Architecture | None:
+    """This run's URL map + hub/spoke plan, or None. Built from `keyword_clusters` when missing so
+    runs that clustered before this module existed still get a map on the next consumer stage."""
+    if not run_id or asset_id not in seo_architecture_service.CONSUMER_ASSETS:
+        return None
+    try:
+        run_uuid = uuid.UUID(run_id)
+        async with get_sessionmaker()() as session:
+            found = await _latest_context_entry(session, run_uuid, seo_architecture_service.CONTEXT_KEY)
+            if found is not None:
+                arch = seo_architecture_service.from_stored(found[0].value)
+                if arch is not None:
+                    return arch
+            keywords = await _latest_context_entry(session, run_uuid, KEYWORD_CONTEXT_KEY)
+            if keywords is None or not isinstance(keywords[0].value, dict):
+                return None
+            website = ""
+            if client_profile:
+                website = str(client_profile.get("website_url") or client_profile.get("website") or "")
+            arch = seo_architecture_service.build_from_keyword_entry(
+                keyword_selection.apply(keywords[0].value), website=website
+            )
+            if arch is None:
+                return None
+            version = await _next_version(session, run_uuid, seo_architecture_service.CONTEXT_KEY)
+            session.add(
+                ContextEntry(
+                    run_id=run_uuid,
+                    context_key=seo_architecture_service.CONTEXT_KEY,
+                    version=version,
+                    value=arch.to_context_value(),
+                    written_by_asset_id=None,
+                )
+            )
+            await session.commit()
+            return arch
+    except Exception:  # noqa: BLE001 — the map improves a draft; it never blocks one
+        logger.exception("SEO architecture for %s could not be read; generating without it", asset_id)
+        return None
 
 
 async def _business_facts(run_id: str | None, client_profile: dict[str, str], asset_id: str, phase: str = DEFAULT_PHASE):
@@ -5005,6 +5255,12 @@ async def _generation_sse_stream(
         if keyword_targets is not None:
             business_brief += keyword_rank.targets_block(keyword_targets, asset_id)
             yield _sse(keyword_targets.as_event())
+
+        # Hub/spoke URL map from the same keyword report — SearchFit rules on measured clusters.
+        architecture = await _seo_architecture(run_id, asset_id, client_profile=client_profile)
+        if architecture is not None:
+            business_brief += seo_architecture_service.architecture_block(architecture, asset_id)
+            yield _sse(architecture.as_event())
 
         # A Pillar Page variant: what it measured (free page reads) and the lens it takes, in the
         # tail beside the business brief. A variant with nothing to work from fails here, before any

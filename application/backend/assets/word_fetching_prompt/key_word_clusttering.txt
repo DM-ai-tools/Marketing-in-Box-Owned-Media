@@ -75,8 +75,10 @@ Validation rules:
 1. One **Primary** keyword per cluster; no duplicate primaries across clusters
 2. **Intent** and **content_type** present on every cluster
 3. Flag single-keyword clusters as warnings (orphan risk)
-4. Title selection uses SERP patterns + `headline_framework` scoring — never invent stats
- 
+4. **Cluster `name` is a publishable headline from `COMPREHENSIVE_HEADLINE_FRAMEWORK`** — not a
+   topic label. Declare `framework_formula` and at least two Part 2 `curiosity_elements`. Never
+   invent stats the keyword data does not support.
+
 Never invent search volume — use provided metrics only.
  
 **An invented keyword must still pass Step 2's relevance check, not just lose its metrics.** If the LLM's clustering response names a term that isn't in the cleaned/relevant set built in Step 2, it never went through "Check Relevance" — nulling its volume/difficulty (`ungrounded: true`) isn't enough on its own, because a plausible-sounding but off-topic invention could otherwise become a cluster's public-facing `primary_keyword` unchallenged. `run_keyword_clustering` re-runs `keyword_relevance.evaluate_keyword` against any ungrounded term before it's allowed into a cluster; if it fails, it's dropped (recorded in `llm_invented_dropped`) and the next grounded keyword is promoted to Primary. A cluster left with zero surviving keywords is dropped entirely, not published with an invented placeholder.
@@ -117,7 +119,14 @@ For each cluster, recommend:
 - **Primary keyword**: Highest-value keyword in cluster
 - **Supporting keywords**: Secondary keywords to include
 - **Recommended URL** slug
- 
+- **Cluster name (headline)**: Built from COMPREHENSIVE_HEADLINE_FRAMEWORK (injected in the
+  system prompt). A clickable **service-page** headline that carries the primary keyword naturally
+  and can be reused as a pillar-page H1 or title angle — never a taxonomy label, and never a
+  tool/software/product shopping headline unless the client's seeded service is itself a product.
+  Match Part 3 to `content_type` (landing → landing page for BOFU service pages; blog/guide/
+  listicle/comparison → supporting articles; offer-shaped → offer/promotion). Record
+  `framework_formula` and `curiosity_elements`.
+
 ## Structured JSON (when called by Radius OS agents)
  
 ```json
@@ -149,9 +158,11 @@ For each cluster, recommend:
   ],
   "clusters": [
     {
-      "name": "Cluster Name",
+      "name": "How To [Benefit] In [Timeframe] — a publishable headline from the framework, not a topic label",
       "intent": "informational|commercial|transactional",
       "funnel": "TOFU|MOFU|BOFU",
+      "framework_formula": "Part 3 blog template or Part 8 formula family used, named",
+      "curiosity_elements": ["SPECIFICITY", "NEW METHODOLOGY"],
       "recommended_content": "Comprehensive Guide",
       "content_type": "guide|blog|landing|comparison|listicle",
       "recommended_url": "/blog/slug",
@@ -185,27 +196,35 @@ For each cluster, recommend:
  
 ## Clustering Rules
  
-- One cluster = one page. Never target the same cluster with two pages (keyword cannibalization)
+- One cluster = one page about **this client's service offering**. Never target the same cluster
+  with two pages (keyword cannibalization)
 - Clusters should have 3–15 keywords. Too few = merge with another. Too many = split
-- Every cluster needs a clear primary keyword
+- Every cluster needs a clear primary keyword that a buyer of this service would search
+- Never invent or promote tool / software / platform / app / plugin product clusters when the
+  seeded service is an agency or professional service (those searches are a different business)
+- Every cluster `name` is a framework headline (see Step 4) with `framework_formula` +
+  `curiosity_elements` filled — never a bare topic / category label; write it so a later pillar-
+  page build can use it as an H1 or title angle for that service page
 - Branded keywords get their own cluster
 - Question keywords ("how to...", "what is...") can cluster with informational keywords
-- Comparison keywords ("X vs Y") should be separate clusters
+- Comparison keywords ("X vs Y") should be separate clusters **only when both sides are about this
+  service**, not product A vs product B
 - Location-based keywords cluster by location
  
 ## Advanced Patterns
  
 **Modifier-based grouping**:
-- "best [topic]" → Listicle clusters
-- "how to [topic]" → Tutorial clusters
-- "[topic] vs [topic]" → Comparison clusters
-- "[topic] for [audience]" → Audience-specific clusters
-- "[topic] tools/software" → Product/review clusters
+- "best [service]" / "best [service] agency" → commercial service shortlists (not "best [topic] tool")
+- "how to [topic]" → Tutorial clusters about the service
+- "[topic] vs [topic]" → Comparison clusters about service approaches (not SaaS products)
+- "[topic] for [audience]" → Audience-specific service clusters
+- "[topic] tools/software" → **Only** when the client's seeded service is itself a product;
+  otherwise leave those keywords out of every cluster
  
 **Funnel mapping**:
-- TOFU: "what is [topic]" → Awareness
-- MOFU: "best [topic] tools" → Consideration
-- BOFU: "[product] pricing" → Decision
+- TOFU: "what is [service topic]" → Awareness content this client could publish
+- MOFU: "best [service] for [audience]" / comparison of approaches → Consideration
+- BOFU: "[service] pricing" / "[service] services" / hire / agency → Decision / landing page
  
 ## Markdown output format
  
@@ -216,8 +235,10 @@ For each cluster, recommend:
 **Clusters Created**: [count]
 **Orphan Keywords**: [count]
  
-### Cluster 1: [Cluster Name]
+### Cluster 1: [Framework headline — not a topic label]
 **Intent**: ...
+**Headline framework**: [formula]
+**Curiosity elements**: ...
 **Recommended Content**: ...
 **Recommended URL**: /blog/[slug]
  

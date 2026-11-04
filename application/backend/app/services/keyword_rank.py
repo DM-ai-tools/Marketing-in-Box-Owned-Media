@@ -305,6 +305,9 @@ SECONDARY_PLACEMENT: dict[str, str] = {
     "lead_magnet": "the title and subtitle, chapter or section headings, the landing-page copy and the opt-in promise",
     "blog": "H2/H3 headings, the first 100 words, the body paragraphs, the FAQ and the meta description",
     "webinar": "the session title and promise, slide titles, talking points, and the registration page and email copy",
+    "offers": "each ladder rung's name, promise line and proof bullets",
+    "content_marketing_strategy": "topic titles, cluster names, calendar item headlines and the channel briefs",
+    "plan_of_action": "Phase 1–3 page titles, sub-service names and the sitemap expansion rows",
 }
 
 
@@ -318,6 +321,25 @@ def _secondary_duty(asset_id: str | None, targets: KeywordTargets) -> str:
         "of it is acceptable. A secondary keyword that cannot be used without reading as forced is left "
         "out rather than stuffed.\n"
     )
+
+
+def without_keywords(targets: KeywordTargets, blocked: set[str] | frozenset[str]) -> KeywordTargets:
+    """Drop primary/secondary keywords the operator rejected from competitor ranking research.
+
+    A primary that is blocked removes its whole group. A blocked secondary is removed on its own.
+    Match is case-insensitive. Empty `blocked` is a no-op."""
+    if not blocked or not targets.groups:
+        return targets
+    deny = {b.strip().lower() for b in blocked if b and b.strip()}
+    if not deny:
+        return targets
+    groups: list[KeywordGroup] = []
+    for g in targets.groups:
+        if g.primary.keyword.strip().lower() in deny:
+            continue
+        secondary = tuple(k for k in g.secondary if k.keyword.strip().lower() not in deny)
+        groups.append(KeywordGroup(g.primary, secondary))
+    return KeywordTargets(groups, targets.service, targets.country, targets.synonyms)
 
 
 def targets_block(targets: KeywordTargets, asset_id: str | None = None) -> str:

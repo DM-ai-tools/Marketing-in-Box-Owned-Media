@@ -162,7 +162,10 @@ Close with the Phase 1 Funnel Flow (traffic source → entry point → email gat
 emails over N days) → SMS → conversion event), built from the funnel and lead magnet that were
 delivered, and a conversion-potential star rating (1-5 stars) with a one-line justification. Then
 state the Phase 1 keyword footprint: the measured keyword clusters, if supplied, with their combined
-volume.
+volume. When an SEO Architecture Map is supplied in the Phase 1 inputs, restate it under a heading
+exactly titled `## SEO Architecture Map` (URL table + hub-and-spoke links). Nest the hub and each
+spoke as their own sub-headings so the plan tree can draw them. Copy measured volumes only; write
+"not measured" where a figure was not supplied — never invent one.
 
 # STEP 3 — PHASE 2: SUB-SERVICE
 

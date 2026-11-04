@@ -63,7 +63,8 @@ industry-specific; all industry vocabulary comes from the terminology map and th
 headed section, in the order listed, and links to that service's existing page where a URL is given.
 The copy for each section comes from, in this order:
 
-1. **The Improved Page Content**, wherever it already covers that service. It always wins.
+1. **The Improved Page Content**, wherever it already covers that service. It always wins —
+   **except** under the PAGE_VARIANT override below.
 2. **The SOURCE CONTENT block** appended to this input, for a listed service the Improved Page
    Content does not cover. That block is the text of the service's own existing page on the
    client's site. Write the section from it: restate and tighten what it says, in the terminology
@@ -74,11 +75,21 @@ The copy for each section comes from, in this order:
    establish. Specifics the sources do not state are left out of the page, not marked in it, and
    listed under **Confirm before publishing**. Never invent them.
 
+**PAGE_VARIANT override — Outperform competitors.** When the Improved Page Content input begins
+with `N/A — not used by this page variant`, this draft is the competitor variant: ignore "It always
+wins" and do not reconstruct a CRO rewrite. Build coverage and section depth from the PAGE_VARIANT
+beat sheet (and Step 2's ADOPT / EXCEED decisions). Fill every section with this client's services,
+business rules, terminology map, CTAs and other INPUTS facts only — never a competitor's claims or
+copy, and never a CRO audit of the current page. SOURCE CONTENT for a listed service still applies
+when present (it is the client's own page). **Hero / H1 uniqueness:** write a new H1, hero subhead
+and title tag from the beat-sheet angle. Do not reuse or paraphrase any CRO-rewrite headline the
+Beat-your-current-page variant would carry. Same head term is fine; same promise line is not.
+
 This is the one exception to "all vocabulary comes from the content file": the source content is
 the client's own published copy, so writing from it is still not inventing. In the delivery notes,
 list which sections were written from source content and which were kept short for lack of facts,
 so they can be reviewed before publishing. When this input is blank or NONE, the page covers what
-the Improved Page Content covers, exactly as before.
+the Improved Page Content covers, exactly as before — unless the PAGE_VARIANT override applies.
 
 **No reference page.** When Reference Design Source begins `NO REFERENCE PAGE`, the page being built
 does not exist yet and the URL given is the client's main landing page. Take the **brand design
@@ -173,6 +184,11 @@ Component Fallback Preference —
 
 ## STEP 2 — PROCESS THE CONTENT INPUT
 
+When the Improved Page Content begins with `N/A — not used by this page variant`, skip reading a
+rewrite: derive the section list from the PAGE_VARIANT beat sheet and any ADOPT / EXCEED decisions,
+then fill each section from the client's services, business rules, terminology and other INPUTS
+facts (and SOURCE CONTENT where a listed service has it). Otherwise:
+
 Read the Improved Page Content. If it includes a CRO audit, a mode-resolution table, or an
 implementation pack, ignore all of that — design only the final page copy.
 
@@ -199,8 +215,10 @@ a grid holds as many items as the copy has (wrapping to the next row), never pad
 the reference's count.
 
 **Rule 2 — Complete content coverage.** Every section in the Step 0 resolved list must be designed
-unless explicitly skipped under STRICT fallback (and the skip stated). Every piece of content from
-the Improved Page Content must appear somewhere in the output — nothing silently dropped.
+unless explicitly skipped under STRICT fallback (and the skip stated). When a real Improved Page
+Content rewrite was supplied, every piece of it must appear somewhere in the output — nothing
+silently dropped. When it is the PAGE_VARIANT sentinel (`N/A — not used by this page variant`),
+cover every beat-sheet topic instead; there is no CRO rewrite to echo.
 
 **Rule 3 — Images included with real placement logic.** Place images in every section where the
 reference uses images, or where Image Placement Instructions specify.
@@ -245,11 +263,15 @@ order (single H1, logical H2/H3 nesting), descriptive alt text drafted alongside
 placeholder (not just the placeholder description — actual `alt="..."` text), and accordion/FAQ
 components built with proper `aria-expanded` / `aria-controls` semantics if interactive.
 
-**Rule 8 — Real links only.** Every `href` in the page is either a link listed in DESIGN.md's
-Links section, copied character for character, an in-page `#anchor` that matches an `id` on this
-page, or an internal cluster page from the inputs. Never `href="#"`, never an empty href, never a
-`javascript:` link, never a path on the client's site that is not listed. When the copy refers to a
-page the Links section has, link it; when it refers to one it does not, leave the text unlinked.
+**Rule 8 — Real links only; internal linking as per the reference.** Every `href` in the page is
+either a link listed in DESIGN.md's Links section, copied character for character, an in-page
+`#anchor` that matches an `id` on this page, or an internal cluster / service page from the inputs.
+Never `href="#"`, never an empty href, never a `javascript:` link, never a path on the client's
+site that is not listed. Reproduce every header and footer link from Links in the reference's
+order. When the copy refers to a page the Links section (including body / in-page links), Services
+Covered, or Internal Cluster Pages has, link it with descriptive anchor text in that section; when
+it refers to one they do not, leave the text unlinked. Do not leave the body unlinked while the
+reference weaves those same destinations through its content.
 
 **Rule 9 — Deploy-ready.** The page must be publishable as delivered: `<!doctype html>`,
 `<html lang="...">`, charset and viewport meta, `<title>`, meta description, canonical and Open

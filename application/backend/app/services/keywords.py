@@ -51,6 +51,10 @@ logger = logging.getLogger(__name__)
 
 _BACKEND_ROOT = Path(__file__).resolve().parents[2]  # .../application/backend
 _PROMPT_PATH = _BACKEND_ROOT / "assets" / "word_fetching_prompt" / "key_word_clusttering.txt"
+_PROMPTS_DIR = _BACKEND_ROOT / "assets" / "Prompts"
+#: Same document stage generation and `headlines.py` inject. Cluster `name`s are publishable
+#: headlines built from it, not free-form topic labels.
+HEADLINE_FRAMEWORK = "COMPREHENSIVE_HEADLINE_FRAMEWORK.md"
 
 # The prompt's Step 4 preserves each seed's exact / phrase / related / broad keywords. Those are
 # Google-Ads match classes; `dataforseo_client.MATCH_CLASS_ENDPOINTS` maps each to a DataForSEO
@@ -687,6 +691,54 @@ def build_vocabulary(config: KeywordRunConfig) -> set[str]:
 #: Words every seed carries (`_SEED_SUFFIXES`), which say nothing about which service a search is for.
 _GENERIC_SERVICE_TOKENS = frozenset({"service", "agency", "company"})
 
+#: Product / SaaS shopping language. For an agency or professional service these are a different
+#: business (buy a tool) than the client's offering (buy the service). A live AI-optimised SEO run
+#: kept "best seo tool" (~260k/mo) as its top cluster because the head-word gate only needed "seo".
+_PRODUCT_TOKENS = frozenset(
+    {
+        "tool",
+        "tools",
+        "software",
+        "platform",
+        "platforms",
+        "plugin",
+        "plugins",
+        "app",
+        "apps",
+        "saas",
+        "chrome",
+        "extension",
+        "extensions",
+        "download",
+        "downloads",
+        "freeware",
+        "shareware",
+        "addon",
+        "add-on",
+        "add-ons",
+    }
+)
+
+
+def service_sells_a_product(config: KeywordRunConfig) -> bool:
+    """True when a seeded service name itself is a product (tool / software / platform / app)."""
+    for service in config.services:
+        if {singular(t) for t in tokens(normalize(service))} & _PRODUCT_TOKENS:
+            return True
+    return False
+
+
+def is_product_search(keyword: str, config: KeywordRunConfig) -> bool:
+    """A product/tool shopping query for a client that sells a service, not a product.
+
+    Dropped in the clean pipeline so tool comparisons cannot become the demand map's top cluster
+    or a pillar-page headline. Clients whose service name *is* a product keep these searches.
+    Normalises first: cluster names arrive title-cased with punctuation ("Best SEO Tool…").
+    """
+    if service_sells_a_product(config):
+        return False
+    return bool({singular(t) for t in tokens(normalize(keyword))} & _PRODUCT_TOKENS)
+
 
 def on_service(keyword: str, config: KeywordRunConfig) -> bool:
     """A search is about the service when it holds a service's head word ("seo" for "AI optimised
@@ -694,7 +746,13 @@ def on_service(keyword: str, config: KeywordRunConfig) -> bool:
 
     `is_relevant` accepts any one shared word, and the broad ideas DataForSEO returns for a seed
     beginning "ai" are AI in general: a live build for AI-optimised SEO ranked "ai detector",
-    "character ai" and "google ai" as its top primaries, and those became the CRO's targets."""
+    "character ai" and "google ai" as its top primaries, and those became the CRO's targets.
+
+    Product/tool shopping queries are refused separately by `is_product_search` — they often hold
+    the head word ("best seo tool") and are not this client's offer.
+    """
+    if is_product_search(keyword, config):
+        return False
     every = {singular(t) for t in tokens(keyword)}
     kw = every - _GENERIC_SERVICE_TOKENS
     if not kw:
@@ -745,6 +803,15 @@ def run_keyword_pipeline(
         if not is_relevant(keyword, vocabulary):
             dropped.append(
                 {"keyword": keyword, "stage": "check_relevance", "reason": "no service/seed token overlap"}
+            )
+            continue
+        if is_product_search(keyword, config):
+            dropped.append(
+                {
+                    "keyword": keyword,
+                    "stage": "check_relevance",
+                    "reason": "product/tool search, not this service offering",
+                }
             )
             continue
         if not on_service(keyword, config):
@@ -860,6 +927,57 @@ def load_clustering_prompt() -> str:
     return text.strip()
 
 
+def _load_headline_framework() -> str:
+    """The headline framework, validated against the known-bad PDF conversion.
+
+    Same check `headlines._load_framework` uses: a ToUnicode-blind extract turns every digit into
+    U+00FD and destroys the per-channel character limits the naming rules depend on.
+    """
+    from app.services.generation import _validate_reference_doc
+
+    text = (_PROMPTS_DIR / HEADLINE_FRAMEWORK).read_text(encoding="utf-8").strip()
+    _validate_reference_doc(HEADLINE_FRAMEWORK, text)
+    return text
+
+
+def clustering_system_blocks() -> list[dict[str, Any]]:
+    """Cached system blocks for the clustering call: framework first, then the clustering rules.
+
+    Framework sits first and alone so its prefix stays byte-identical with other callers that inject
+    the same document under a different wrapper — and so the volatile half (business + keywords)
+    stays in the user message after the breakpoints. Both blocks use the 1h TTL: clustering runs
+    are separated by operator work the way headline gates are.
+    """
+    framework = (
+        "Cluster names are publishable headlines for **this client's service pages** (pillar / "
+        "landing / supporting articles about the services in DATA). The document below is the "
+        "canonical headline framework: every cluster's `name` must be built from it — a headline a "
+        "buyer of that service would click, reusable as a pillar-page H1 or title angle. Never a "
+        "topic label, and never a product/tool/software shopping headline unless the client's "
+        "service itself is a product. Pick the Part 3 section that matches the cluster's "
+        "`content_type` (landing → landing page headlines for BOFU service pages; blog / guide / "
+        "listicle → blog post headlines for supporting content; offer-shaped → offer/promotion). "
+        "Name the Part 3 formula family or Part 8 template in `framework_formula`, and list at "
+        "least two Part 2 curiosity elements in `curiosity_elements`. Weave the primary keyword in "
+        "naturally; never invent stats, volumes or proof the keyword data does not support.\n\n"
+        f"===== BEGIN assets/Prompts/{HEADLINE_FRAMEWORK} =====\n"
+        f"{_load_headline_framework()}\n"
+        f"===== END assets/Prompts/{HEADLINE_FRAMEWORK} ====="
+    )
+    return [
+        {
+            "type": "text",
+            "text": framework,
+            "cache_control": {"type": "ephemeral", "ttl": _CACHE_TTL},
+        },
+        {
+            "type": "text",
+            "text": load_clustering_prompt(),
+            "cache_control": {"type": "ephemeral", "ttl": _CACHE_TTL},
+        },
+    ]
+
+
 def extract_json(text: str) -> dict:
     """Pull the JSON object out of the response, fenced or not."""
     fence = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
@@ -881,7 +999,7 @@ async def cluster_with_claude(
 ) -> dict:
     """One call. Returns the parsed cluster report."""
     client = get_client()
-    system_prompt = load_clustering_prompt()
+    system = clustering_system_blocks()
 
     payload = {
         "business": {
@@ -910,6 +1028,14 @@ async def cluster_with_claude(
         Every volume and difficulty below came from the keyword provider. Use those numbers only;
         where a value is null, leave it null rather than estimating it.
 
+        Every cluster must be about the client's named service(s) in DATA — pages this business
+        could publish. Do not create tool, software, platform or product-comparison clusters unless
+        a seeded service is itself a product. Primaries and names must stay on that offer.
+
+        Every cluster's `name` is a publishable headline from the COMPREHENSIVE HEADLINE FRAMEWORK
+        in the system prompt — usable later as a pillar-page H1 / title angle, not a topic label.
+        Fill `framework_formula` and `curiosity_elements` for each cluster.
+
         Return ONE JSON object in the "Structured JSON" shape defined in your instructions —
         `total_keywords`, `clusters_created`, `orphan_count`, `services_clustered`,
         `seeds_clustered_by_service`, `service_clusters`, `clusters`, `orphans`,
@@ -930,20 +1056,14 @@ async def cluster_with_claude(
     #
     # Nothing consumes the deltas: the caller wants one parsed JSON object, not progress. Streaming
     # here is purely how a long generation is transported.
-    # `system` is a list with a cache breakpoint rather than a bare string: the clustering prompt is
-    # read from disk unchanged on every call, so without one each call pays full input price to
-    # re-read the same document. The volatile half (the business block and the keyword payload) is
-    # all in the user message, after the breakpoint, which is what keeps the prefix stable.
+    # `system` is two cached blocks (framework, then clustering rules), not a bare string: both are
+    # read from disk unchanged on every call, so without breakpoints each call pays full input
+    # price to re-read them. The volatile half (the business block and the keyword payload) is all
+    # in the user message, after the breakpoints, which is what keeps the prefixes stable.
     async with client.messages.stream(
         model=MODEL,
         max_tokens=_MAX_TOKENS,
-        system=[
-            {
-                "type": "text",
-                "text": system_prompt,
-                "cache_control": {"type": "ephemeral", "ttl": _CACHE_TTL},
-            }
-        ],
+        system=system,
         thinking={"type": "adaptive"},
         output_config={"effort": _EFFORT},
         messages=[{"role": "user", "content": user_message}],
@@ -979,14 +1099,19 @@ async def cluster_with_claude(
 
 
 def validate_clusters(
-    report: dict, clean: list[CleanKeyword], vocabulary: set[str]
+    report: dict,
+    clean: list[CleanKeyword],
+    vocabulary: set[str],
+    config: KeywordRunConfig | None = None,
 ) -> tuple[dict, list[str], list[dict]]:
     """The prompt's Step 3, including the ungrounded-keyword rule.
 
     A term the model names that is not in the cleaned set never passed "Check Relevance", so it is
     re-evaluated here. Failing terms are dropped into `llm_invented_dropped` and the next grounded
     keyword is promoted to Primary; a cluster left with nothing is removed rather than published
-    with an invented placeholder.
+    with an invented placeholder. When `config` is given, product/tool searches and off-service
+    inventions are refused the same way the clean pipeline refuses them — otherwise Claude can put
+    "best seo tool" back into a cluster that cleaning already emptied of tools.
     """
     grounded = {kw.keyword: kw for kw in clean}
     warnings: list[str] = []
@@ -1007,6 +1132,16 @@ def validate_clusters(
                 if not is_relevant(keyword, vocabulary):
                     invented_dropped.append({"keyword": keyword, "cluster": name, "reason": "failed relevance"})
                     continue
+                if config is not None and is_product_search(keyword, config):
+                    invented_dropped.append(
+                        {"keyword": keyword, "cluster": name, "reason": "product/tool search, not this service offering"}
+                    )
+                    continue
+                if config is not None and not on_service(keyword, config):
+                    invented_dropped.append(
+                        {"keyword": keyword, "cluster": name, "reason": "shares one word, not the service"}
+                    )
+                    continue
                 # Relevant but ungrounded: it survives with no metrics of its own.
                 entry["volume"] = None
                 entry["difficulty"] = None
@@ -1015,6 +1150,13 @@ def validate_clusters(
                     {"keyword": keyword, "cluster": name, "reason": "ungrounded, kept without metrics"}
                 )
             else:
+                # A report clustered before the product gate still carries tool rows in `clean`;
+                # refuse them here so a rebuild of an old payload cannot republish them.
+                if config is not None and is_product_search(keyword, config):
+                    invented_dropped.append(
+                        {"keyword": keyword, "cluster": name, "reason": "product/tool search, not this service offering"}
+                    )
+                    continue
                 entry["keyword"] = match.keyword
                 entry["volume"] = match.volume
                 entry["difficulty"] = match.difficulty
@@ -1049,6 +1191,15 @@ def validate_clusters(
             warnings.append(f"cluster '{name}': missing intent")
         if not cluster.get("content_type"):
             warnings.append(f"cluster '{name}': missing content_type")
+        if not str(cluster.get("framework_formula") or "").strip():
+            warnings.append(f"cluster '{name}': missing framework_formula (headline framework)")
+        curiosity = cluster.get("curiosity_elements")
+        if not isinstance(curiosity, list) or len([c for c in curiosity if str(c).strip()]) < 2:
+            warnings.append(f"cluster '{name}': curiosity_elements must list at least two Part 2 elements")
+        if config is not None and is_product_search(name, config):
+            warnings.append(
+                f"cluster '{name}': name reads as a product/tool headline — rewrite around the client's service"
+            )
         if len(kept) == 1:
             warnings.append(f"cluster '{name}': single-keyword cluster (orphan risk)")
 
@@ -1091,9 +1242,17 @@ def to_markdown(report: dict, config: KeywordRunConfig) -> str:
     ]
 
     for index, cluster in enumerate(report.get("clusters") or [], start=1):
+        curiosity = cluster.get("curiosity_elements")
+        curiosity_text = (
+            ", ".join(str(c).strip() for c in curiosity if str(c).strip())
+            if isinstance(curiosity, list)
+            else "—"
+        )
         lines += [
             f"### Cluster {index}: {cluster.get('name', '(unnamed)')}",
             f"**Intent**: {cluster.get('intent', '—')}  |  **Funnel**: {cluster.get('funnel', '—')}",
+            f"**Headline framework**: {cluster.get('framework_formula', '—') or '—'}",
+            f"**Curiosity elements**: {curiosity_text or '—'}",
             f"**Recommended Content**: {cluster.get('recommended_content', '—')} "
             f"({cluster.get('content_type', '—')})",
             f"**Recommended URL**: {cluster.get('recommended_url', '—')}",
@@ -1296,7 +1455,7 @@ async def build_keyword_report(config: KeywordRunConfig, on_usage: OnUsage | Non
     report = await cluster_with_claude(config, hierarchy, clean, on_usage)
     report.setdefault("total_keywords", len(clean))
     report["service_hierarchy"] = hierarchy
-    report, warnings, _ = validate_clusters(report, clean, vocabulary)
+    report, warnings, _ = validate_clusters(report, clean, vocabulary, config)
     for warning in warnings:
         logger.info("Cluster validation: %s", warning)
 

@@ -26,6 +26,9 @@ export const KIND_TAG: Record<PlanNodeKind, string> = {
   book: "BOOK",
   podcast: "PODCAST",
   strategy: "STRATEGY",
+  "seo-map": "SEO MAP",
+  hub: "HUB",
+  spoke: "SPOKE",
   detail: "",
 };
 
@@ -65,6 +68,9 @@ const KIND_FAMILY: Record<PlanNodeKind, PlanFamily> = {
   book: "content",
   podcast: "content",
   strategy: "strategy",
+  "seo-map": "strategy",
+  hub: "content",
+  spoke: "content",
 };
 
 export const FAMILY_LABEL: Record<PlanFamily, string> = {

@@ -625,8 +625,9 @@ def links_markdown(manifest: LinkManifest | None) -> list[str]:
             out += _social_icon_lines(manifest)
     if manifest.group("body"):
         out += [
-            "The in-page links are offered for reuse where the new copy refers to the same page; they "
-            "are not required.",
+            "Reuse every in-page link whose destination the new copy still covers — same href, "
+            "descriptive anchor text in the section that topic belongs to (not stacked only in the "
+            "footer). Skip only destinations the new content does not mention.",
             "",
         ]
     for note in manifest.notes:
