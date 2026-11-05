@@ -2420,7 +2420,7 @@ async function fixInPlace(
     if (!truncated && fixed.trim() && report && report.applied === 0) {
       // Every edit was refused (or none was proposed): the draft is unchanged, so re-scoring it would
       // only show the judge's run-to-run noise as if the fix had made it worse.
-      const why = report.rejected[0]?.[1] ?? report.skipped[0]?.[1] ?? "";
+      const why = report.rejected[0]?.[1] ?? report.skipped?.[0]?.[1] ?? "";
       patchMessage(get, set, messageId, {
         fixing: false,
         fixNote: `None of the fixes could be applied, so the draft is unchanged and was not re-checked.${why ? ` ${why}` : ""}`,
