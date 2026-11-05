@@ -28,6 +28,8 @@ import { topicGatesFor } from "./topicSuggestions";
  */
 
 export const KEYWORD_USAGE_LABEL = "Keyword data";
+/** How many times one targeted keyword may appear in the asset. The "In this asset" column marks anything past this. */
+export const KEYWORD_USES_IN_ASSET = 2;
 const KEYWORD_USAGE_HEADING = `## ${KEYWORD_USAGE_LABEL}`;
 
 export function isKeywordUsageHeading(line: string): boolean {
@@ -254,10 +256,13 @@ export function renderKeywordUsage(usage: KeywordUsage | null): string {
   }
   if (architecture) {
     const hub = architecture.pages.find((p) => p.role === "hub");
+    const withMeta = architecture.pages.filter((p) => p.title_tag || p.meta_description).length;
     how.push(
       `- **SEO architecture.** ${architecture.pages.length} pages were mapped from the keyword clusters` +
         (hub ? ` (hub: ${hub.cluster})` : "") +
-        ` with ${architecture.links.length} hub-and-spoke internal links planned.`,
+        ` with ${architecture.links.length} hub-and-spoke internal links planned` +
+        (withMeta ? ` and a title tag + meta description per URL` : "") +
+        ".",
     );
   }
 
@@ -341,14 +346,16 @@ export function renderKeywordUsage(usage: KeywordUsage | null): string {
       "",
       "### Keywords used in this asset",
       "",
-      "Counted in this asset's own text (whole words, any case).",
+      "Counted in this asset's own text (whole words, any case). Each keyword is used at most twice.",
       "",
       "| Keyword | Type | Searches/mo | In this asset |",
       "| --- | --- | --- | --- |",
       targeted
         .map(({ keyword, type }) => {
           const n = keywordMentions(text, keyword.keyword);
-          return `| ${cell(keyword.keyword)} | ${type} | ${num(keyword.volume)} | ${n ? `✓ ${n}×` : "not used"} |`;
+          const shown =
+            n === 0 ? "not used" : n <= KEYWORD_USES_IN_ASSET ? `✓ ${n}×` : `${n}×, over the limit of ${KEYWORD_USES_IN_ASSET}`;
+          return `| ${cell(keyword.keyword)} | ${type} | ${num(keyword.volume)} | ${shown} |`;
         })
         .join("\n"),
     );
@@ -390,7 +397,8 @@ export function renderKeywordUsage(usage: KeywordUsage | null): string {
       "",
       "### SEO architecture map",
       "",
-      "One keyword cluster → one page. URLs are existing pages on the client's site or proposed slugs.",
+      "One keyword cluster → one page. URLs are existing pages on the client's site or proposed slugs. " +
+        "Title tags (≤60) and meta descriptions (≤155) are proposed from each page's primary keyword.",
       "",
       "| Role | Cluster | Primary keyword | Intent | Status | URL | Volume/mo |",
       "| --- | --- | --- | --- | --- | --- | --- |",
@@ -398,6 +406,17 @@ export function renderKeywordUsage(usage: KeywordUsage | null): string {
         .map(
           (p) =>
             `| ${cell(p.role)} | ${cell(p.cluster)} | ${cell(p.primary_keyword)} | ${cell(p.intent)} | ${cell(p.status)} | ${cell(p.url)} | ${num(p.volume)} |`,
+        )
+        .join("\n"),
+      "",
+      "### Page meta tags",
+      "",
+      "| Role | URL | Title tag | Meta description |",
+      "| --- | --- | --- | --- |",
+      architecture.pages
+        .map(
+          (p) =>
+            `| ${cell(p.role)} | ${cell(p.url)} | ${cell(p.title_tag)} | ${cell(p.meta_description)} |`,
         )
         .join("\n"),
     );

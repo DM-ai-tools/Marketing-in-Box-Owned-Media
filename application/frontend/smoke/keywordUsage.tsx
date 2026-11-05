@@ -204,7 +204,8 @@ const generation = (assetId: string, extra: Partial<PipelineMessage> = {}) =>
   );
   ok("a primary with no secondaries shows a dash and a fall", section.includes("| bedside tables | 6,600 | 726 | -8% | — |"));
   ok("the ranked table is there", section.includes("| 1 | bedroom accessories | 8,100 | 30 | 891 | +12% | 59 |"));
-  ok("usage is counted in the asset's own words, through markup, case, hyphens and plurals", section.includes("| bedroom accessories | Primary | 8,100 | ✓ 4× |"), section);
+  ok("usage is counted in the asset's own words, through markup, case, hyphens and plurals", section.includes("| bedroom accessories | Primary | 8,100 | 4×, over the limit of 2 |"), section);
+  ok("two uses is within the limit", section.includes("Each keyword is used at most twice."));
   ok("an unused keyword says so", section.includes("| bedside tables | Primary | 6,600 | not used |"));
   ok("a secondary is labelled as one", section.includes("| buy bedroom accessories | Secondary | 320 | ✓ 1× |"));
   ok("the writing line counts what was used", section.includes("2 of the 4 appear in it"), section);

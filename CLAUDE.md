@@ -990,14 +990,18 @@ fields; relevance, brand and intent stay in `keywords.py`.
 `app/services/seo_architecture.py` turns the run's `keyword_clusters` into a site map: one cluster →
 one page, a hub (pillar), spokes, and internal-link edges with keyword anchors. Volumes and cluster
 intent/URLs come from the keyword report; missing intent is guessed from modifiers (`how to`, `vs`,
-`best`, `near me`). Stub-provider placeholders never become a map.
+`best`, `near me`). Stub-provider placeholders never become a map. Each mapped URL also gets a
+proposed **title tag** (≤60) and **meta description** (≤155), built from the primary keyword and
+intent — never a client claim — so page-writing stages and the Plan of Action can use them as-is.
 
 - **Stored** as phase-scoped `seo_architecture` when keywords are built (and backfilled on reuse /
-  first consumer stage if an older run has clusters but no map).
+  first consumer stage if an older run has clusters but no map). Older maps without meta are filled
+  on read (`from_stored` → `_fill_page_meta`).
 - **Prompt block** `SEO_ARCHITECTURE` rides next to `KEYWORD_TARGETS` for: `pillar_page`, `funnel`,
   `funnel_hub_media`, `lead_magnet`, `offers`, `blog`, `content_marketing_strategy`, `plan_of_action`.
 - **Plan of Action** gets the markdown in `plan_phase1_assets` and must restate `## SEO Architecture
-  Map` so `planTree` draws hub/spoke nodes. Deliverable appendix: Keyword data → SEO architecture map.
+  Map` so `planTree` draws hub/spoke nodes. Deliverable appendix: Keyword data → SEO architecture map
+  (URL table + Page meta tags).
 - **Never invent hosts or volumes.** Existing service-scan URLs win over proposed slugs.
 - `tests/test_seo_architecture.py` pins it.
 
@@ -1099,8 +1103,8 @@ and every stage writes with the top of that ranking.
   - the primary/secondary table;
   - the top 15 ranked;
   - **Keywords used in this asset:** each targeted keyword counted in the asset's own text
-    (`keywordMentions`: whole words, markup stripped, case, hyphens, singular/plural), never
-    judged.
+    (`keywordMentions`: whole words, markup stripped, case, hyphens, singular/plural). Each keyword
+    is used at most twice; a third use is marked over the limit. The count itself is never judged.
 - `tests/test_keyword_rank.py` and `smoke/keywordUsage.tsx` pin it. `conftest.py` stubs
   `service_synonyms.synonyms_for`, because the Anthropic key in `.env` would otherwise make it live.
 

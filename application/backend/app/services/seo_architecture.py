@@ -36,6 +36,9 @@ CONSUMER_ASSETS: frozenset[str] = frozenset(
 
 _MAX_PAGES = 12
 _MAX_LINKS = 40
+#: SERP-safe lengths. A title past 60 and a description past 155 are truncated in the map.
+_TITLE_LIMIT = 60
+_META_LIMIT = 155
 
 # SearchFit-style intent / content-type when the cluster row is missing them.
 _INTENT_RULES: tuple[tuple[re.Pattern[str], str, str], ...] = (
@@ -65,6 +68,10 @@ class MappedPage:
     url: str
     status: str  # existing | proposed
     role: str  # hub | spoke | support
+    #: Proposed `<title>` for this URL (≤60 chars). Built from the primary keyword, never a client claim.
+    title_tag: str = ""
+    #: Proposed meta description for this URL (≤155 chars). Same rule.
+    meta_description: str = ""
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -109,7 +116,8 @@ class Architecture:
             f"**Internal links planned**: {len(self.links)}",
             "",
             "One keyword cluster → one page. Volumes are measured (DataForSEO); URLs are either on "
-            "the client's site or proposed slugs — never invented hosts.",
+            "the client's site or proposed slugs — never invented hosts. Title tags (≤60) and meta "
+            "descriptions (≤155) are proposed from the primary keyword for each URL — not client claims.",
             "",
             "### URL map",
             "",
@@ -122,6 +130,17 @@ class Architecture:
                 f"| {p.role} | {p.cluster} | {p.primary_keyword} | {p.intent or '—'} | "
                 f"{p.content_type or '—'} | {p.status} | {p.url} | {vol} |"
             )
+        lines += [
+            "",
+            "### Page meta tags",
+            "",
+            "| Role | URL | Title tag | Meta description |",
+            "|------|-----|-----------|------------------|",
+        ]
+        for p in self.pages:
+            title = (p.title_tag or "—").replace("|", "/")
+            meta = (p.meta_description or "—").replace("|", "/")
+            lines.append(f"| {p.role} | {p.url} | {title} | {meta} |")
         lines += ["", "### Hub and spoke", ""]
         hub = self.hub
         if hub:
@@ -197,10 +216,13 @@ def architecture_block(arch: Architecture | None, asset_id: str | None = None) -
     page_lines = []
     for p in arch.pages:
         vol = f"{p.volume:,}/mo" if isinstance(p.volume, int) else "volume not measured"
+        title = p.title_tag or "(no title yet)"
+        meta = p.meta_description or "(no meta description yet)"
         page_lines.append(
             f"- [{p.role}] {p.cluster}: primary `{p.primary_keyword}` ({vol}); "
             f"intent={p.intent or '—'}; type={p.content_type or '—'}; "
-            f"{p.status} URL `{p.url}`"
+            f"{p.status} URL `{p.url}`; "
+            f"title tag `{title}`; meta description `{meta}`"
         )
     link_lines = [
         f"- From `{e.from_url}` → `{e.to_url}` using anchor \"{e.anchor}\" ({e.reason})"
@@ -228,24 +250,28 @@ def _asset_duty(asset_id: str | None) -> str:
     duties = {
         "pillar_page": (
             "For this pillar page: treat the hub row as this page's URL when it is `existing`, else "
-            "use the proposed slug. Link out to every spoke URL listed (descriptive anchors, never "
-            "\"click here\"). Cover the hub cluster's primary keyword in the H1 and the spokes' "
-            "keywords in H2 sections or cluster cards.\n"
+            "use the proposed slug. Use that row's title tag and meta description for `<title>` and "
+            "the meta description (trim only to keep them under 60 / 155 characters). Link out to "
+            "every spoke URL listed (descriptive anchors, never \"click here\"). Cover the hub "
+            "cluster's primary keyword in the H1 and the spokes' keywords in H2 sections or cluster "
+            "cards.\n"
         ),
         "blog": (
             "For this blog: pick the spoke (or support) row whose primary keyword matches the chosen "
-            "topic. Link up to the hub pillar and across to 1–2 related spokes with keyword-relevant "
-            "anchors.\n"
+            "topic. Use that row's title tag and meta description for the post. Link up to the hub "
+            "pillar and across to 1–2 related spokes with keyword-relevant anchors.\n"
         ),
         "content_marketing_strategy": (
             "For the content strategy: use this map as the topical cluster plan — one calendar item "
-            "per page row, hub first, then spokes by volume. State the internal-link rules (spoke→hub, "
-            "related spokes) explicitly.\n"
+            "per page row, hub first, then spokes by volume. Carry each row's title tag and meta "
+            "description into the calendar brief. State the internal-link rules (spoke→hub, related "
+            "spokes) explicitly.\n"
         ),
         "funnel": (
             "For the funnel: map awareness steps to informational clusters, consideration to commercial "
             "ones, and conversion to transactional / landing rows. Landing URLs must be ones on this "
-            "map (existing or proposed).\n"
+            "map (existing or proposed). Where a step is a page, use that row's title tag and meta "
+            "description.\n"
         ),
         "funnel_hub_media": (
             "For hub & media: the hub page is the SEO hub above; spokes are the topic pages the hub "
@@ -262,8 +288,9 @@ def _asset_duty(asset_id: str | None) -> str:
         ),
         "plan_of_action": (
             "For the Plan of Action: include a section headed exactly `## SEO Architecture Map` that "
-            "restates this hub-and-spoke map (URL table + link list). Under Phase 3 sitemap work, "
-            "nest each proposed URL as its own heading so the plan tree can draw it. Do not invent "
+            "restates this hub-and-spoke map (URL table, page meta tags, and link list). Under Phase 3 "
+            "sitemap work, nest each proposed URL as its own heading so the plan tree can draw it, and "
+            "restate each page's title tag and meta description under that heading. Do not invent "
             "volumes — copy the measured ones, or write \"not measured\".\n"
         ),
     }
@@ -277,6 +304,8 @@ def from_stored(value: Any) -> Architecture | None:
     pages_raw = value.get("pages") or []
     if not pages_raw:
         return None
+    service = str(value.get("service") or "")
+    location = str(value.get("location") or "")
     pages = [
         MappedPage(
             cluster=str(p.get("cluster") or ""),
@@ -288,12 +317,16 @@ def from_stored(value: Any) -> Architecture | None:
             url=str(p.get("url") or ""),
             status=str(p.get("status") or "proposed"),
             role=str(p.get("role") or "spoke"),
+            title_tag=str(p.get("title_tag") or ""),
+            meta_description=str(p.get("meta_description") or ""),
         )
         for p in pages_raw
         if isinstance(p, dict) and (p.get("cluster") or p.get("primary_keyword"))
     ]
     if not pages:
         return None
+    # A map stored before title/meta existed still gets them on read — same rules as a fresh build.
+    _fill_page_meta(pages, location=location, service=service)
     links = [
         LinkEdge(
             from_url=str(e.get("from_url") or ""),
@@ -307,8 +340,8 @@ def from_stored(value: Any) -> Architecture | None:
         if isinstance(e, dict) and e.get("from_url") and e.get("to_url")
     ]
     return Architecture(
-        service=str(value.get("service") or ""),
-        location=str(value.get("location") or ""),
+        service=service,
+        location=location,
         fingerprint=str(value.get("config_fingerprint") or ""),
         pages=pages,
         links=links,
@@ -363,6 +396,7 @@ def build_from_keyword_entry(
         return None
 
     _assign_roles(pages)
+    _fill_page_meta(pages, location=location, service=service)
     links = _hub_spoke_links(pages)
     return Architecture(
         service=service,
@@ -506,6 +540,100 @@ def _assign_roles(pages: list[MappedPage]) -> None:
             p.role = "support"
         else:
             p.role = "spoke"
+
+
+def _fill_page_meta(pages: list[MappedPage], *, location: str = "", service: str = "") -> None:
+    """Propose a title tag and meta description per URL. Skips a page that already has both."""
+    for page in pages:
+        if page.title_tag and page.meta_description:
+            continue
+        title, meta = page_meta(
+            primary=page.primary_keyword,
+            cluster=page.cluster,
+            intent=page.intent,
+            content_type=page.content_type,
+            location=location,
+            service=service,
+            role=page.role,
+        )
+        if not page.title_tag:
+            page.title_tag = title
+        if not page.meta_description:
+            page.meta_description = meta
+
+
+def page_meta(
+    *,
+    primary: str,
+    cluster: str = "",
+    intent: str = "",
+    content_type: str = "",
+    location: str = "",
+    service: str = "",
+    role: str = "spoke",
+) -> tuple[str, str]:
+    """Deterministic `<title>` and meta description from the measured keyword — never a client claim.
+
+    Lengths match the scorer's SERP limits (60 / 155). The primary keyword is always present.
+    """
+    keyword = (primary or cluster or "page").strip()
+    phrase = _display_keyword(keyword)
+    where = f" in {location.strip()}" if location.strip() else ""
+    intent_l = (intent or "").strip().lower()
+    type_l = (content_type or "").strip().lower()
+    is_hub = role == "hub" or any(t in type_l for t in ("guide", "pillar", "hub", "comprehensive"))
+
+    if is_hub:
+        title = f"{phrase}: Complete Guide" + (f" | {location.strip()}" if location.strip() else "")
+    elif "listicle" in type_l or (intent_l == "commercial" and re.search(r"\bbest\b", keyword, re.I)):
+        title = f"Best {phrase}{where}"
+    elif "comparison" in type_l or intent_l == "commercial" and re.search(r"\bvs\b", keyword, re.I):
+        title = f"{phrase} Compared" + (f" | {location.strip()}" if location.strip() else "")
+    elif intent_l == "transactional":
+        title = f"{phrase}{where}"
+    elif service.strip() and service.strip().lower() not in keyword.lower():
+        title = f"{phrase} | {service.strip()}"
+    else:
+        title = f"{phrase}{where}" if where else phrase
+    title = _fit_length(title, _TITLE_LIMIT)
+
+    topic = cluster.strip() if cluster.strip() and cluster.strip().lower() != keyword.lower() else ""
+    if intent_l == "informational" or is_hub:
+        meta = (
+            f"Learn {keyword}{where}. A clear guide"
+            + (f" on {topic}" if topic else "")
+            + " covering what it is, how it works, and what to do next."
+        )
+    elif intent_l == "transactional":
+        meta = f"Get {keyword}{where}. See what's included, who it's for, and how to get started."
+    elif intent_l == "commercial":
+        meta = f"Compare {keyword} options{where}. What to look for, common trade-offs, and how to choose."
+    else:
+        meta = f"{phrase}{where}. What to know before you decide, and how this page helps you act on it."
+    meta = _fit_length(meta, _META_LIMIT)
+    return title, meta
+
+
+def _display_keyword(keyword: str) -> str:
+    """Title-case a keyword for a SERP title without shouting short words."""
+    small = {"a", "an", "the", "and", "or", "for", "to", "of", "in", "on", "with", "vs"}
+    words = [w for w in re.split(r"\s+", keyword.strip()) if w]
+    out: list[str] = []
+    for i, word in enumerate(words):
+        lower = word.lower()
+        if i > 0 and lower in small:
+            out.append(lower)
+        else:
+            out.append(lower.upper() if len(lower) <= 2 and lower.isalpha() else lower.capitalize())
+    return " ".join(out) or "Page"
+
+
+def _fit_length(text: str, limit: int) -> str:
+    cleaned = re.sub(r"\s+", " ", (text or "")).strip()
+    if len(cleaned) <= limit:
+        return cleaned
+    cut = cleaned[: limit - 1].rsplit(" ", 1)[0].rstrip(" ,;:.-")
+    return ((cut or cleaned[: limit - 1]).rstrip() + "…")[:limit]
 
 
 def _hub_spoke_links(pages: list[MappedPage]) -> list[LinkEdge]:

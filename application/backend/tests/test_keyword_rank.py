@@ -255,6 +255,8 @@ def test_the_block_names_primaries_secondaries_and_the_rules() -> None:
     assert "Secondary keywords: seo melbourne" in block
     assert "Buyers also call this service: organic search" in block
     assert "never repeat these numbers" in block
+    assert "at most twice" in block
+    assert "never a third time" in keyword_rank.targets_block(keyword_rank.targets_from_entry(STORED), "blog")
     assert block.rstrip().endswith(f"===== END {keyword_rank.TARGETS_BLOCK} =====")
 
 

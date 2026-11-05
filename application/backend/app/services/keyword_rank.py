@@ -317,9 +317,9 @@ def _secondary_duty(asset_id: str | None, targets: KeywordTargets) -> str:
         return ""
     return (
         "- This asset must use its secondary keywords: work every secondary keyword listed above into "
-        f"{placement}, each at least once and worded naturally. Prefer the exact phrase; a close inflection "
-        "of it is acceptable. A secondary keyword that cannot be used without reading as forced is left "
-        "out rather than stuffed.\n"
+        f"{placement}, each once or twice and never a third time, worded naturally. Prefer the exact phrase; a close inflection "
+        "of it is acceptable, and it counts toward the two uses. A secondary keyword that cannot be used "
+        "without reading as forced is left out rather than stuffed.\n"
     )
 
 
@@ -373,8 +373,10 @@ def targets_block(targets: KeywordTargets, asset_id: str | None = None) -> str:
         + "\n"
         f"{also}\n"
         "How to use them:\n"
+        "- Each keyword listed above appears at most twice in the asset, which is what \"In this asset\" "
+        "counts. Once is enough. Do not use any of them a third time.\n"
         "- Lead with primary keyword 1 where this asset has a title, H1, subject line, hook or opening "
-        "line, worded naturally.\n"
+        "line, worded naturally. That appearance counts as one of its two.\n"
         "- Use the other primary keywords in headings and the secondary keywords in body copy, where "
         "they fit what is being said. Never stuff them, list them for their own sake, or force one "
         "where it reads unnaturally.\n"

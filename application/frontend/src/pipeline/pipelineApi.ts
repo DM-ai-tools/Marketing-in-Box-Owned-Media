@@ -1167,6 +1167,10 @@ export interface SeoMappedPage {
   url: string;
   status: string;
   role: string;
+  /** Proposed `<title>` for this URL (≤60 chars), from the primary keyword. */
+  title_tag?: string;
+  /** Proposed meta description for this URL (≤155 chars). */
+  meta_description?: string;
 }
 
 export interface SeoLinkEdge {
